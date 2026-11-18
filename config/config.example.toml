@@ -7,6 +7,8 @@ log_level = "info"
 state_dir = "/data/jarvis/state"
 pid_file = "/run/jarvisd.pid"
 secrets_file = "/data/jarvis/secrets.env"
+# Для устройств без zoneinfo: "MSK-3"; иначе "Europe/Moscow".
+timezone = "Europe/Moscow"
 
 [audio]
 capture_pcm = "default"
@@ -37,7 +39,7 @@ refractory_ms = 2000
 gain = 32
 
 [vad]
-min_speech_ms = 200
+min_speech_ms = 400
 silence_ms = 700
 max_utterance_ms = 12000
 energy_margin_db = 9.0

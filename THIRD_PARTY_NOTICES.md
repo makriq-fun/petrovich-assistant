@@ -65,6 +65,15 @@
 - Если вы используете Piper для обучения, проверьте лицензию конкретного
   голоса; она может отличаться от лицензии кода.
 
+## Встроенный аудиофронтенд
+
+`third_party/tensorflow/.../microfrontend` — исходники TensorFlow Lite
+Microfrontend, © The TensorFlow Authors, лицензия Apache-2.0. Файлы
+`third_party/kissfft` — KISS FFT, © Mark Borgerding, лицензия BSD-3-Clause.
+Исходники используются только для вычисления признаков microWakeWord и не
+содержат моделей. Тексты лицензий — в `third_party/*/LICENSE*` и
+`third_party/tensorflow/LICENSE`.
+
 ## Rust-крейты
 
 Зависимости зафиксированы в `Cargo.lock`. Основные:

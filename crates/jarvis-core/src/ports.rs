@@ -33,6 +33,7 @@ pub trait Chime: Send + Sync {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChimeSound {
     Wake,
+    Done,
     Cancel,
     Timer,
     Error,

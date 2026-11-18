@@ -19,6 +19,7 @@ jarvis-core = { workspace = true }
 jarvis-hw = { workspace = true }
 jarvis-providers = { workspace = true }
 jarvis-tools = { workspace = true }
+libc = { workspace = true }
 jarvis-wakeword = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "process", "fs"] }
 tokio-util = { workspace = true }

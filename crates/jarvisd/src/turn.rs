@@ -14,6 +14,7 @@ use jarvis_core::wav;
 use jarvis_providers::llm::OpenAiLlm;
 use jarvis_providers::stt::Stt;
 use jarvis_providers::tts::{AudioStream, Tts};
+use jarvis_core::ports::{Chime, ChimeSound};
 use jarvis_tools::{ControlAction, ToolContext};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -26,6 +27,7 @@ pub struct TurnContext {
     pub tts: Arc<dyn Tts>,
     pub tools: ToolContext,
     pub playback: PlaybackHandle,
+    pub chime: Arc<dyn Chime>,
     pub ui: UnboundedSender<UiEvent>,
     pub max_tool_rounds: u8,
 }
@@ -46,17 +48,27 @@ pub async fn run_turn(
     let wav = wav::encode_mono(16_000, &pcm);
     let heard = ctx.stt.transcribe(wav).await.context("распознавание")?;
     let text = strip_wake_word(&heard);
-    if text.is_empty() {
+    if text.is_empty() || is_stt_artifact(&text) {
         bail!("не расслышал");
     }
     tracing::info!("запрос: {text}");
-    let mut new_messages = vec![ChatMessage::user(text)];
+    let mut new_messages = vec![ChatMessage::user(text.clone())];
+    if is_stop_phrase(&text) {
+        tracing::info!("локальная команда остановки");
+        return Ok(TurnOutcome {
+            messages: new_messages,
+            spoken: String::new(),
+            control: Some(ControlAction::StopSpeaking),
+        });
+    }
     let mut messages = system_and_history;
     messages.extend(new_messages.clone());
     let tools = ctx.tools.definitions();
     let mut spoken = String::new();
     let mut control = None;
     let mut final_text: Option<String> = None;
+    let mut audio_total = Duration::ZERO;
+    let mut audio_started: Option<tokio::time::Instant> = None;
     for round in 0..=ctx.max_tool_rounds {
         let mut rx = ctx
             .llm
@@ -73,7 +85,11 @@ pub async fn run_turn(
                     let mut sentences = Vec::new();
                     chunker.push(&t, &mut sentences);
                     for s in sentences {
-                        speak_sentence(ctx, &s).await?;
+                        let d = speak_sentence(ctx, &s).await?;
+                        audio_total += d;
+                        if !d.is_zero() {
+                            audio_started.get_or_insert_with(tokio::time::Instant::now);
+                        }
                         spoken.push_str(&s);
                         spoken.push(' ');
                     }
@@ -86,7 +102,11 @@ pub async fn run_turn(
             }
         }
         if let Some(s) = chunker.flush() {
-            speak_sentence(ctx, &s).await?;
+            let d = speak_sentence(ctx, &s).await?;
+            audio_total += d;
+            if !d.is_zero() {
+                audio_started.get_or_insert_with(tokio::time::Instant::now);
+            }
             spoken.push_str(&s);
             spoken.push(' ');
         }
@@ -110,6 +130,11 @@ pub async fn run_turn(
                         Ok(r) => (r.content, r.control),
                         Err(e) => (format!("Ошибка инструмента: {e:#}"), None),
                     };
+                    tracing::info!(
+                        "инструмент {}: {}",
+                        call.function.name,
+                        content.chars().take(300).collect::<String>()
+                    );
                     if control.is_none() {
                         control = ctrl;
                     }
@@ -135,6 +160,16 @@ pub async fn run_turn(
     if let Some(text) = final_text {
         new_messages.push(ChatMessage::assistant(text));
     }
+    if let Some(start) = audio_started {
+        let left = audio_total.saturating_sub(start.elapsed());
+        if !left.is_zero() {
+            tokio::time::sleep(left).await;
+        }
+        let _ = ctx.ui.send(UiEvent::SpeechFinished);
+    }
+    if control.is_none() && !spoken.trim().is_empty() {
+        let _ = ctx.chime.play(ChimeSound::Done);
+    }
     Ok(TurnOutcome {
         messages: new_messages,
         spoken: spoken.trim().to_owned(),
@@ -150,27 +185,29 @@ pub async fn speak_text(ctx: &TurnContext, text: &str) -> Result<()> {
     if let Some(s) = chunker.flush() {
         sentences.push(s);
     }
+    let mut total = Duration::ZERO;
+    let start = tokio::time::Instant::now();
     for s in sentences {
-        speak_sentence(ctx, &s).await?;
+        total += speak_sentence(ctx, &s).await?;
     }
-    Ok(())
-}
-
-async fn speak_sentence(ctx: &TurnContext, text: &str) -> Result<()> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(());
-    }
-    if ctx.ui.send(UiEvent::SpeechStarted).is_err() {
-        return Ok(());
-    }
-    let audio = ctx.tts.synthesize(text).await.context("TTS")?;
-    let duration = stream_audio(audio, &ctx.playback).await?;
-    if !duration.is_zero() {
-        tokio::time::sleep(duration).await;
+    let left = total.saturating_sub(start.elapsed());
+    if !left.is_zero() {
+        tokio::time::sleep(left).await;
     }
     let _ = ctx.ui.send(UiEvent::SpeechFinished);
     Ok(())
+}
+
+async fn speak_sentence(ctx: &TurnContext, text: &str) -> Result<Duration> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Duration::ZERO);
+    }
+    if ctx.ui.send(UiEvent::SpeechStarted).is_err() {
+        return Ok(Duration::ZERO);
+    }
+    let audio = ctx.tts.synthesize(text).await.context("TTS")?;
+    stream_audio(audio, &ctx.playback).await
 }
 
 /// Поток TTS нельзя клонировать; потребляем его по значению.
@@ -230,6 +267,46 @@ pub fn strip_wake_word(text: &str) -> String {
     }
 }
 
+/// Короткие команды остановки обрабатываются без LLM, чтобы реакция была
+/// мгновенной и не зависела от сети.
+fn is_stop_phrase(text: &str) -> bool {
+    let t = text
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(
+        t.as_str(),
+        "стоп"
+            | "хватит"
+            | "замолчи"
+            | "замолчи пожалуйста"
+            | "отмена"
+            | "отмени"
+            | "остановись"
+            | "тихо"
+            | "заткнись"
+            | "stop"
+            | "quiet"
+    )
+}
+
+fn is_stt_artifact(text: &str) -> bool {
+    let t = text.to_lowercase();
+    [
+        "продолжение следует",
+        "редактор субтитров",
+        "корректор",
+        "субтитры создавал",
+        "dima torzok",
+        "dimatorzok",
+        "спасибо за просмотр",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +317,18 @@ mod tests {
         assert_eq!(strip_wake_word("jarvis what time"), "what time");
         assert_eq!(strip_wake_word("погода"), "погода");
         assert_eq!(strip_wake_word("Джарвис"), "");
+        assert!(is_stt_artifact("Продолжение следует..."));
+        assert!(!is_stt_artifact("Какая сегодня погода?"));
+    }
+
+    #[test]
+    fn recognizes_stop_phrases() {
+        for s in ["Стоп", "стоп!", "Хватит.", "Замолчи, пожалуйста", "отмена"] {
+            assert!(is_stop_phrase(s), "{s}");
+        }
+        for s in ["останови таймер", "стоп-кран", "какая погода"] {
+            assert!(!is_stop_phrase(s), "{s}");
+        }
     }
 }
 
@@ -366,8 +455,16 @@ mod integration_tests {
             tts: Arc::new(FakeTts),
             tools,
             playback: PlaybackHandle::detached(),
+            chime: Arc::new(FakeChime),
             ui,
             max_tool_rounds: 2,
+        }
+    }
+
+    struct FakeChime;
+    impl Chime for FakeChime {
+        fn play(&self, _sound: ChimeSound) -> jarvis_core::errors::Result<()> {
+            Ok(())
         }
     }
 

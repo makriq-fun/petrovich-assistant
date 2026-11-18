@@ -163,7 +163,8 @@ impl Stt for OpenAiStt {
             let mut form = Form::new()
                 .part("file", part)
                 .text("model", self.model.clone())
-                .text("response_format", "json");
+                .text("response_format", "json")
+                .text("temperature", "0");
             if !self.language.is_empty() {
                 form = form.text("language", self.language.clone());
             }

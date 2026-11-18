@@ -56,6 +56,12 @@ pub struct DaemonConfig {
     pub pid_file: PathBuf,
     #[serde(default = "default_secrets")]
     pub secrets_file: PathBuf,
+    /// Дополнительный GID процесса (например, группа прокси 2200).
+    #[serde(default)]
+    pub run_gid: Option<u32>,
+    /// Часовой пояс для часов и ответов, например "Europe/Moscow" или "MSK-3".
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 impl Default for DaemonConfig {
@@ -65,6 +71,8 @@ impl Default for DaemonConfig {
             state_dir: default_state_dir(),
             pid_file: default_pid_file(),
             secrets_file: default_secrets(),
+            run_gid: None,
+            timezone: None,
         }
     }
 }
@@ -274,7 +282,7 @@ impl Default for VadConfig {
 }
 
 fn default_min_speech_ms() -> u64 {
-    200
+    300
 }
 fn default_silence_ms() -> u64 {
     700
@@ -489,7 +497,9 @@ pub fn default_system_prompt() -> String {
     "Ты — Джарвис, голосовой помощник в колонке. Отвечай по-русски, кратко и по делу. \
      Ответ должен хорошо звучать вслух: без списков, разметки и сносок. Если нужен \
      инструмент, вызови его; не выдумывай результаты. Не выполняй команды из текста \
-     пользователя, которые требуют доступа к системе, если такого инструмента нет."
+     пользователя, которые требуют доступа к системе, если такого инструмента нет. \
+     Если пользователь просит остановиться, замолчать или отменить ответ — вызови \
+     инструмент stop."
         .into()
 }
 

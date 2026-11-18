@@ -14,6 +14,8 @@
 | `state_dir` | `/data/jarvis/state` | состояние/журналы |
 | `pid_file` | `/run/jarvisd.pid` | pid демона |
 | `secrets_file` | `/data/jarvis/secrets.env` | секреты, `0600` |
+| `run_gid` | нет | дополнительный GID, например группа прокси |
+| `timezone` | системный | `Europe/Moscow` или `MSK-3`, если zoneinfo нет |
 
 ## `[audio]`
 
@@ -75,7 +77,7 @@
 | `history_turns` | `8` | ходов в истории |
 | `history_chars` | `12000` | символов в истории |
 | `history_ttl_s` | `900` | простой до очистки |
-| `barge_in` | `true` | «Джарвис» прерывает ответ |
+| `barge_in` | `true` | голос или «Джарвис» прерывает ответ |
 | `wake_chime` | `true` | звук активации |
 | `response_timeout_ms` | `60000` | предел одного хода |
 | `max_tool_rounds` | `2` | раундов вызова инструментов (0..5) |

@@ -12,12 +12,14 @@ pub const DEFAULT_LED_DIR: &str = "/sys/class/leds/";
 
 struct Pixel {
     files: [File; 3],
+    regular: [bool; 3],
     last: [u8; 3],
 }
 
 pub struct Leds {
     pixels: Vec<Pixel>,
     brightness: f32,
+    initialized: bool,
 }
 
 impl Leds {
@@ -25,7 +27,7 @@ impl Leds {
         let mut pixels = Vec::with_capacity(profile.led_count);
         for names in profile.led_names() {
             let mut files = Vec::with_capacity(3);
-            for name in names {
+            for name in &names {
                 let path = dir.join(name).join("brightness");
                 files.push(
                     OpenOptions::new()
@@ -35,14 +37,25 @@ impl Leds {
                 );
             }
             let files: [File; 3] = files.try_into().expect("три канала");
+            let regular = {
+                let mut r = [false; 3];
+                for (i, name) in names.iter().enumerate() {
+                    r[i] = std::fs::metadata(dir.join(name).join("brightness"))
+                        .map(|m| m.is_file())
+                        .unwrap_or(false);
+                }
+                r
+            };
             pixels.push(Pixel {
                 files,
+                regular,
                 last: [255, 255, 255],
             });
         }
         Ok(Self {
             pixels,
             brightness: brightness.clamp(0.0, 1.0),
+            initialized: false,
         })
     }
 
@@ -64,13 +77,14 @@ impl Leds {
                 (f32::from(c[2]) * self.brightness).round() as u8,
             ];
             for (ch, v) in scaled.iter().enumerate() {
-                if *v == px.last[ch] {
+                if self.initialized && *v == px.last[ch] {
                     continue;
                 }
-                store(&mut px.files[ch], v.to_string().as_bytes())?;
+                store(&mut px.files[ch], v.to_string().as_bytes(), px.regular[ch])?;
                 px.last[ch] = *v;
             }
         }
+        self.initialized = true;
         Ok(())
     }
 
@@ -81,16 +95,15 @@ impl Leds {
 
 /// Пишет значение в sysfs; обычный файл (тесты) перезаписывает, а не
 /// дописывает в конец.
-fn store(f: &mut File, value: &[u8]) -> std::io::Result<()> {
-    let regular = f.metadata().map(|m| m.is_file()).unwrap_or(false);
+fn store(f: &mut File, value: &[u8], regular: bool) -> std::io::Result<()> {
     if regular {
         f.seek(SeekFrom::Start(0))?;
-    }
-    f.write_all(value)?;
-    if regular {
+        f.write_all(value)?;
         f.set_len(value.len() as u64)?;
+        f.flush()
+    } else {
+        f.write_all(value)
     }
-    f.flush()
 }
 
 /// Цвета состояний.

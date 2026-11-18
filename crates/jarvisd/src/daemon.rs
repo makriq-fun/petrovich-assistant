@@ -47,7 +47,7 @@ struct App {
     ui: mpsc::UnboundedSender<UiEvent>,
     playback: PlaybackHandle,
     volume: Arc<dyn VolumeControl>,
-    chime: LocalChime,
+    chime: Arc<LocalChime>,
     wake: Option<WakeWord>,
     vad: jarvis_audio::vad::Vad,
     frontend: AudioFrontend,
@@ -60,6 +60,18 @@ struct App {
 
 pub async fn run(loaded: LoadedConfig) -> Result<()> {
     let cfg = loaded.config;
+    if let Some(tz) = &cfg.daemon.timezone {
+        std::env::set_var("TZ", tz);
+    }
+    if let Some(gid) = cfg.daemon.run_gid {
+        // SAFETY: setgid до создания потоков и сокетов; UID остаётся root,
+        // чтобы сохранить доступ к sysfs/GPIO.
+        let rc = unsafe { libc::setgid(gid) };
+        if rc != 0 {
+            bail!("setgid({gid}): {}", std::io::Error::last_os_error());
+        }
+        tracing::info!("группа процесса: {gid}");
+    }
     let profile =
         jarvis_core::profile::resolve(&cfg.hardware.model).map_err(|e| anyhow::anyhow!("{e}"))?;
     tracing::info!("модель: {} ({})", profile.model_name, profile.codename);
@@ -132,13 +144,14 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     let hardware = jarvis_hw::start(profile, &cfg.hardware, ui_rx);
     let mut buttons = hardware.buttons;
 
-    let chime = LocalChime::new(playback.clone());
+    let chime = Arc::new(LocalChime::new(playback.clone()));
     let turn = TurnContext {
         llm,
         stt,
         tts,
         tools,
         playback: playback.clone(),
+        chime: chime.clone(),
         ui: ui_tx.clone(),
         max_tool_rounds: cfg.dialog.max_tool_rounds,
     };
@@ -225,9 +238,11 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
             }
             fired = announce_rx.recv() => {
                 if let Some(f) = fired {
+                    let _ = app.chime.play(ChimeSound::Timer);
                     let ctx = app.turn.clone();
                     let text = format!("Таймер {} сработал.", f.label);
                     tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(1100)).await;
                         if let Err(e) = speak_text(&ctx, &text).await {
                             tracing::warn!("таймер: озвучка: {e:#}");
                         }
@@ -258,6 +273,10 @@ impl App {
     fn enter_listening(&mut self, follow_up: bool) {
         self.mode = Mode::Listening;
         self.vad.reset_utterance();
+        if follow_up {
+            // Не слушаем хвост собственной озвучки.
+            self.ignore_until = tokio::time::Instant::now() + Duration::from_millis(400);
+        }
         let ms = if follow_up {
             self.dialog.follow_up_ms
         } else {
@@ -274,6 +293,7 @@ impl App {
         if self.muted {
             return;
         }
+        tracing::info!("активация: начинаю слушать");
         if self.dialog.wake_chime {
             let _ = self.chime.play(ChimeSound::Wake);
             self.ignore_until = tokio::time::Instant::now() + Duration::from_millis(200);
@@ -290,11 +310,13 @@ impl App {
             }
             match self.mode {
                 Mode::Idle => {
-                    let hit = self
+                    let hits = self
                         .wake
                         .as_mut()
-                        .is_some_and(|w| !w.push(&frame.samples, now).is_empty());
-                    if hit {
+                        .map(|w| w.push(&frame.samples, now))
+                        .unwrap_or_default();
+                    if let Some(d) = hits.first() {
+                        tracing::info!("слово активации: score {:.4}", d.score);
                         self.activate();
                     }
                 }
@@ -304,12 +326,35 @@ impl App {
                         self.follow_deadline = None;
                     }
                     if let Some(u) = utts.into_iter().next() {
+                        tracing::info!(
+                            "фраза: {} мс (речь {} мс), отправляю в STT",
+                            u.speech_ms,
+                            u.voiced_ms
+                        );
                         self.start_turn(u.samples);
                     }
                 }
                 Mode::Thinking => {
                     if !self.dialog.barge_in {
                         continue;
+                    }
+                    // Голос поверх ответа: останавливаем озвучку сразу, не
+                    // дожидаясь конца фразы. Дальше VAD в Listening завершит
+                    // запись, и локальная команда «стоп» уйдёт без LLM.
+                    if self.playback.is_playing() {
+                        let _ = self.vad.push(&frame.samples);
+                        if self.vad.in_speech() {
+                            tracing::info!("бардж-ин по голосу");
+                            self.abort_turn();
+                            self.playback.stop();
+                            self.mode = Mode::Listening;
+                            self.follow_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + Duration::from_millis(self.dialog.follow_up_ms),
+                            );
+                            let _ = self.ui.send(UiEvent::State(VoiceState::Listening));
+                            continue;
+                        }
                     }
                     let hit = self
                         .wake
@@ -329,6 +374,7 @@ impl App {
     fn start_turn(&mut self, pcm: Vec<i16>) {
         self.history.expire_if_idle();
         let snapshot = self.history.snapshot();
+        tracing::info!("ход диалога: STT → LLM → TTS");
         self.mode = Mode::Thinking;
         self.follow_deadline = None;
         let _ = self.ui.send(UiEvent::State(VoiceState::Thinking));
@@ -357,6 +403,14 @@ impl App {
         self.task = None;
         match ev.result {
             Ok(outcome) => {
+                tracing::info!(
+                    "ответ: {}",
+                    if outcome.spoken.is_empty() {
+                        "<без текста>"
+                    } else {
+                        &outcome.spoken
+                    }
+                );
                 for m in outcome.messages {
                     self.history.push(m);
                 }
@@ -411,7 +465,7 @@ impl App {
                 Mode::Thinking => {
                     self.abort_turn();
                     self.playback.stop();
-                    self.enter_listening(true);
+                    self.enter_idle();
                 }
             },
             ButtonEvent::VolumeUp | ButtonEvent::VolumeDown => {
@@ -468,19 +522,40 @@ pub fn check(loaded: &LoadedConfig) -> Result<()> {
     println!("модель: {} ({})", profile.model_name, profile.codename);
     if cfg.wakeword.enabled {
         check_file(&cfg.wakeword.model, "модель активации")?;
-        check_file(&cfg.wakeword.assets, "feature-backbone")?;
-    }
-    if cfg.wakeword.enabled {
-        jarvis_wakeword::WakeModel::load(&cfg.wakeword.model)
-            .map_err(|e| anyhow::anyhow!("модель активации: {e:#}"))?;
-        let assets = std::fs::read(&cfg.wakeword.assets)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", cfg.wakeword.assets.display()))?;
-        let tensors = jarvis_wakeword::tensors::read(&assets)
-            .map_err(|e| anyhow::anyhow!("backbone: {e:#}"))?;
-        if !tensors.contains_key("mel.filters") {
-            bail!("в backbone нет mel.filters");
+        if jarvis_wakeword::micro::is_micro_manifest(&cfg.wakeword.model) {
+            let manifest = std::fs::read_to_string(&cfg.wakeword.model)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", cfg.wakeword.model.display()))?;
+            let v: serde_json::Value = serde_json::from_str(&manifest)
+                .map_err(|e| anyhow::anyhow!("манифест microWakeWord: {e}"))?;
+            let tflite = v
+                .get("model")
+                .and_then(|m| m.as_str())
+                .ok_or_else(|| anyhow::anyhow!("в манифесте нет model"))?;
+            let path = cfg
+                .wakeword
+                .model
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join(tflite);
+            check_file(&path, "TFLite-модель")?;
+            println!(
+                "активация: microWakeWord «{}» ({})",
+                v.get("wake_word").and_then(|w| w.as_str()).unwrap_or("?"),
+                cfg.wakeword.model.display()
+            );
+        } else {
+            check_file(&cfg.wakeword.assets, "feature-backbone")?;
+            jarvis_wakeword::WakeModel::load(&cfg.wakeword.model)
+                .map_err(|e| anyhow::anyhow!("модель активации: {e:#}"))?;
+            let assets = std::fs::read(&cfg.wakeword.assets)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", cfg.wakeword.assets.display()))?;
+            let tensors = jarvis_wakeword::tensors::read(&assets)
+                .map_err(|e| anyhow::anyhow!("backbone: {e:#}"))?;
+            if !tensors.contains_key("mel.filters") {
+                bail!("в backbone нет mel.filters");
+            }
+            println!("активация: {}", cfg.wakeword.model.display());
         }
-        println!("активация: {}", cfg.wakeword.model.display());
     }
     println!(
         "провайдеры: STT {:?}, LLM {}, TTS {:?}",

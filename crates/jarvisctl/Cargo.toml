@@ -14,6 +14,7 @@ jarvis-audio = { workspace = true }
 jarvis-core = { workspace = true }
 jarvis-hw = { workspace = true }
 jarvis-providers = { workspace = true }
+jarvis-tools = { workspace = true }
 jarvis-wakeword = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

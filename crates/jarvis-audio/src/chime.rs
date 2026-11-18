@@ -28,16 +28,19 @@ impl Chime for LocalChime {
 /// Последовательность тонов для звука.
 pub fn samples(sound: ChimeSound) -> Vec<i16> {
     let seq: &[(f32, u32, f32)] = match sound {
-        ChimeSound::Wake => &[(660.0, 70, 0.25), (990.0, 90, 0.28)],
-        ChimeSound::Cancel => &[(660.0, 70, 0.25), (440.0, 110, 0.22)],
+        ChimeSound::Wake => &[(520.0, 90, 0.38), (780.0, 90, 0.4), (1040.0, 150, 0.42)],
+        ChimeSound::Done => &[(880.0, 80, 0.22), (660.0, 100, 0.2), (440.0, 150, 0.18)],
+        ChimeSound::Cancel => &[(660.0, 80, 0.3), (440.0, 130, 0.26)],
         ChimeSound::Timer => &[
-            (880.0, 90, 0.3),
-            (0.0, 40, 0.0),
-            (880.0, 90, 0.3),
-            (0.0, 40, 0.0),
-            (880.0, 140, 0.3),
+            (1000.0, 180, 0.45),
+            (0.0, 70, 0.0),
+            (1000.0, 180, 0.45),
+            (0.0, 70, 0.0),
+            (1000.0, 180, 0.45),
+            (0.0, 70, 0.0),
+            (1320.0, 320, 0.5),
         ],
-        ChimeSound::Error => &[(220.0, 180, 0.25), (185.0, 220, 0.22)],
+        ChimeSound::Error => &[(220.0, 180, 0.28), (185.0, 220, 0.24)],
     };
     let mut out = Vec::new();
     for &(hz, ms, amp) in seq {
@@ -86,13 +89,14 @@ mod tests {
     fn all_chimes_are_short_and_nonempty() {
         for s in [
             ChimeSound::Wake,
+            ChimeSound::Done,
             ChimeSound::Cancel,
             ChimeSound::Timer,
             ChimeSound::Error,
         ] {
             let v = samples(s);
             assert!(!v.is_empty());
-            assert!(v.len() < RATE as usize);
+            assert!(v.len() < RATE as usize * 2);
         }
     }
 }

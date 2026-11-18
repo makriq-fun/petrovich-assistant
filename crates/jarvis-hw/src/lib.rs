@@ -94,8 +94,7 @@ async fn run_ui(
     let mut error_until = tokio::time::Instant::now();
     let mut timer_deadline: Option<tokio::time::Instant> = None;
     let mut tick: u64 = 0;
-    let mut clock_tick: u64 = 0;
-    let mut interval = tokio::time::interval(Duration::from_millis(50));
+    let mut interval = tokio::time::interval(Duration::from_millis(33));
     loop {
         tokio::select! {
             _ = interval.tick() => {}
@@ -147,7 +146,6 @@ async fn run_ui(
         if tick % 5 != 0 {
             continue;
         }
-        clock_tick += 1;
         if let Some(c) = clock.as_mut().filter(|c| c.enabled()) {
             let r = match timer_deadline {
                 Some(dl) if dl > now => {
@@ -161,7 +159,7 @@ async fn run_ui(
                 None => {
                     use chrono::Timelike as _;
                     let t = chrono::Local::now();
-                    let colon = clock_tick % 2 == 0;
+                    let colon = t.second() % 2 == 0;
                     c.show_time(t.hour(), t.minute(), colon)
                 }
             };

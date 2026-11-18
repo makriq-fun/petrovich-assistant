@@ -44,6 +44,10 @@ enum Cmd {
     },
     /// Распознать WAV текущим STT
     SttTest { wav: PathBuf },
+    /// Проверить LLM одним запросом
+    LlmTest { text: String },
+    /// Проверить инструмент погоды
+    WeatherTest,
 }
 
 fn main() -> Result<()> {
@@ -57,6 +61,8 @@ fn main() -> Result<()> {
         Cmd::AudioTest { seconds } => audio_test(&loaded, seconds),
         Cmd::TtsTest { text, out } => tts_test(&loaded, &text, &out),
         Cmd::SttTest { wav } => stt_test(&loaded, &wav),
+        Cmd::LlmTest { text } => llm_test(&loaded, &text),
+        Cmd::WeatherTest => weather_test(&loaded),
     }
 }
 
@@ -77,8 +83,10 @@ fn status(loaded: &jarvis_core::LoadedConfig) -> Result<()> {
                 }
             }
             if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-                if let Some(f) = stat.split_whitespace().nth(21) {
-                    let ticks: u64 = f.parse().unwrap_or(0);
+                let f: Vec<&str> = stat.split_whitespace().collect();
+                if f.len() > 14 {
+                    let ticks: u64 =
+                        f[13].parse::<u64>().unwrap_or(0) + f[14].parse::<u64>().unwrap_or(0);
                     println!("  CPU: {:.1} с", ticks as f64 / 100.0);
                 }
             }
@@ -126,7 +134,9 @@ fn doctor(loaded: &jarvis_core::LoadedConfig) -> Result<()> {
                 cfg.wakeword.model.display()
             ));
         }
-        if cfg.wakeword.assets.exists() {
+        if jarvis_wakeword::micro::is_micro_manifest(&cfg.wakeword.model) {
+            ok("движок microWakeWord");
+        } else if cfg.wakeword.assets.exists() {
             ok("feature-backbone найден");
         } else {
             fail(&format!("нет backbone {}", cfg.wakeword.assets.display()));
@@ -162,10 +172,7 @@ fn doctor(loaded: &jarvis_core::LoadedConfig) -> Result<()> {
                 warn(&format!("кнопки {name} не найдены"));
             }
         }
-        if p.clock_dir_path()
-            .map(|d| Path::new(&d).exists())
-            .unwrap_or(false)
-        {
+        if Path::new(&p.clock_path("A1")).exists() {
             ok("часы найдены");
         } else {
             warn("часы не найдены (возможна ревизия без панели)");
@@ -381,6 +388,47 @@ fn stt_test(loaded: &jarvis_core::LoadedConfig, wav: &Path) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let text = rt.block_on(stt.transcribe(bytes))?;
     println!("STT: {text}");
+    Ok(())
+}
+
+fn weather_test(loaded: &jarvis_core::LoadedConfig) -> Result<()> {
+    let t = &loaded.config.tools;
+    let lat = t
+        .weather_latitude
+        .ok_or_else(|| anyhow::anyhow!("нет weather_latitude"))?;
+    let lon = t
+        .weather_longitude
+        .ok_or_else(|| anyhow::anyhow!("нет weather_longitude"))?;
+    let w = jarvis_tools::Weather::new(
+        t.weather_url.clone(),
+        lat,
+        lon,
+        t.weather_place.clone(),
+        t.web_timeout_ms,
+        t.web_allow_private,
+    )?;
+    let rt = tokio::runtime::Runtime::new()?;
+    println!("{}", rt.block_on(w.current())?);
+    Ok(())
+}
+
+fn llm_test(loaded: &jarvis_core::LoadedConfig, text: &str) -> Result<()> {
+    let llm = jarvis_providers::OpenAiLlm::new(&loaded.config.llm, &loaded.secrets)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let mut rx =
+        rt.block_on(llm.chat_stream(vec![jarvis_core::chat::ChatMessage::user(text)], Vec::new()))?;
+    let mut out = String::new();
+    rt.block_on(async {
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                jarvis_core::chat::LlmEvent::TextDelta(t) => out.push_str(&t),
+                jarvis_core::chat::LlmEvent::Error(e) => anyhow::bail!(e),
+                _ => {}
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
+    println!("LLM: {}", out.trim());
     Ok(())
 }
 

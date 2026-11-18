@@ -51,10 +51,10 @@ stateDiagram-v2
     Listening --> Listening: речь, follow-up
     Listening --> Thinking: конец фразы
     Thinking --> Listening: ответ озвучен
-    Thinking --> Listening: «Джарвис» (barge-in)
-    Listening --> Idle: тайм-аут
-    Thinking --> Idle: stop / reset_dialog
-    Listening --> Idle: кнопка / мут
+    Thinking --> Listening: «Джарвис» / голос (barge-in)
+    Thinking --> Idle: кнопка / stop
+    Listening --> Idle: «стоп» / кнопка
+    Listening --> Idle: тайм-аут / мут
 ```
 
 - `Idle`: кадры идут только в детектор активации.
@@ -62,7 +62,10 @@ stateDiagram-v2
   `dialog.listen_timeout_ms`, после ответа — `follow_up_ms`.
 - `Thinking`: задача `run_turn` делает STT, LLM и TTS. Детектор продолжает
   слушать для barge-in; при срабатывании задача `abort()`, очередь
-  воспроизведения очищается.
+  воспроизведения очищается. Дополнительно VAD ловит речь поверх озвучки и
+  сразу останавливает ответ. Команды «стоп», «хватит», «замолчи», «отмена»
+  распознаются локально без LLM и возвращают автомат в `Idle`; кнопка
+  действия в `Thinking` делает то же.
 - `Speaking` отображается на индикации через `UiEvent::SpeechStarted`, но
   состояние автомата остаётся `Thinking`: отмена и тайм-ауты одинаковы.
 

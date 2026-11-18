@@ -10,6 +10,8 @@ pub const FRAME_MS: u64 = 20;
 pub struct Utterance {
     pub samples: Vec<i16>,
     pub speech_ms: u64,
+    /// Сколько кадров реально были выше порога; защита от «фразы» из тишины.
+    pub voiced_ms: u64,
 }
 
 pub struct Vad {
@@ -29,6 +31,7 @@ pub struct Vad {
     in_speech: bool,
     speech: Vec<i16>,
     speech_frames: u64,
+    voiced_frames: u64,
     voiced: bool,
     warmup: u32,
 }
@@ -63,6 +66,7 @@ impl Vad {
             in_speech: false,
             speech: Vec::new(),
             speech_frames: 0,
+            voiced_frames: 0,
             voiced: false,
             warmup: 15,
         }
@@ -91,6 +95,7 @@ impl Vad {
         self.pre_roll.clear();
         self.in_speech = false;
         self.speech_frames = 0;
+        self.voiced_frames = 0;
         self.above = 0;
         self.below = 0;
         self.voiced = false;
@@ -136,6 +141,7 @@ impl Vad {
                     self.speech.extend(self.pre_roll.drain(..));
                     self.speech.extend_from_slice(frame);
                     self.speech_frames = 2;
+                    self.voiced_frames = 2;
                 }
             } else {
                 self.above = 0;
@@ -149,6 +155,7 @@ impl Vad {
         self.speech_frames += 1;
         if loud {
             self.below = 0;
+            self.voiced_frames += 1;
         } else {
             self.below += 1;
         }
@@ -162,9 +169,15 @@ impl Vad {
             self.below = 0;
             let samples = std::mem::take(&mut self.speech);
             let speech_ms = self.speech_frames * FRAME_MS;
+            let voiced_ms = self.voiced_frames * FRAME_MS;
             self.speech_frames = 0;
-            if speech_ms >= self.min_speech_ms {
-                return Some(Utterance { samples, speech_ms });
+            self.voiced_frames = 0;
+            if voiced_ms >= self.min_speech_ms {
+                return Some(Utterance {
+                    samples,
+                    speech_ms,
+                    voiced_ms,
+                });
             }
         }
         None

@@ -718,6 +718,8 @@ name = "jarvis-wakeword"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "cc",
+ "libloading",
  "serde",
  "serde_json",
  "tempfile",
@@ -737,6 +739,7 @@ dependencies = [
  "jarvis-core",
  "jarvis-hw",
  "jarvis-providers",
+ "jarvis-tools",
  "jarvis-wakeword",
  "serde_json",
  "tokio",
@@ -758,6 +761,7 @@ dependencies = [
  "jarvis-providers",
  "jarvis-tools",
  "jarvis-wakeword",
+ "libc",
  "serde_json",
  "tokio",
  "tokio-util",

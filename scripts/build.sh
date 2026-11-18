@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Сборка jarvisd и jarvisctl. По умолчанию — ARMv7 musl для колонки,
+# Сборка jarvisd и jarvisctl. По умолчанию — ARMv7 glibc 2.23 для колонки,
 # TARGET=host собирает под текущий хост (для тестов).
 set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
-target=${TARGET:-armv7-unknown-linux-musleabihf}
+target=${TARGET:-armv7-unknown-linux-gnueabihf}
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 if [[ $target == host ]]; then
   cargo build --locked --release -p jarvisd -p jarvisctl

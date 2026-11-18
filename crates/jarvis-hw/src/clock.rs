@@ -20,16 +20,18 @@ pub struct Clock {
     last: Vec<u8>,
     level: u8,
     enabled: bool,
+    initialized: bool,
 }
 
 impl Clock {
     pub fn open(profile: &HardwareProfile, dir: &Path, brightness: f32) -> Self {
+        let prefix = profile.clock_dir.rsplit('/').next().unwrap_or("clock");
         let mut segments = Vec::new();
         let mut paths: Vec<PathBuf> = Vec::new();
         for digit in 0..4 {
             for seg in 0..SEGS {
                 paths.push(
-                    dir.join(profile.segment_name(digit, seg))
+                    dir.join(format!("{prefix}{}", profile.segment_name(digit, seg)))
                         .join("brightness"),
                 );
             }
@@ -45,7 +47,7 @@ impl Clock {
         }
         let mut colon = Vec::new();
         for name in profile.clock_colon {
-            let p = dir.join(name).join("brightness");
+            let p = dir.join(format!("{prefix}{name}")).join("brightness");
             match OpenOptions::new().write(true).open(&p) {
                 Ok(f) => colon.push(f),
                 Err(_) => {
@@ -56,7 +58,7 @@ impl Clock {
         }
         // Вспомогательные сегменты гасим один раз.
         for name in profile.clock_aux {
-            let p = dir.join(name).join("brightness");
+            let p = dir.join(format!("{prefix}{name}")).join("brightness");
             if let Ok(mut f) = OpenOptions::new().write(true).open(p) {
                 let _ = f.write_all(b"0");
             }
@@ -68,6 +70,7 @@ impl Clock {
             colon,
             level: level.max(2),
             enabled: true,
+            initialized: false,
         }
     }
 
@@ -78,6 +81,7 @@ impl Clock {
             last: Vec::new(),
             level: 0,
             enabled: false,
+            initialized: false,
         }
     }
 
@@ -100,8 +104,9 @@ impl Clock {
         for _ in &self.colon {
             values.push(if colon_on { self.level } else { 0 });
         }
+        let first = !self.initialized;
         for (i, f) in self.segments.iter_mut().enumerate() {
-            if values[i] != self.last[i] {
+            if first || values[i] != self.last[i] {
                 store(f, values[i].to_string().as_bytes())?;
                 self.last[i] = values[i];
             }
@@ -109,11 +114,12 @@ impl Clock {
         let off = self.segments.len();
         for (j, f) in self.colon.iter_mut().enumerate() {
             let v = values[off + j];
-            if v != self.last[off + j] {
+            if first || v != self.last[off + j] {
                 store(f, v.to_string().as_bytes())?;
                 self.last[off + j] = v;
             }
         }
+        self.initialized = true;
         Ok(())
     }
 
@@ -128,15 +134,21 @@ impl Clock {
         self.set(&bytes, colon)
     }
 
-    /// Показывает MM:SS для таймера.
+    /// Показывает MM:SS для короткого таймера и MM:00 для длинного:
+    /// длинный таймер обновляется раз в минуту, а не каждую секунду.
     pub fn show_timer(&mut self, seconds: u64) -> Result<()> {
-        let s = seconds.min(99 * 60 + 59);
-        let bytes = [
-            ((s / 60) / 10) as u8,
-            ((s / 60) % 10) as u8,
-            ((s % 60) / 10) as u8,
-            (s % 60) as u8,
-        ];
+        if seconds >= 60 {
+            let mins = ((seconds + 59) / 60).min(99);
+            let bytes = [
+                ((mins / 10) % 10) as u8,
+                (mins % 10) as u8,
+                0,
+                0,
+            ];
+            return self.set(&bytes, true);
+        }
+        let s = seconds.min(59);
+        let bytes = [0, 0, ((s / 10) % 10) as u8, (s % 10) as u8];
         self.set(&bytes, true)
     }
 
@@ -164,15 +176,22 @@ pub fn digit_mask(d: u8) -> u8 {
 
 /// Собирает пути сегментов для тестов.
 pub fn clock_paths(profile: &HardwareProfile, dir: &Path) -> HashMap<String, PathBuf> {
+    let prefix = profile.clock_dir.rsplit('/').next().unwrap_or("clock");
     let mut out = HashMap::new();
     for d in 0..4 {
         for s in 0..SEGS {
             let name = profile.segment_name(d, s);
-            out.insert(name.clone(), dir.join(name).join("brightness"));
+            out.insert(
+                name.clone(),
+                dir.join(format!("{prefix}{name}")).join("brightness"),
+            );
         }
     }
     for c in profile.clock_colon {
-        out.insert((*c).to_owned(), dir.join(c).join("brightness"));
+        out.insert(
+            (*c).to_owned(),
+            dir.join(format!("{prefix}{c}")).join("brightness"),
+        );
     }
     out
 }
@@ -197,8 +216,9 @@ mod tests {
         let mut c = Clock::open(&MINI2, d.path(), 1.0);
         assert!(c.enabled());
         c.show_time(12, 34, true).unwrap();
+        let paths = clock_paths(&MINI2, d.path());
         let read = |n: &str| {
-            std::fs::read_to_string(d.path().join(n).join("brightness"))
+            std::fs::read_to_string(&paths[n])
                 .unwrap()
                 .trim()
                 .parse::<u8>()
@@ -213,12 +233,41 @@ mod tests {
     }
 
     #[test]
-    fn timer_shows_mmss() {
+    fn timer_shows_minutes_for_long_timers() {
         let d = tree();
-        let mut c = Clock::open(&MINI2, d.path(), 0.5);
+        let mut c = Clock::open(&MINI2, d.path(), 1.0);
         c.show_timer(65).unwrap();
-        assert_eq!(digit_mask(1), 0x06);
-        assert_eq!(digit_mask(6), 0x7d);
+        let paths = clock_paths(&MINI2, d.path());
+        let read = |n: &str| {
+            std::fs::read_to_string(&paths[n])
+                .unwrap()
+                .trim()
+                .parse::<u8>()
+                .unwrap()
+        };
+        // 65 секунд → 02:00, старшие цифры «0» и «2».
+        assert_eq!(read("A1"), 255);
+        assert_eq!(read("A2"), 255);
+        assert_eq!(read("B2"), 255);
+    }
+
+    #[test]
+    fn short_timer_shows_seconds() {
+        let d = tree();
+        let mut c = Clock::open(&MINI2, d.path(), 1.0);
+        c.show_timer(42).unwrap();
+        let paths = clock_paths(&MINI2, d.path());
+        let read = |n: &str| {
+            std::fs::read_to_string(&paths[n])
+                .unwrap()
+                .trim()
+                .parse::<u8>()
+                .unwrap()
+        };
+        // 42 секунды → 00:42.
+        assert_eq!(read("A3"), 0);
+        assert_eq!(read("B3"), 255);
+        assert_eq!(read("A4"), 255);
     }
 
     #[test]

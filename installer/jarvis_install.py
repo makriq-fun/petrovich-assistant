@@ -314,7 +314,7 @@ for p in /etc/init.d/S99jarvis /etc/init.d/*quasar*; do
   [ -e "$p" ] && list="$list ${p#/}"
 done
 if [ -n "$list" ]; then
-  tar -czf "$out" -C / $list
+  tar -cf - -C / $list | gzip > "$out"
 else
   echo "нечего сохранять" >&2
   exit 3
@@ -500,7 +500,7 @@ def install(args) -> int:
             r"""
 set -eu
 D=/data/jarvis
-mkdir -p "$D"/{releases,backups,models,assets,state,log,staging,packaging}
+for d in releases backups models assets state log staging packaging; do mkdir -p "$D/$d"; done
 cp -f "$D/current/supervise.sh" "$D/supervise.sh" 2>/dev/null || true
 """
         )
@@ -537,9 +537,22 @@ cp -f "$D/current/supervise.sh" "$D/supervise.sh" 2>/dev/null || true
             print("ВНИМАНИЕ: secrets.env не загружен; создайте его на колонке (chmod 600)")
         # Модель: явный файл или миграция из прежней установки.
         if args.wakeword_model:
-            upload_file(
-                t, Path(args.wakeword_model), f"{DEVICE_ROOT}/models/wakeword.json", "644"
-            )
+            local_model = Path(args.wakeword_model)
+            upload_file(t, local_model, f"{DEVICE_ROOT}/models/wakeword.json", "644")
+            try:
+                manifest = json.loads(local_model.read_text())
+            except Exception:
+                manifest = {}
+            if manifest.get("type") == "micro" and manifest.get("model"):
+                sibling = local_model.parent / manifest["model"]
+                if not sibling.is_file():
+                    raise InstallError(f"нет TFLite рядом с манифестом: {sibling}")
+                upload_file(
+                    t,
+                    sibling,
+                    f"{DEVICE_ROOT}/models/{Path(manifest['model']).name}",
+                    "644",
+                )
         else:
             t.script(
                 r"""
@@ -692,7 +705,7 @@ def privacy(args) -> int:
     t = detect_transport(args)
     info = require_device(t, allow_unknown=True)
     if args.dry_run:
-        print(f"[dry-run] DNS {args.dns or ['1.1.1.1', '9.9.9.9']}, NTP {args.ntp or ['0.pool.ntp.org']}")
+        print(f"[dry-run] DNS {args.dns or ['1.1.1.1', '9.9.9.9']}, NTP {args.ntp or ['time.cloudflare.com']}")
         return 0
     if args.revert:
         t.script(
@@ -713,7 +726,7 @@ echo "восстановлено из $last"
         )
         return 0
     dns = args.dns or ["1.1.1.1", "9.9.9.9"]
-    ntp = args.ntp or ["0.pool.ntp.org", "1.pool.ntp.org"]
+    ntp = args.ntp or ["time.cloudflare.com", "time.google.com"]
     import shlex as _sh
 
     ns = "\n".join(f"nameserver {_sh.quote(x)}" for x in dns)

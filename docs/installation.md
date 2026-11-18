@@ -23,7 +23,7 @@ scripts/build.sh
 
 Результат:
 
-- `dist/jarvisd` — демон ARMv7 (статический musl);
+- `dist/jarvisd` — демон ARMv7, динамический glibc 2.23 (совместим с 2.30 на Мини 2);
 - `dist/jarvisctl` — диагностика;
 - `dist/jarvis-station-<версия>-armv7.tar.gz` — выпуск;
 - `dist/SHA256SUMS`.
@@ -105,7 +105,7 @@ python3 installer/jarvis_install.py --ssh-host station upgrade
 
 ```bash
 python3 installer/jarvis_install.py --ssh-host station privacy \
-  --dns 1.1.1.1 --dns 9.9.9.9 --ntp 0.pool.ntp.org
+  --dns 1.1.1.1 --dns 9.9.9.9 --ntp time.cloudflare.com
 # откат:
 python3 installer/jarvis_install.py --ssh-host station privacy --revert
 ```
