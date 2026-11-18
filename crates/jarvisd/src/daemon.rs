@@ -79,7 +79,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     if let Some(w) = &wake {
         tracing::info!("активация: «{}», порог {:.3}", w.name(), w.threshold());
     }
-    let audio = AudioEngine::start(&cfg.audio, profile)?;
+    let audio = AudioEngine::start(&cfg.audio, profile, cfg.hardware.volume_step)?;
     let AudioEngine {
         capture,
         playback,

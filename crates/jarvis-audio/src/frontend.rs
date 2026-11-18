@@ -108,7 +108,11 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    pub fn start(cfg: &AudioConfig, profile: &'static HardwareProfile) -> Result<Self> {
+    pub fn start(
+        cfg: &AudioConfig,
+        profile: &'static HardwareProfile,
+        volume_step: i32,
+    ) -> Result<Self> {
         let capture = Pcm::open(
             Some(&cfg.alsa_lib),
             &cfg.capture_pcm,
@@ -223,7 +227,7 @@ impl AudioEngine {
 
         let volume = Arc::new(crate::volume::AmixerVolume::new(
             cfg.playback_pcm.clone(),
-            5,
+            volume_step,
         ));
         let _ = profile;
         Ok(Self {
