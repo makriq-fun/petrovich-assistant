@@ -35,6 +35,24 @@ retries = 2
 `file=audio.wav` (PCM16, 16 кГц, моно), `model`, `language`,
 `response_format=json`. Ожидается `{"text": "..."}`.
 
+Fish Audio ASR (`provider = "fish"`):
+
+```toml
+[stt]
+provider = "fish"
+base_url = "https://api.fish.audio/v1"
+model = "transcribe-1-pro"   # HTTP-заголовок model
+api_key_env = "FISH_API_KEY"
+language = "ru"
+timeout_ms = 120000
+# для self-hosted HTTPS с собственным CA:
+# tls_ca_file = "/data/jarvis/certs/local-ca.crt"
+```
+
+Запрос: `POST /asr`, multipart `audio`, `language`, `diarize=false`,
+`tag_audio_events=false`. Ответ — JSON с `text`. Модель `transcribe-1-pro`
+требует кредита Fish; тариф может отличаться.
+
 Локальный вариант:
 
 ```toml
@@ -96,6 +114,24 @@ max_bytes = 16777216
 `pcm` — поток сырых S16LE моно с частотой `sample_rate`; байты сразу уходят в
 очередь воспроизведения. `wav` буферизуется, заголовок проверяется, тело
 играется как PCM; потоковым этот режим не является.
+
+Fish Audio TTS (`provider = "fish"`):
+
+```toml
+[tts]
+provider = "fish"
+base_url = "https://api.fish.audio/v1"
+model = "s2.1-pro-free"
+voice = "<reference_id голоса>"
+api_key_env = "FISH_API_KEY"
+format = "pcm"
+sample_rate = 24000
+timeout_ms = 60000
+```
+
+Запрос: `POST /tts`, заголовок `model`, JSON `text`, `reference_id`,
+`format=pcm`, `sample_rate`. Ответ — сырой S16LE моно, играется потоком.
+`s2.1-pro-free` доступен на бесплатном тарифе; платные модели требуют кредит.
 
 Локальный TTS:
 

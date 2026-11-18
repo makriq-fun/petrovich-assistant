@@ -358,6 +358,7 @@ fn default_max_tool_rounds() -> u8 {
 #[serde(rename_all = "lowercase")]
 pub enum SttProvider {
     Openai,
+    Fish,
     Command,
 }
 
@@ -381,6 +382,9 @@ pub struct SttConfig {
     /// Для локального STT: argv команды; WAV подаётся на stdin.
     #[serde(default)]
     pub command: Vec<String>,
+    /// Дополнительный корневой сертификат для self-hosted HTTPS.
+    #[serde(default)]
+    pub tls_ca_file: Option<PathBuf>,
 }
 
 impl Default for SttConfig {
@@ -394,6 +398,7 @@ impl Default for SttConfig {
             timeout_ms: default_http_timeout_ms(),
             retries: default_retries(),
             command: Vec::new(),
+            tls_ca_file: None,
         }
     }
 }
@@ -492,6 +497,7 @@ pub fn default_system_prompt() -> String {
 #[serde(rename_all = "lowercase")]
 pub enum TtsProvider {
     Openai,
+    Fish,
     Command,
 }
 
@@ -944,10 +950,15 @@ impl Config {
             return invalid("hardware.volume_step должен быть 1..50".into());
         }
         match self.stt.provider {
-            SttProvider::Openai => {
+            SttProvider::Openai | SttProvider::Fish => {
                 validate_http_url("stt.base_url", &self.stt.base_url)?;
                 if self.stt.model.is_empty() {
                     return invalid("stt.model пуст".into());
+                }
+                if let Some(ca) = &self.stt.tls_ca_file {
+                    if !ca.is_file() {
+                        return invalid(format!("stt.tls_ca_file не найден: {}", ca.display()));
+                    }
                 }
             }
             SttProvider::Command => {
@@ -964,7 +975,7 @@ impl Config {
             return invalid("llm.temperature должен быть 0..2".into());
         }
         match self.tts.provider {
-            TtsProvider::Openai => {
+            TtsProvider::Openai | TtsProvider::Fish => {
                 validate_http_url("tts.base_url", &self.tts.base_url)?;
                 if self.tts.model.is_empty() || self.tts.voice.is_empty() {
                     return invalid("tts.model/voice пусты".into());

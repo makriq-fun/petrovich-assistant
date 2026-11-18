@@ -13,7 +13,7 @@ use reqwest::multipart::{Form, Part};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::http::{check_status, client, endpoint, redact, retryable};
+use crate::http::{check_status, client, client_with_ca, endpoint, redact, retryable};
 
 #[async_trait]
 pub trait Stt: Send + Sync {
@@ -23,11 +23,107 @@ pub trait Stt: Send + Sync {
 pub fn from_config(cfg: &SttConfig, secrets: &Secrets) -> Result<Box<dyn Stt>> {
     match cfg.provider {
         SttProvider::Openai => Ok(Box::new(OpenAiStt::new(cfg, secrets)?)),
+        SttProvider::Fish => Ok(Box::new(FishStt::new(cfg, secrets)?)),
         SttProvider::Command => Ok(Box::new(CommandStt::new(
             cfg.command.clone(),
             cfg.timeout_ms,
         )?)),
     }
+}
+
+pub struct FishStt {
+    http: reqwest::Client,
+    url: String,
+    model: String,
+    language: String,
+    key: Option<String>,
+    retries: u8,
+}
+
+impl FishStt {
+    pub fn new(cfg: &SttConfig, secrets: &Secrets) -> Result<Self> {
+        Ok(Self {
+            http: client_with_ca(cfg.timeout_ms, cfg.tls_ca_file.as_deref())?,
+            url: endpoint(&cfg.base_url, "/asr"),
+            model: cfg.model.clone(),
+            language: cfg.language.clone(),
+            key: secrets
+                .get(&cfg.api_key_env)
+                .filter(|k| !k.is_empty())
+                .map(str::to_owned),
+            retries: cfg.retries,
+        })
+    }
+}
+
+#[async_trait]
+impl Stt for FishStt {
+    async fn transcribe(&self, wav: Vec<u8>) -> Result<String> {
+        let mut attempt = 0u8;
+        loop {
+            let part = Part::bytes(wav.clone())
+                .file_name("audio.wav")
+                .mime_str("audio/wav")
+                .context("multipart WAV")?;
+            let mut form = Form::new()
+                .part("audio", part)
+                .text("ignore_timestamps", "true")
+                .text("tag_audio_events", "false")
+                .text("diarize", "false");
+            if !self.language.is_empty() {
+                form = form.text("language", self.language.clone());
+            }
+            let mut req = self
+                .http
+                .post(&self.url)
+                .header("model", &self.model)
+                .multipart(form);
+            if let Some(key) = &self.key {
+                req = req.bearer_auth(key);
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let text = resp.text().await.context("Fish STT: чтение")?;
+                    let v: serde_json::Value = serde_json::from_str(&text)
+                        .with_context(|| format!("Fish STT: не JSON: {}", redact(&text)))?;
+                    let raw = v
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("Fish STT: нет text"))?;
+                    let cleaned = strip_speaker_markers(raw);
+                    if cleaned.is_empty() {
+                        bail!("Fish STT: пустой текст");
+                    }
+                    return Ok(cleaned);
+                }
+                Ok(resp) if retryable(resp.status()) && attempt < self.retries => {
+                    tracing::warn!("Fish STT: HTTP {}; повтор {}", resp.status(), attempt + 1);
+                }
+                Ok(resp) => return check_status(resp, "Fish STT").await.map(|_| String::new()),
+                Err(e) if attempt < self.retries => {
+                    tracing::warn!("Fish STT: {e:#}; повтор {}", attempt + 1);
+                }
+                Err(e) => return Err(e).context("Fish STT: попытки исчерпаны"),
+            }
+            attempt += 1;
+            tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(u32::from(attempt)))).await;
+        }
+    }
+}
+
+fn strip_speaker_markers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<|speaker:") {
+        out.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find("|>") {
+            rest = &rest[start + end + 2..];
+        } else {
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_owned()
 }
 
 pub struct OpenAiStt {
@@ -236,6 +332,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.transcribe(vec![0; 100]).await.unwrap(), "файл");
+    }
+
+    #[tokio::test]
+    async fn fish_stt_parses_text() {
+        let (url, handle) = serve_once(200, "application/json", r#"{"text":" Джарвис? "}"#).await;
+        let cfg = SttConfig {
+            provider: SttProvider::Fish,
+            base_url: url,
+            model: "transcribe-1".into(),
+            timeout_ms: 5000,
+            ..SttConfig::default()
+        };
+        let s = FishStt::new(&cfg, &Secrets::default()).unwrap();
+        assert_eq!(s.transcribe(vec![0; 10]).await.unwrap(), "Джарвис?");
+        handle.await.unwrap();
     }
 
     #[tokio::test]

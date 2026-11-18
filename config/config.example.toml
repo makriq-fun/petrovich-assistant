@@ -56,6 +56,7 @@ response_timeout_ms = 60000
 max_tool_rounds = 2
 
 [stt]
+# openai, fish или command
 provider = "openai"
 base_url = "https://api.openai.com/v1"
 model = "whisper-1"
@@ -79,6 +80,7 @@ system_prompt = """Ты — Джарвис, голосовой помощник 
 вызови его; не выдумывай результаты."""
 
 [tts]
+# openai, fish или command
 provider = "openai"
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini-tts"

@@ -83,8 +83,10 @@
 ## `[stt]`, `[llm]`, `[tts]`
 
 Общие поля: `base_url`, `model`, `api_key_env`, `timeout_ms`, `retries`.
-Для `command`-провайдеров — `command` (argv, без оболочки). Полные схемы и
-примеры — [providers.md](providers.md).
+STT/TTS поддерживают `openai`, `fish`, `command`; LLM — OpenAI-совместимый
+HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
+провайдеров — `command` (argv, без оболочки). Полные схемы и примеры —
+[providers.md](providers.md).
 
 ## `[tools]`
 

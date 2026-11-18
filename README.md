@@ -15,7 +15,7 @@ STT, ответ строит LLM с инструментами, озвучка �
 
 | Проверка | Состояние |
 |---|---|
-| 110 тестов workspace, clippy `-D warnings` | проходят на хосте |
+| 112 тестов workspace, clippy `-D warnings` | проходят на хосте |
 | Совместимость активации с эталоном | 4 реальные записи, те же срабатывания и score |
 | Кросс-сборка ARMv7 musl | собрана статическая ARMv7-сборка, запущена под qemu |
 | ALSA/VQE/LED/часы/кнопки на колонке | не проверялись здесь |
@@ -142,7 +142,7 @@ DNS/NTP задаются отдельно; см. [docs/security.md](docs/securit
 ## Разработка
 
 ```bash
-cargo test --workspace          # 110 тестов
+cargo test --workspace          # 112 тестов
 cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```

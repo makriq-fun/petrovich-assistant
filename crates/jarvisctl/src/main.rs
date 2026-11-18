@@ -36,6 +36,14 @@ enum Cmd {
         #[arg(default_value_t = 5)]
         seconds: u32,
     },
+    /// Синтезировать текст текущим TTS в файл
+    TtsTest {
+        text: String,
+        #[arg(default_value = "/tmp/jarvis-tts.pcm")]
+        out: PathBuf,
+    },
+    /// Распознать WAV текущим STT
+    SttTest { wav: PathBuf },
 }
 
 fn main() -> Result<()> {
@@ -47,6 +55,8 @@ fn main() -> Result<()> {
         Cmd::Logs { lines } => logs(&loaded, lines),
         Cmd::WakeTest { wav } => wake_test(&loaded, &wav),
         Cmd::AudioTest { seconds } => audio_test(&loaded, seconds),
+        Cmd::TtsTest { text, out } => tts_test(&loaded, &text, &out),
+        Cmd::SttTest { wav } => stt_test(&loaded, &wav),
     }
 }
 
@@ -338,6 +348,40 @@ fn parse_proc_ip(hex: &str, v6: bool) -> Option<IpAddr> {
         let v = u32::from_str_radix(hex, 16).ok()?;
         Some(IpAddr::V4(Ipv4Addr::from(v.swap_bytes())))
     }
+}
+
+fn tts_test(loaded: &jarvis_core::LoadedConfig, text: &str, out: &Path) -> Result<()> {
+    use futures_util::StreamExt as _;
+    let rt = tokio::runtime::Runtime::new()?;
+    let tts = jarvis_providers::tts_from_config(&loaded.config.tts, &loaded.secrets)?;
+    let mut audio = rt.block_on(tts.synthesize(text))?;
+    let mut bytes = Vec::new();
+    rt.block_on(async {
+        while let Some(chunk) = audio.stream.next().await {
+            bytes.extend_from_slice(&chunk?);
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
+    std::fs::write(out, &bytes)?;
+    let samples = bytes.len() / 2;
+    println!(
+        "TTS: {} байт, {:.2} с при {} Гц; файл {}",
+        bytes.len(),
+        samples as f64 / f64::from(audio.sample_rate),
+        audio.sample_rate,
+        out.display()
+    );
+    Ok(())
+}
+
+fn stt_test(loaded: &jarvis_core::LoadedConfig, wav: &Path) -> Result<()> {
+    let bytes = std::fs::read(wav)?;
+    jarvis_core::wav::parse(&bytes)?;
+    let stt = jarvis_providers::stt_from_config(&loaded.config.stt, &loaded.secrets)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let text = rt.block_on(stt.transcribe(bytes))?;
+    println!("STT: {text}");
+    Ok(())
 }
 
 fn audio_test(loaded: &jarvis_core::LoadedConfig, seconds: u32) -> Result<()> {

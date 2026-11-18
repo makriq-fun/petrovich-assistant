@@ -34,7 +34,113 @@ pub trait Tts: Send + Sync {
 pub fn from_config(cfg: &TtsConfig, secrets: &Secrets) -> Result<Box<dyn Tts>> {
     match cfg.provider {
         TtsProvider::Openai => Ok(Box::new(OpenAiTts::new(cfg, secrets)?)),
+        TtsProvider::Fish => Ok(Box::new(FishTts::new(cfg, secrets)?)),
         TtsProvider::Command => Ok(Box::new(CommandTts::new(cfg)?)),
+    }
+}
+
+pub struct FishTts {
+    http: reqwest::Client,
+    url: String,
+    model: String,
+    reference_id: String,
+    key: Option<String>,
+    sample_rate: u32,
+    timeout: Duration,
+    retries: u8,
+}
+
+impl FishTts {
+    pub fn new(cfg: &TtsConfig, secrets: &Secrets) -> Result<Self> {
+        if cfg.voice.trim().is_empty() {
+            bail!("Fish TTS: пустой reference_id (tts.voice)");
+        }
+        Ok(Self {
+            http: client(cfg.timeout_ms)?,
+            url: endpoint(&cfg.base_url, "/tts"),
+            model: cfg.model.clone(),
+            reference_id: cfg.voice.clone(),
+            key: secrets
+                .get(&cfg.api_key_env)
+                .filter(|k| !k.is_empty())
+                .map(str::to_owned),
+            sample_rate: cfg.sample_rate,
+            timeout: Duration::from_millis(cfg.timeout_ms),
+            retries: cfg.retries,
+        })
+    }
+
+    async fn request(&self, text: &str) -> Result<Response> {
+        let body = json!({
+            "text": text,
+            "reference_id": self.reference_id,
+            "format": "pcm",
+            "sample_rate": self.sample_rate,
+            "normalize": true,
+        });
+        let mut last: Option<anyhow::Error> = None;
+        for attempt in 0..=self.retries {
+            let mut req = self
+                .http
+                .post(&self.url)
+                .header("model", &self.model)
+                .json(&body);
+            if let Some(key) = &self.key {
+                req = req.bearer_auth(key);
+            }
+            match tokio::time::timeout(self.timeout, req.send()).await {
+                Ok(Ok(resp)) if resp.status().is_success() => return Ok(resp),
+                Ok(Ok(resp)) => {
+                    let status = resp.status();
+                    let text = redact(&resp.text().await.unwrap_or_default());
+                    let err = anyhow::anyhow!("Fish TTS: HTTP {status}: {text}");
+                    if !(status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || status.is_server_error())
+                        || attempt == self.retries
+                    {
+                        return Err(err);
+                    }
+                    last = Some(err);
+                }
+                Ok(Err(e)) if attempt == self.retries => return Err(e).context("Fish TTS: запрос"),
+                Ok(Err(e)) => last = Some(anyhow::Error::from(e)),
+                Err(_) if attempt == self.retries => {
+                    bail!("Fish TTS: тайм-аут {} мс", self.timeout.as_millis())
+                }
+                Err(_) => last = Some(anyhow::anyhow!("Fish TTS: тайм-аут")),
+            }
+            tracing::warn!("Fish TTS: повтор {}/{}", attempt + 1, self.retries);
+            tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(attempt as u32))).await;
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("Fish TTS: нет ответа")))
+    }
+}
+
+#[async_trait]
+impl Tts for FishTts {
+    async fn synthesize(&self, text: &str) -> Result<AudioStream> {
+        if text.trim().is_empty() {
+            bail!("Fish TTS: пустой текст");
+        }
+        let resp = self.request(text).await?;
+        let stream = resp
+            .bytes_stream()
+            .map(|r| r.map_err(anyhow::Error::from))
+            .boxed();
+        Ok(AudioStream {
+            format: TtsFormat::Pcm,
+            sample_rate: self.sample_rate,
+            channels: 1,
+            stream,
+        })
+    }
+
+    fn audio_format(&self) -> TtsFormat {
+        TtsFormat::Pcm
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 }
 
@@ -300,6 +406,26 @@ mod tests {
             retries: 0,
             ..TtsConfig::default()
         }
+    }
+
+    #[tokio::test]
+    async fn fish_tts_streams_pcm() {
+        let (url, handle) = serve_once(200, "audio/pcm", "FISH").await;
+        let cfg = TtsConfig {
+            provider: TtsProvider::Fish,
+            base_url: url,
+            model: "s2.1-pro-free".into(),
+            voice: "ref".into(),
+            timeout_ms: 5000,
+            retries: 0,
+            ..TtsConfig::default()
+        };
+        let t = FishTts::new(&cfg, &Secrets::default()).unwrap();
+        assert_eq!(
+            collect(t.synthesize("привет").await.unwrap()).await,
+            b"FISH"
+        );
+        handle.await.unwrap();
     }
 
     #[tokio::test]

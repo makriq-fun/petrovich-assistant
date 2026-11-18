@@ -12,12 +12,22 @@ use reqwest::{Client, Response, StatusCode};
 use tokio::sync::mpsc;
 
 pub fn client(timeout_ms: u64) -> Result<Client> {
-    Client::builder()
+    client_with_ca(timeout_ms, None)
+}
+
+/// Клиент с дополнительным корневым сертификатом для self-hosted HTTPS.
+pub fn client_with_ca(timeout_ms: u64, ca_file: Option<&std::path::Path>) -> Result<Client> {
+    let mut builder = Client::builder()
         .timeout(Duration::from_millis(timeout_ms))
         .connect_timeout(Duration::from_secs(10))
-        .user_agent(concat!("jarvis-station/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("создание HTTP-клиента")
+        .user_agent(concat!("jarvis-station/", env!("CARGO_PKG_VERSION")));
+    if let Some(path) = ca_file {
+        let pem = std::fs::read(path).with_context(|| format!("сертификат {}", path.display()))?;
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .with_context(|| format!("разбор сертификата {}", path.display()))?;
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().context("создание HTTP-клиента")
 }
 
 pub fn endpoint(base: &str, path: &str) -> String {
