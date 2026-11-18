@@ -7,13 +7,13 @@ cd "$root"
 target=${TARGET:-armv7-unknown-linux-musleabihf}
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 if [[ $target == host ]]; then
-  cargo build --release -p jarvisd -p jarvisctl
+  cargo build --locked --release -p jarvisd -p jarvisctl
   bin=target/release
 else
   if command -v cross >/dev/null 2>&1; then
-    cross build --release --target "$target" -p jarvisd -p jarvisctl
+    cross build --locked --release --target "$target" -p jarvisd -p jarvisctl
   else
-    cargo build --release --target "$target" -p jarvisd -p jarvisctl
+    cargo build --locked --release --target "$target" -p jarvisd -p jarvisctl
   fi
   bin="target/$target/release"
 fi

@@ -99,4 +99,6 @@ GitHub Actions:
 - кросс-сборка `armv7-unknown-linux-musleabihf` через `cross`;
 - выпуск по тегу `v*` с tar и `SHA256SUMS`.
 
-Кросс-сборка в CI не равна проверке на устройстве.
+Кросс-сборка в CI не равна проверке на устройстве. В этом окружении
+статический `armv7-unknown-linux-musleabihf` собран в контейнере с musl-
+тулчейном; `jarvisd --version` и `--check-config` прошли под `qemu-arm`.

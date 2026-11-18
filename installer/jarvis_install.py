@@ -408,9 +408,14 @@ def start_jarvis(t: Transport):
 set -eu
 [ -x /etc/init.d/S99jarvis ] || { echo "нет /etc/init.d/S99jarvis" >&2; exit 1; }
 /etc/init.d/S99jarvis
-sleep 2
-pid=$(cat /run/jarvisd.pid 2>/dev/null || true)
-[ -n "$pid" ] && [ -d "/proc/$pid" ] && echo "jarvisd pid=$pid" || { echo "jarvisd не запустился" >&2; exit 1; }
+i=0
+while [ "$i" -lt 10 ]; do
+  pid=$(cat /run/jarvisd.pid 2>/dev/null || true)
+  if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then echo "jarvisd pid=$pid"; exit 0; fi
+  i=$((i+1)); sleep 1
+done
+echo "jarvisd не запустился" >&2
+exit 1
 """
     )
 
