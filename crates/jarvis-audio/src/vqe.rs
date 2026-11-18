@@ -123,7 +123,13 @@ impl Vqe {
         let mut cfg: P = ptr::null_mut();
         // SAFETY: валидные строки и out-указатель.
         let err = unsafe { (lib.cfg_create)(preset.as_ptr(), &mut cfg) };
-        Self::check(lib, err, "Config_CreateFromPreset")?;
+        if let Err(e) = Self::check(lib, err, "Config_CreateFromPreset") {
+            if !cfg.is_null() {
+                // SAFETY: config успела создаться до ошибки; освобождаем.
+                unsafe { (lib.cfg_free)(cfg) };
+            }
+            return Err(e);
+        }
         if cfg.is_null() {
             bail!("VQE: пустой config");
         }

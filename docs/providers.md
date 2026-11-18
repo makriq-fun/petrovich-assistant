@@ -99,6 +99,18 @@ max_bytes = 16777216
 
 Локальный TTS:
 
+Пример управления Spotiya:
+
+```toml
+[tools]
+music_command = ["spotiya"]
+# альтернатива с явным шаблоном:
+# music_command = ["/data/jarvis/music.sh", "{action}"]
+```
+
+Spotiya должна быть установлена и настроена отдельно; проект управляет
+только командами play/pause/resume/next/previous/status.
+
 ```toml
 [tts]
 provider = "command"

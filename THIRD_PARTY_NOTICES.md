@@ -10,6 +10,7 @@
 - Источник: <https://github.com/Morvex885/pulsar>
 - Ревизия: `1a45067e30f9f9081252a65f87242e2a5659d25a` (2026-11-15)
 - Лицензия: AGPL-3.0-only
+- Авторство: © Morvex885 и участники Pulsar
 - Что использовано:
   - схема загрузки `libasound` через `dlopen` и обхода версионированных
     символов (`crates/jarvis-audio/src/alsa.rs`);
@@ -39,7 +40,7 @@
 ## openWakeWord и Google speech embedding
 
 - Источник: <https://github.com/dscripka/openWakeWord>
-- Лицензия кода: Apache-2.0.
+- Лицензия кода: Apache-2.0; веса Google speech_embedding — Apache-2.0.
 - Feature-backbone (мел-фильтры и веса эмбеддингов) восходит к
   Google `speech_embedding`, опубликованному под Apache-2.0.
 - В репозитории: `assets/oww.bin` (мел-фильтры + веса эмбеддингов) и
