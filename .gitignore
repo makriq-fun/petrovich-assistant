@@ -1,0 +1,12 @@
+/target/
+**/*.rs.bk
+*.log
+/config/secrets.env
+/config/config.local.toml
+/state/
+/dist/
+/backups/
+*.tar.gz
+.DS_Store
+__pycache__/
+.venv/

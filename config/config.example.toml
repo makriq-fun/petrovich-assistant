@@ -1,0 +1,131 @@
+# Конфигурация jarvisd. Скопируйте в /data/jarvis/config.toml.
+# Секреты — в отдельный файл /data/jarvis/secrets.env с правами 0600.
+version = 1
+
+[daemon]
+log_level = "info"
+state_dir = "/data/jarvis/state"
+pid_file = "/run/jarvisd.pid"
+secrets_file = "/data/jarvis/secrets.env"
+
+[audio]
+capture_pcm = "default"
+playback_pcm = "default"
+capture_rate = 48000
+capture_channels = 6
+mic_channels = [0, 1, 2, 3]
+reference_channels = [4, 5]
+sample_rate = 16000
+playback_rate = 48000
+period_ms = 20
+# auto: использовать VQE из прошивки, если он есть; off: только собственный DSP.
+vqe = "auto"
+vqe_preset = "yandexmini_2"
+vqe_models = "/system/vendor/quasar/vqe_models"
+aec = true
+aec_delay_ms = 0
+
+[wakeword]
+enabled = true
+# Модель, обученная на слово «Джарвис». В репозиторий не входит.
+model = "/data/jarvis/models/wakeword.json"
+assets = "/data/jarvis/assets/oww.bin"
+# Смещение к порогу модели: -0.1 делает срабатывание чаще.
+sensitivity = 0.0
+refractory_ms = 2000
+gain = 32
+
+[vad]
+min_speech_ms = 200
+silence_ms = 700
+max_utterance_ms = 12000
+energy_margin_db = 9.0
+pre_roll_ms = 300
+absolute_db = -18.0
+
+[dialog]
+follow_up_ms = 5000
+listen_timeout_ms = 10000
+history_turns = 8
+history_chars = 12000
+history_ttl_s = 900
+barge_in = true
+wake_chime = true
+response_timeout_ms = 60000
+max_tool_rounds = 2
+
+[stt]
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "whisper-1"
+api_key_env = "JARVIS_STT_API_KEY"
+language = "ru"
+timeout_ms = 30000
+retries = 2
+
+[llm]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "JARVIS_LLM_API_KEY"
+temperature = 0.4
+max_tokens = 800
+timeout_ms = 60000
+retries = 2
+stream = true
+tools = true
+system_prompt = """Ты — Джарвис, голосовой помощник в колонке. Отвечай по-русски, кратко и по делу.
+Ответ должен хорошо звучать вслух: без списков, разметки и сносок. Если нужен инструмент,
+вызови его; не выдумывай результаты."""
+
+[tts]
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini-tts"
+voice = "alloy"
+api_key_env = "JARVIS_TTS_API_KEY"
+format = "pcm"
+sample_rate = 24000
+timeout_ms = 30000
+retries = 2
+max_bytes = 16777216
+
+[tools]
+enabled = ["time", "timer", "volume", "music", "web_fetch", "weather", "reset_dialog", "stop"]
+timeout_ms = 10000
+web_timeout_ms = 15000
+web_max_bytes = 1048576
+# Для поиска укажите SearXNG, например "http://127.0.0.1:8080/search".
+search_url = ""
+# Только для отладки: разрешить web_fetch к частным адресам и HTTP.
+web_allow_private = false
+# Погода: Open-Meteo, ключ не нужен. Координаты обязательны для работы инструмента.
+weather_url = "https://api.open-meteo.com/v1/forecast"
+weather_latitude = 55.7558
+weather_longitude = 37.6173
+weather_place = "Москва"
+# Песочница для run_code: пусто — инструмент выключен.
+sandbox_command = []
+sandbox_timeout_ms = 5000
+# Управление Spotiya; пусто — инструмент music выключен.
+music_command = []
+
+[hardware]
+model = "auto"
+leds = true
+clock = true
+buttons = true
+action_key = 582
+volume_step = 5
+led_brightness = 0.8
+clock_brightness = 0.35
+
+[privacy]
+check_yandex_connections = true
+yandex_hosts = [
+  "yandex.net",
+  "yandex.ru",
+  "yandex.com",
+  "uniproxy.alice.yandex.net",
+  "clck.yandex.net",
+  "quasar.yandex.net",
+]

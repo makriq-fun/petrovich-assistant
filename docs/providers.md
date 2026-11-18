@@ -1,0 +1,146 @@
+# Провайдеры STT, LLM и TTS
+
+Все три компонента заменяемы. Сетевые провайдеры говорят на
+OpenAI-совместимом HTTP; локальные могут быть командами. HTTPS обязателен,
+кроме loopback (`localhost`, `127.0.0.1`, `::1`) — это удобно для локального
+whisper.cpp/SearXNG. Сертификаты проверяются rustls; отключения проверки нет.
+
+## Секреты
+
+```env
+JARVIS_STT_API_KEY=...
+JARVIS_LLM_API_KEY=...
+JARVIS_TTS_API_KEY=...
+```
+
+Файл `secrets.env` должен иметь права `0600` (или `0400`). Значения не
+попадают в `Debug`, журналы и сообщения об ошибках; длинные токены в телах
+ошибок редактируются. Ссылка на ключ — `api_key_env` в каждой секции.
+Пустой ключ допустим: локальный сервер может не требовать авторизации.
+
+## STT
+
+```toml
+[stt]
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "whisper-1"
+api_key_env = "JARVIS_STT_API_KEY"
+language = "ru"
+timeout_ms = 30000
+retries = 2
+```
+
+Запрос: `POST {base_url}/audio/transcriptions`, multipart:
+`file=audio.wav` (PCM16, 16 кГц, моно), `model`, `language`,
+`response_format=json`. Ожидается `{"text": "..."}`.
+
+Локальный вариант:
+
+```toml
+[stt]
+provider = "command"
+timeout_ms = 60000
+command = ["whisper-cli", "-m", "/data/jarvis/models/ggml-base.bin",
+           "-f", "{file}", "-l", "ru", "-nt"]
+```
+
+`{file}` заменяется временным WAV; без него WAV подаётся на stdin. Вывод —
+текст или JSON с полем `text`. Команда запускается без shell, с
+`kill_on_drop` и тайм-аутом.
+
+## LLM
+
+```toml
+[llm]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "JARVIS_LLM_API_KEY"
+temperature = 0.4
+max_tokens = 800
+stream = true
+tools = true
+timeout_ms = 60000
+retries = 2
+system_prompt = "..."
+```
+
+`POST {base_url}/chat/completions`. При `stream=true` разбирается SSE:
+`choices[0].delta.content` и `delta.tool_calls` (id/name/arguments
+накапливаются по `index`). `[DONE]`, `finish_reason`, `usage`
+поддерживаются. При `stream=false` — обычный JSON.
+
+Инструменты передаются как OpenAI `tools`; при непустом списке добавляется
+`tool_choice=auto`. Демон исполняет вызовы, добавляет `tool`-сообщения и
+повторяет запрос до `dialog.max_tool_rounds`.
+
+Повторы: 429, 5xx и сетевые ошибки; экспоненциальная пауза. Если поток уже
+начался, повтор не делается, чтобы не произнести ответ дважды.
+
+## TTS
+
+```toml
+[tts]
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini-tts"
+voice = "alloy"
+api_key_env = "JARVIS_TTS_API_KEY"
+format = "pcm"
+sample_rate = 24000
+timeout_ms = 30000
+max_bytes = 16777216
+```
+
+`POST {base_url}/audio/speech` с `response_format` `pcm` или `wav`.
+`pcm` — поток сырых S16LE моно с частотой `sample_rate`; байты сразу уходят в
+очередь воспроизведения. `wav` буферизуется, заголовок проверяется, тело
+играется как PCM; потоковым этот режим не является.
+
+Локальный TTS:
+
+```toml
+[tts]
+provider = "command"
+format = "pcm"
+sample_rate = 24000
+timeout_ms = 30000
+command = ["rhvoice-client", "-v", "anna", "-r", "24000"]
+```
+
+Текст подаётся на stdin, PCM/WAV — на stdout. Для WAV заголовок
+проверяется, вывод ограничен `max_bytes`.
+
+## Поток и предложения
+
+LLM отдаёт текст дельтами; `SentenceChunker` режет его на фразы по
+`.!?…` с учётом сокращений. Каждая фраза синтезируется и проигрывается
+последовательно. Это даёт раннее начало речи, но не параллелит TTS разных
+фраз. Ошибка TTS прерывает ход; автомат играет звук ошибки.
+
+## Погода
+
+Погода — не отдельный провайдер, а инструмент:
+
+```toml
+[tools]
+weather_url = "https://api.open-meteo.com/v1/forecast"
+weather_latitude = 55.7558
+weather_longitude = 37.6173
+weather_place = "Москва"
+```
+
+Open-Meteo не требует ключа. Ответ содержит текущую температуру, ощущаемую,
+влажность, ветер, осадки и дневной диапазон; коды WMO переводятся на русский.
+Endpoint можно заменить совместимым. Если координаты не заданы, инструмент
+не публикуется для LLM.
+
+## Проверка
+
+```bash
+jarvisd --config config.toml --check-config
+```
+
+Показывает провайдеров, наличие каждого секрета (только имя), VQE и файлы
+модели. Реальные запросы проверяются только запуском; тесты используют
+локальный mock-сервер и не тратят квоты.
