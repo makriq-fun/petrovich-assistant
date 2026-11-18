@@ -336,9 +336,13 @@ def backup(t: Transport, host_dir: Path, label: str = "install") -> tuple[str, P
     t.pull(remote, local)
     if sha256(local) != digest:
         raise InstallError("SHA256 локальной копии backup не совпадает")
-    (host_dir / f"{name}.json").write_text(
-        json.dumps({"remote": remote, "sha256": digest, "created": name}, indent=2)
-    )
+    meta = host_dir / f"{name}.json"
+    meta.write_text(json.dumps({"remote": remote, "sha256": digest, "created": name}, indent=2))
+    try:
+        os.chmod(local, 0o600)
+        os.chmod(meta, 0o600)
+    except OSError:
+        pass
     print(f"backup: {local} ({digest[:12]}…)")
     return digest, local
 
@@ -573,9 +577,9 @@ fi
                 return 1
         except InstallError:
             pass
-    t.script(f"set -eu\nrm -f {DEVICE_ROOT}/enabled\n")
+    emergency_restore(t)
     print(
-        "помощник не запустился; enabled снят, Алиса не включалась. "
+        "помощник не запустился; init-скрипты Quasar восстановлены, enabled снят. "
         "Смотрите /data/jarvis/log/jarvisd.log",
         file=sys.stderr,
     )

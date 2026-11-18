@@ -2,6 +2,7 @@
 # Супервизор jarvisd: перезапускает только помощника. Если он падает слишком
 # часто, остаётся остановленным и НЕ запускает Quasar/Алису.
 set -u
+umask 077
 D=/data/jarvis
 PID=$D/supervise.pid
 LOG=$D/log/jarvisd.log

@@ -8,6 +8,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```
 
+На момент написания: **110 тестов** в workspace и 5 Python-тестов установщика.
 Что покрыто:
 
 - конфигурация: значения по умолчанию, неизвестные ключи, каналы, URL,
@@ -25,7 +26,8 @@ python3 -m unittest discover -s installer/tests -v
   погода, отключённая песочница;
 - железо: sysfs-запись LED/часов, поиск evdev, разбор `input_event`, GPIO-мут;
 - демон: полный ход STT→LLM→TTS на mock-сервере, включая tool call;
-- установщик: определение модели, выбор отката, шим Quasar, валидация версии.
+- установщик: определение модели, выбор отката, шим Quasar, валидация версии;
+- диагностика: разбор IPv4/IPv6 из `/proc/net/tcp{,6}`.
 
 ## Совместимость с эталоном активации
 

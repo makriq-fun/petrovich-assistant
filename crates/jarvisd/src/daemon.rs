@@ -63,25 +63,6 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     let profile =
         jarvis_core::profile::resolve(&cfg.hardware.model).map_err(|e| anyhow::anyhow!("{e}"))?;
     tracing::info!("модель: {} ({})", profile.model_name, profile.codename);
-    let pid = cfg.daemon.pid_file.clone();
-    write_pid(&pid)?;
-
-    let audio = AudioEngine::start(&cfg.audio, profile)?;
-    let AudioEngine {
-        capture,
-        playback,
-        volume,
-    } = audio;
-    let frontend = AudioFrontend::new(&cfg.audio)?;
-    tracing::info!(
-        "аудио: канал распознавания 16 кГц, VQE={}",
-        if frontend.uses_vqe() {
-            "прошивка"
-        } else {
-            "собственный DSP"
-        }
-    );
-
     let wake = if cfg.wakeword.enabled {
         Some(WakeWord::load(
             &cfg.wakeword.model,
@@ -98,6 +79,21 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     if let Some(w) = &wake {
         tracing::info!("активация: «{}», порог {:.3}", w.name(), w.threshold());
     }
+    let audio = AudioEngine::start(&cfg.audio, profile)?;
+    let AudioEngine {
+        capture,
+        playback,
+        volume,
+    } = audio;
+    let frontend = AudioFrontend::new(&cfg.audio)?;
+    tracing::info!(
+        "аудио: канал распознавания 16 кГц, VQE={}",
+        if frontend.uses_vqe() {
+            "прошивка"
+        } else {
+            "собственный DSP"
+        }
+    );
 
     let stt = Arc::from(stt_from_config(&cfg.stt, &loaded.secrets)?);
     let tts = Arc::from(tts_from_config(&cfg.tts, &loaded.secrets)?);
@@ -194,7 +190,9 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         }
     };
     tokio::pin!(shutdown);
-    tracing::info!("jarvisd готов");
+    let pid = cfg.daemon.pid_file.clone();
+    write_pid(&pid)?;
+    tracing::info!("jarvisd {} готов", jarvis_core::VERSION);
     loop {
         let deadline = app.follow_deadline;
         let follow = async move {
