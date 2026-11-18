@@ -102,7 +102,7 @@
 | `weather_place` | `""` | название в ответе |
 | `sandbox_command` | `[]` | argv песочницы; пусто — `run_code` выключен |
 | `sandbox_timeout_ms` | `5000` | предел кода |
-| `music_command` | `[]` | команда Spotiya; пусто — музыки нет |
+| `music_command` | `[]` | команда Spotiya; `{action}` подставляется в argv, иначе действие добавляется последним |
 
 Инструмент доступен, только если он одновременно в `enabled`, настроен и
 разрешён. `weather` требует координат; `web_search` — `search_url`;

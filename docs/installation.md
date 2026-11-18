@@ -120,6 +120,7 @@ DHCP/NetworkManager может перезаписать `resolv.conf` после
 ```bash
 /data/jarvis/current/jarvisctl --config /data/jarvis/config.toml status
 /data/jarvis/current/jarvisctl --config /data/jarvis/config.toml doctor
+/data/jarvis/current/jarvisctl --config /data/jarvis/config.toml audio-test 5
 tail -n 100 /data/jarvis/log/jarvisd.log
 ```
 

@@ -16,9 +16,14 @@ impl CommandMusic {
     }
 
     fn run(&self, action: &str) -> Result<String> {
-        let out = Command::new(&self.argv[0])
-            .args(&self.argv[1..])
-            .arg(action)
+        let template = self.argv.iter().any(|a| a.contains("{action}"));
+        let mut cmd = Command::new(&self.argv[0]);
+        if template {
+            cmd.args(self.argv[1..].iter().map(|a| a.replace("{action}", action)));
+        } else {
+            cmd.args(&self.argv[1..]).arg(action);
+        }
+        let out = cmd
             .output()
             .with_context(|| format!("музыка: запуск {}", self.argv[0]))?;
         if !out.status.success() {

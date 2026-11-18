@@ -111,6 +111,7 @@ tail -f /data/jarvis/log/jarvisd.log
 | `jarvisctl doctor` | ALSA, VQE, кнопки, часы, Quasar, DNS, место |
 | `jarvisctl logs -n 100` | журнал демона |
 | `jarvisctl wake-test file.wav` | прогон модели активации по записи |
+| `jarvisctl audio-test 5` | запись с микрофонов и уровни каналов |
 | `installer ... rollback` | предыдущий релиз и проверка |
 | `installer ... restore` | снять помощника и вернуть init-скрипты Quasar |
 

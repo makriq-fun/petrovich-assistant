@@ -31,6 +31,11 @@ enum Cmd {
     },
     /// Прогнать модель активации по WAV (16 кГц моно)
     WakeTest { wav: PathBuf },
+    /// Записать несколько секунд с микрофонов и показать уровни каналов
+    AudioTest {
+        #[arg(default_value_t = 5)]
+        seconds: u32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -41,6 +46,7 @@ fn main() -> Result<()> {
         Cmd::Doctor => doctor(&loaded),
         Cmd::Logs { lines } => logs(&loaded, lines),
         Cmd::WakeTest { wav } => wake_test(&loaded, &wav),
+        Cmd::AudioTest { seconds } => audio_test(&loaded, seconds),
     }
 }
 
@@ -332,6 +338,66 @@ fn parse_proc_ip(hex: &str, v6: bool) -> Option<IpAddr> {
         let v = u32::from_str_radix(hex, 16).ok()?;
         Some(IpAddr::V4(Ipv4Addr::from(v.swap_bytes())))
     }
+}
+
+fn audio_test(loaded: &jarvis_core::LoadedConfig, seconds: u32) -> Result<()> {
+    let cfg = &loaded.config;
+    let path = std::env::temp_dir().join(format!("jarvis-audio-{}.wav", std::process::id()));
+    let out = Command::new("arecord")
+        .args([
+            "-D",
+            &cfg.audio.capture_pcm,
+            "-f",
+            "S16_LE",
+            "-r",
+            &cfg.audio.capture_rate.to_string(),
+            "-c",
+            &cfg.audio.capture_channels.to_string(),
+            "-d",
+            &seconds.to_string(),
+            path.to_str().unwrap_or("/tmp/jarvis-audio.wav"),
+        ])
+        .output()
+        .context("arecord не запущен")?;
+    if !out.status.success() {
+        bail!("arecord: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let wav = jarvis_core::wav::parse(&std::fs::read(&path)?)?;
+    let _ = std::fs::remove_file(&path);
+    println!(
+        "запись: {} Гц, {} каналов, {} мс",
+        wav.sample_rate,
+        wav.channels,
+        wav.duration_ms()
+    );
+    for ch in 0..wav.channels as usize {
+        let vals: Vec<i16> = wav
+            .samples
+            .iter()
+            .skip(ch)
+            .step_by(wav.channels as usize)
+            .copied()
+            .collect();
+        let rms = (vals.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>()
+            / vals.len().max(1) as f64)
+            .sqrt();
+        let db = if rms <= 1.0 {
+            -120.0
+        } else {
+            20.0 * (rms / 32768.0).log10()
+        };
+        let clip = vals.iter().filter(|v| v.unsigned_abs() >= 32700).count();
+        println!("  канал {ch}: RMS {db:.1} dBFS, клипов {clip}");
+    }
+    println!(
+        "VQE: {}",
+        if jarvis_audio::vqe::available().is_ok() {
+            "доступен"
+        } else {
+            "нет"
+        }
+    );
+    Ok(())
 }
 
 fn pids(name: &str) -> Vec<u32> {
