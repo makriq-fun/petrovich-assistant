@@ -666,6 +666,67 @@ echo "Quasar восстановлен; перезагрузите колонку
     return 0
 
 
+
+def privacy(args) -> int:
+    """Независимые DNS/NTP с резервной копией. Явная операция."""
+    t = detect_transport(args)
+    info = require_device(t, allow_unknown=True)
+    if args.dry_run:
+        print(f"[dry-run] DNS {args.dns or ['1.1.1.1', '9.9.9.9']}, NTP {args.ntp or ['0.pool.ntp.org']}")
+        return 0
+    if args.revert:
+        t.script(
+            r"""
+set -eu
+D=/data/jarvis
+last=$(ls -1d "$D"/backups/privacy-* 2>/dev/null | sort | tail -1 || true)
+[ -n "$last" ] || { echo "нет backup privacy" >&2; exit 1; }
+if [ "$(awk '$2=="/"{print $4}' /proc/mounts | head -1)" != "rw" ]; then
+  mount -o remount,rw / >/dev/null 2>&1 || true
+fi
+[ -f "$last/resolv.conf" ] && cp -p "$last/resolv.conf" /etc/resolv.conf
+[ -f "$last/ntp.conf" ] && cp -p "$last/ntp.conf" /etc/ntp.conf
+[ -f "$last/chrony.conf" ] && cp -p "$last/chrony.conf" /etc/chrony.conf
+mount -o remount,ro / >/dev/null 2>&1 || true
+echo "восстановлено из $last"
+"""
+        )
+        return 0
+    dns = args.dns or ["1.1.1.1", "9.9.9.9"]
+    ntp = args.ntp or ["0.pool.ntp.org", "1.pool.ntp.org"]
+    import shlex as _sh
+
+    ns = "\n".join(f"nameserver {_sh.quote(x)}" for x in dns)
+    servers = "\n".join(f"server {_sh.quote(x)} iburst" for x in ntp)
+    script = f"""
+set -eu
+D=/data/jarvis
+B="$D/backups/privacy-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$B"
+if [ "$(awk '$2=="/"{{print $4}}' /proc/mounts | head -1)" != "rw" ]; then
+  mount -o remount,rw / >/dev/null 2>&1 || true
+fi
+cp -p /etc/resolv.conf "$B/resolv.conf" 2>/dev/null || true
+printf '%s\n' {_sh.quote(ns)} > /etc/resolv.conf
+for f in /etc/ntp.conf /etc/chrony.conf; do
+  if [ -f "$f" ]; then
+    cp -p "$f" "$B/$(basename "$f")"
+    printf '%s\n' {_sh.quote(servers)} > "$f"
+  fi
+done
+for s in /etc/init.d/S*ntp* /etc/init.d/S*chrony*; do
+  [ -x "$s" ] && "$s" restart >/dev/null 2>&1 || true
+done
+mount -o remount,ro / >/dev/null 2>&1 || true
+echo "backup: $B"
+"""
+    out = t.script(script).stdout.decode("utf-8", "replace")
+    print(out.strip())
+    print(f"DNS: {', '.join(dns)}; NTP: {', '.join(ntp)}")
+    print("ВНИМАНИЕ: DHCP/NetworkManager может перезаписать resolv.conf после перезагрузки")
+    return 0
+
+
 def status(args) -> int:
     t = detect_transport(args)
     info = device_info(t)
@@ -731,6 +792,11 @@ def main(argv=None) -> int:
     s.set_defaults(func=status)
     s = sub.add_parser("backup")
     s.set_defaults(func=make_backup)
+    s = sub.add_parser("privacy")
+    s.add_argument("--dns", action="append", help="nameserver, можно несколько")
+    s.add_argument("--ntp", action="append", help="NTP-сервер, можно несколько")
+    s.add_argument("--revert", action="store_true", help="восстановить последний backup")
+    s.set_defaults(func=privacy)
     args = p.parse_args(argv)
     if args.dry_run:
         print("режим dry-run: изменения не вносятся")

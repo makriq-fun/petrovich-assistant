@@ -538,6 +538,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn weather_tool_is_available_when_configured() {
+        let (url, handle) = crate::testutil::serve_once(
+            200,
+            "application/json",
+            r#"{"current":{"temperature_2m":5.0,"weather_code":0},"daily":{"temperature_2m_max":[7.0],"temperature_2m_min":[1.0]}}"#,
+        )
+        .await;
+        let w = crate::weather::Weather::new(url, 55.7, 37.6, "Москва", 5000, true).unwrap();
+        let c = ctx(&["weather"]).with_weather(w);
+        let r = c.execute("weather", "{}").await.unwrap();
+        assert!(r.content.contains("Москва"));
+        assert!(r.content.contains("ясно"));
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn web_fetch_works_with_local_server() {
         let (url, handle) = crate::testutil::serve_once(
             200,

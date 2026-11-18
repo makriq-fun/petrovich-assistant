@@ -1,5 +1,6 @@
 //! Диагностика установки без запуска демона.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -168,22 +169,29 @@ fn doctor(loaded: &jarvis_core::LoadedConfig) -> Result<()> {
     } else {
         fail("Quasar или maind работают: возможны обращения к Яндексу");
     }
-    let hosts = &cfg.privacy.yandex_hosts;
-    let mut resolved = Vec::new();
-    for h in hosts.iter().take(4) {
-        if Command::new("getent")
-            .args(["hosts", h])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            resolved.push(h.clone());
-        }
-    }
-    if resolved.is_empty() {
+    let ips = resolve_hosts(&cfg.privacy.yandex_hosts);
+    if ips.is_empty() {
         ok("домены Яндекса не разрешаются");
     } else {
-        warn(&format!("разрешаются домены Яндекса: {resolved:?}"));
+        warn(&format!(
+            "домены Яндекса разрешаются в {} адрес(ов)",
+            ips.len()
+        ));
+        match active_remote_ips() {
+            Ok(conns) => {
+                let hit: Vec<String> = conns
+                    .iter()
+                    .filter(|ip| ips.contains(ip))
+                    .map(ToString::to_string)
+                    .collect();
+                if hit.is_empty() {
+                    ok("активных TCP-соединений с найденными адресами нет");
+                } else {
+                    fail(&format!("есть TCP-соединения с Яндексом: {hit:?}"));
+                }
+            }
+            Err(e) => warn(&format!("не удалось прочитать /proc/net/tcp: {e}")),
+        }
     }
     match disk_free("/data") {
         Some(kb) if kb > 20 * 1024 => ok(&format!("свободно на /data: {} МиБ", kb / 1024)),
@@ -268,6 +276,64 @@ fn wake_test(loaded: &jarvis_core::LoadedConfig, path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn resolve_hosts(hosts: &[String]) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    for h in hosts.iter().take(8) {
+        if let Ok(addrs) = (h.as_str(), 443).to_socket_addrs() {
+            for a in addrs {
+                if !out.contains(&a.ip()) {
+                    out.push(a.ip());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn active_remote_ips() -> Result<Vec<IpAddr>> {
+    let mut out = Vec::new();
+    for (path, v6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 4 || f[3] != "01" {
+                continue;
+            }
+            let Some((_, hex)) = f[2].split_once(':') else {
+                continue;
+            };
+            if let Some(ip) = parse_proc_ip(hex, v6) {
+                if !out.contains(&ip) {
+                    out.push(ip);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn parse_proc_ip(hex: &str, v6: bool) -> Option<IpAddr> {
+    if v6 {
+        if hex.len() != 32 {
+            return None;
+        }
+        let mut bytes = [0u8; 16];
+        for word in 0..4 {
+            let v = u32::from_str_radix(&hex[word * 8..word * 8 + 8], 16).ok()?;
+            bytes[word * 4..word * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        Some(IpAddr::V6(Ipv6Addr::from(bytes)))
+    } else {
+        if hex.len() != 8 {
+            return None;
+        }
+        let v = u32::from_str_radix(hex, 16).ok()?;
+        Some(IpAddr::V4(Ipv4Addr::from(v.swap_bytes())))
+    }
+}
+
 fn pids(name: &str) -> Vec<u32> {
     let mut out = Vec::new();
     if let Ok(dir) = std::fs::read_dir("/proc") {
@@ -289,4 +355,20 @@ fn disk_free(path: &str) -> Option<u64> {
     let out = Command::new("df").args(["-k", path]).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_proc_ipv4_and_ipv6() {
+        assert_eq!(
+            parse_proc_ip("0100007F", false),
+            Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
+        );
+        assert_eq!(parse_proc_ip("0100007F", true), None);
+        let v6 = parse_proc_ip("00000000000000000000000001000000", true);
+        assert_eq!(v6, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
 }

@@ -101,6 +101,20 @@ python3 installer/jarvis_install.py --ssh-host station upgrade
 Конфигурация и секреты без явных `--config/--secrets` не перезаписываются.
 Старые релизы остаются для отката (установщик не удаляет их автоматически).
 
+## Независимые DNS и NTP
+
+```bash
+python3 installer/jarvis_install.py --ssh-host station privacy \
+  --dns 1.1.1.1 --dns 9.9.9.9 --ntp 0.pool.ntp.org
+# откат:
+python3 installer/jarvis_install.py --ssh-host station privacy --revert
+```
+
+Команда сохраняет прежние `/etc/resolv.conf` и конфигурацию NTP в
+`/data/jarvis/backups/privacy-*`, перемонтирует rootfs на запись и обратно.
+DHCP/NetworkManager может перезаписать `resolv.conf` после перезагрузки —
+проверьте через `jarvisctl doctor`.
+
 ## Проверка
 
 ```bash
