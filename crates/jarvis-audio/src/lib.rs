@@ -3,6 +3,7 @@
 pub mod aec;
 pub mod alsa;
 pub mod chime;
+pub mod denoise;
 pub mod frontend;
 pub mod resample;
 pub mod vad;

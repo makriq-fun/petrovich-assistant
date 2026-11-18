@@ -278,7 +278,7 @@ impl App {
         }
         if self.dialog.wake_chime {
             let _ = self.chime.play(ChimeSound::Wake);
-            self.ignore_until = tokio::time::Instant::now() + Duration::from_millis(300);
+            self.ignore_until = tokio::time::Instant::now() + Duration::from_millis(200);
         }
         self.enter_listening(false);
     }
@@ -475,6 +475,13 @@ pub fn check(loaded: &LoadedConfig) -> Result<()> {
     if cfg.wakeword.enabled {
         jarvis_wakeword::WakeModel::load(&cfg.wakeword.model)
             .map_err(|e| anyhow::anyhow!("модель активации: {e:#}"))?;
+        let assets = std::fs::read(&cfg.wakeword.assets)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", cfg.wakeword.assets.display()))?;
+        let tensors = jarvis_wakeword::tensors::read(&assets)
+            .map_err(|e| anyhow::anyhow!("backbone: {e:#}"))?;
+        if !tensors.contains_key("mel.filters") {
+            bail!("в backbone нет mel.filters");
+        }
         println!("активация: {}", cfg.wakeword.model.display());
     }
     println!(

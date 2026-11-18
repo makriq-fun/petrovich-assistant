@@ -341,8 +341,12 @@ fn pids(name: &str) -> Vec<u32> {
             let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
                 continue;
             };
-            if let Ok(cmd) = std::fs::read(format!("/proc/{pid}/comm")) {
-                if String::from_utf8_lossy(&cmd).trim() == name {
+            if let Ok(cmd) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+                let text = String::from_utf8_lossy(&cmd);
+                if text
+                    .split('\0')
+                    .any(|arg| arg.rsplit('/').next() == Some(name))
+                {
                     out.push(pid);
                 }
             }

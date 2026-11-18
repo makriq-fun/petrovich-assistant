@@ -33,6 +33,7 @@
 | `vqe_models` | `/system/vendor/quasar/vqe_models` | модели VQE |
 | `alsa_lib` | `""` | путь к libasound; пусто — поиск загрузчиком |
 | `aec` | `true` | собственный NLMS, если VQE нет |
+| `denoise` | `true` | шумовой затвор в fallback-тракте |
 | `aec_delay_ms` | `0` | компенсация задержки тракта |
 | `downmix_before_vqe` | `false` | не используется VQE; оставлен для совместимости |
 

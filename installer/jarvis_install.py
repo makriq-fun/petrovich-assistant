@@ -274,13 +274,24 @@ def upload_secret(t: Transport, local: Path, remote: str):
     )
 
 
-def upload_file(t: Transport, local: Path, remote: str, mode: str = "644"):
+def upload_file(
+    t: Transport, local: Path, remote: str, mode: str = "644", verify: bool = False
+):
     tmp = remote + ".tmp"
     t.push(local, tmp)
+    check = ""
+    if verify:
+        digest = sha256(local)
+        check = (
+            f"got=$(sha256sum {shlex.quote(tmp)} | awk '{{print $1}}')\n"
+            f"[ \"$got\" = {shlex.quote(digest)} ] || "
+            f"{{ echo \"SHA256 не совпал: {remote}\" >&2; rm -f {shlex.quote(tmp)}; exit 1; }}\n"
+        )
     t.script(
         "set -eu\n"
         f"chmod {mode} {shlex.quote(tmp)}\n"
-        f"mv -f {shlex.quote(tmp)} {shlex.quote(remote)}\n"
+        + check
+        + f"mv -f {shlex.quote(tmp)} {shlex.quote(remote)}\n"
     )
 
 
@@ -448,8 +459,8 @@ def deploy_release(t: Transport, artifact: Path, ctl: Path, version: str, dry: b
         print(f"[dry-run] загрузка {artifact} и {ctl} в {remote_dir}")
         return
     t.script(f"set -eu\nmkdir -p {remote_dir}\n")
-    upload_file(t, artifact, f"{remote_dir}/jarvisd", "755")
-    upload_file(t, ctl, f"{remote_dir}/jarvisctl", "755")
+    upload_file(t, artifact, f"{remote_dir}/jarvisd", "755", verify=True)
+    upload_file(t, ctl, f"{remote_dir}/jarvisctl", "755", verify=True)
 
 
 def _default_binary(name: str) -> Path:
@@ -468,7 +479,7 @@ def install(args) -> int:
     ctl = Path(args.jarvisctl) if args.jarvisctl else _default_binary("jarvisctl")
     if not artifact.is_file() or not ctl.is_file():
         raise InstallError("нет артефактов jarvisd/jarvisctl; соберите: scripts/build.sh")
-    need = (artifact.stat().st_size + ctl.stat().st_size) * 2 // 1024 + 8192
+    need = (artifact.stat().st_size + ctl.stat().st_size) * 2 // 1024 + 4096
     if info.data_free_kb and info.data_free_kb < need:
         raise InstallError(
             f"мало места на /data: {info.data_free_kb} КиБ, нужно ~{need} КиБ"
@@ -703,8 +714,9 @@ set -eu
 D=/data/jarvis
 B="$D/backups/privacy-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$B"
+ro=0
 if [ "$(awk '$2=="/"{{print $4}}' /proc/mounts | head -1)" != "rw" ]; then
-  mount -o remount,rw / >/dev/null 2>&1 || true
+  mount -o remount,rw / >/dev/null 2>&1 && ro=1 || true
 fi
 cp -p /etc/resolv.conf "$B/resolv.conf" 2>/dev/null || true
 printf '%s\n' {_sh.quote(ns)} > /etc/resolv.conf
@@ -717,7 +729,7 @@ done
 for s in /etc/init.d/S*ntp* /etc/init.d/S*chrony*; do
   [ -x "$s" ] && "$s" restart >/dev/null 2>&1 || true
 done
-mount -o remount,ro / >/dev/null 2>&1 || true
+[ "$ro" = 1 ] && mount -o remount,ro / >/dev/null 2>&1 || true
 echo "backup: $B"
 """
     out = t.script(script).stdout.decode("utf-8", "replace")

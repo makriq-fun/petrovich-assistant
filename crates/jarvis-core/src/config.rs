@@ -126,6 +126,9 @@ pub struct AudioConfig {
     pub aec_delay_ms: u32,
     #[serde(default = "default_true")]
     pub aec: bool,
+    /// Шумовой затвор в fallback-тракте (VQE делает это сам).
+    #[serde(default = "default_true")]
+    pub denoise: bool,
     /// Микшировать четыре микрофона в моно до VQE. Для Мини 2 VQE сам
     /// использует все каналы, поэтому по умолчанию false.
     #[serde(default)]
@@ -150,6 +153,7 @@ impl Default for AudioConfig {
             alsa_lib: PathBuf::new(),
             aec_delay_ms: default_aec_delay_ms(),
             aec: true,
+            denoise: true,
             downmix_before_vqe: false,
         }
     }

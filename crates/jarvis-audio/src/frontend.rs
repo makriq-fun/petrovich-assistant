@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::aec::{DelayLine, Nlms};
 use crate::alsa::Pcm;
+use crate::denoise::NoiseGate;
 use crate::resample::{Decimator, LinearResampler};
 use crate::vqe::{Vqe, VQE_OMNI};
 
@@ -247,6 +248,7 @@ pub struct AudioFrontend {
     mic_dec: Decimator,
     ref_dec: Decimator,
     aec: Option<Nlms>,
+    denoise: Option<NoiseGate>,
     delay: DelayLine,
 }
 
@@ -297,6 +299,7 @@ impl AudioFrontend {
             mic_dec: Decimator::new(cfg.capture_rate, cfg.sample_rate),
             ref_dec: Decimator::new(cfg.capture_rate, cfg.sample_rate),
             aec: (cfg.aec && !cfg.reference_channels.is_empty()).then(|| Nlms::new(256, 0.4)),
+            denoise: cfg.denoise.then(|| NoiseGate::new(cfg.sample_rate, 9.0)),
             delay: DelayLine::new(delay_samples),
         })
     }
@@ -424,6 +427,10 @@ impl AudioFrontend {
             mic
         } else {
             mic
+        };
+        let samples = match self.denoise.as_mut() {
+            Some(g) => g.process(&samples),
+            None => samples,
         };
         vec![PcmFrame { samples, reference }]
     }

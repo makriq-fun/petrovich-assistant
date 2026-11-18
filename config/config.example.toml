@@ -23,6 +23,7 @@ vqe = "auto"
 vqe_preset = "yandexmini_2"
 vqe_models = "/system/vendor/quasar/vqe_models"
 aec = true
+denoise = true
 aec_delay_ms = 0
 
 [wakeword]
