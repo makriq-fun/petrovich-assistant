@@ -97,6 +97,8 @@ personal/non-commercial использования; не добавляйте и
 Общие поля: `base_url`, `model`, `api_key_env`, `timeout_ms`, `retries`.
 У LLM есть `fallback_models`: список моделей того же API, которые берутся по
 порядку при 429, 404 и при отказе провайдера разобрать вызов инструмента.
+`api_key_envs` — дополнительные переменные с ключами того же провайдера: при
+429/401 ключи перебираются до смены модели.
 STT/TTS поддерживают `openai`, `fish`, `command`; LLM — OpenAI-совместимый
 HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 провайдеров — `command` (argv, без оболочки). Полные схемы и примеры —

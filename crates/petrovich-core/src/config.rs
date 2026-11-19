@@ -458,6 +458,10 @@ pub struct LlmConfig {
     pub fallback_models: Vec<String>,
     #[serde(default = "default_llm_key_env")]
     pub api_key_env: String,
+    /// Дополнительные переменные с ключами того же провайдера. При 429/401
+    /// ключи перебираются до смены модели.
+    #[serde(default)]
+    pub api_key_envs: Vec<String>,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
     #[serde(default = "default_temperature")]
@@ -481,6 +485,7 @@ impl Default for LlmConfig {
             model: default_llm_model(),
             fallback_models: Vec::new(),
             api_key_env: default_llm_key_env(),
+            api_key_envs: Vec::new(),
             system_prompt: default_system_prompt(),
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
@@ -1030,6 +1035,14 @@ impl Config {
         }
         if self.llm.temperature < 0.0 || self.llm.temperature > 2.0 {
             return invalid("llm.temperature должен быть 0..2".into());
+        }
+        if self
+            .llm
+            .api_key_envs
+            .iter()
+            .any(|env| env.trim().is_empty())
+        {
+            return invalid("llm.api_key_envs содержит пустое имя".into());
         }
         match self.tts.provider {
             TtsProvider::Openai | TtsProvider::Fish => {

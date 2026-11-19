@@ -79,6 +79,9 @@ model = "gpt-4o-mini"
 # разбора вызова инструмента. Пусто — только основная модель.
 fallback_models = []
 api_key_env = "PETROVICH_LLM_API_KEY"
+# Дополнительные ключи того же провайдера: при 429/401 ключи перебираются
+# до перехода на fallback_models.
+api_key_envs = []
 temperature = 0.4
 max_tokens = 800
 timeout_ms = 60000

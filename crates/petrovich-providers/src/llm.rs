@@ -2,6 +2,8 @@
 //! разбором SSE и вызовом инструментов.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -21,7 +23,8 @@ pub struct OpenAiLlm {
     http: reqwest::Client,
     url: String,
     models: Vec<String>,
-    key: Option<String>,
+    keys: Vec<String>,
+    next_key: Arc<AtomicUsize>,
     temperature: f32,
     max_tokens: u32,
     retries: u8,
@@ -41,14 +44,26 @@ impl OpenAiLlm {
         if models.is_empty() {
             bail!("LLM: не задана модель");
         }
+        let mut keys: Vec<String> = Vec::new();
+        for env in std::iter::once(cfg.api_key_env.as_str())
+            .chain(cfg.api_key_envs.iter().map(String::as_str))
+        {
+            let env = env.trim();
+            if env.is_empty() {
+                continue;
+            }
+            if let Some(key) = secrets.get(env).filter(|k| !k.is_empty()) {
+                if !keys.iter().any(|k| k == key) {
+                    keys.push(key.to_owned());
+                }
+            }
+        }
         Ok(Self {
             http: client(cfg.timeout_ms)?,
             url: endpoint(&cfg.base_url, "/chat/completions"),
             models,
-            key: secrets
-                .get(&cfg.api_key_env)
-                .filter(|k| !k.is_empty())
-                .map(str::to_owned),
+            keys,
+            next_key: Arc::new(AtomicUsize::new(0)),
             temperature: cfg.temperature,
             max_tokens: cfg.max_tokens,
             retries: cfg.retries,
@@ -76,10 +91,13 @@ impl OpenAiLlm {
         let mut last: Option<anyhow::Error> = None;
         for (model_idx, model) in self.models.iter().enumerate() {
             let has_next = model_idx + 1 < self.models.len();
-            for attempt in 0..=self.retries {
+            let retries = self.retries.max(self.keys.len().saturating_sub(1) as u8);
+            for attempt in 0..=retries {
                 let body = self.body(model, messages, tools);
                 let mut req = self.http.post(&self.url).json(&body);
-                if let Some(key) = &self.key {
+                if !self.keys.is_empty() {
+                    let key =
+                        &self.keys[self.next_key.fetch_add(1, Ordering::Relaxed) % self.keys.len()];
                     req = req.bearer_auth(key);
                 }
                 let result = tokio::time::timeout(self.timeout, req.send()).await;
@@ -102,7 +120,15 @@ impl OpenAiLlm {
                             || status == reqwest::StatusCode::NOT_FOUND
                             || is_tool_schema_failure(status, &text);
                         let err = anyhow::anyhow!("LLM: {model}: HTTP {status}: {text}");
-                        if switch && has_next {
+                        let key_limit = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                            || status == reqwest::StatusCode::UNAUTHORIZED;
+                        if key_limit && self.keys.len() > 1 && attempt < retries {
+                            tracing::warn!(
+                                "LLM: {model}: {}; пробую следующий ключ",
+                                short_reason(status, &text)
+                            );
+                            last = Some(err);
+                        } else if switch && has_next {
                             tracing::warn!(
                                 "LLM: модель {model}: {}; пробую {}",
                                 short_reason(status, &text),
@@ -110,22 +136,22 @@ impl OpenAiLlm {
                             );
                             last = Some(err);
                             break;
-                        }
-                        if !transient || attempt == self.retries {
+                        } else if !transient || attempt == retries {
                             if transient && has_next {
                                 last = Some(err);
                                 break;
                             }
                             return Err(err);
+                        } else {
+                            last = Some(err);
                         }
-                        last = Some(err);
                     }
-                    Ok(Err(e)) if attempt == self.retries => {
+                    Ok(Err(e)) if attempt == retries => {
                         last = Some(anyhow::Error::from(e).context("LLM: запрос"));
                         break;
                     }
                     Ok(Err(e)) => last = Some(anyhow::Error::from(e)),
-                    Err(_) if attempt == self.retries => {
+                    Err(_) if attempt == retries => {
                         last = Some(anyhow::anyhow!(
                             "LLM: {model}: тайм-аут {} мс",
                             self.timeout.as_millis()
@@ -134,7 +160,7 @@ impl OpenAiLlm {
                     }
                     Err(_) => last = Some(anyhow::anyhow!("LLM: {model}: тайм-аут")),
                 }
-                tracing::warn!("LLM: {model}: повтор {}/{}", attempt + 1, self.retries);
+                tracing::warn!("LLM: {model}: повтор {}/{}", attempt + 1, retries);
                 tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(attempt as u32))).await;
             }
         }
@@ -405,6 +431,27 @@ mod tests {
         }
     }
 
+    fn secrets_with(pairs: &[(&str, &str)]) -> Secrets {
+        let path = std::env::temp_dir().join(format!(
+            "petrovich-secrets-{}-{}.env",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let text: String = pairs.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let secrets = Secrets::load(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        secrets
+    }
+
     async fn collect(mut rx: mpsc::Receiver<LlmEvent>) -> (String, Vec<ToolCall>, Option<String>) {
         let mut text = String::new();
         let mut calls = Vec::new();
@@ -513,6 +560,40 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["model"], "primary");
         assert_eq!(requests[1]["model"], "backup");
+    }
+
+    #[tokio::test]
+    async fn retries_with_next_key_before_model_fallback() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"второй ключ\"}}]}\n\n\
+                   data: [DONE]\n\n";
+        let (url, handle) = serve_sequence(vec![
+            (
+                429,
+                "application/json".into(),
+                br#"{"error":{"message":"tokens per day","code":"rate_limit_exceeded"}}"#.to_vec(),
+            ),
+            (200, "text/event-stream".into(), sse.as_bytes().to_vec()),
+        ])
+        .await;
+        let mut config = cfg(&url, true);
+        config.model = "primary".into();
+        config.retries = 0;
+        config.api_key_env = "KEY1".into();
+        config.api_key_envs = vec!["KEY2".into()];
+        let secrets = secrets_with(&[("KEY1", "one"), ("KEY2", "two")]);
+        let llm = OpenAiLlm::new(&config, &secrets).unwrap();
+        let rx = llm
+            .chat_stream(vec![ChatMessage::user("hi")], vec![])
+            .await
+            .unwrap();
+        let (text, calls, err) = collect(rx).await;
+        assert_eq!(text, "второй ключ");
+        assert!(calls.is_empty());
+        assert_eq!(err, None);
+        let requests = handle.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["model"], "primary");
+        assert_eq!(requests[1]["model"], "primary");
     }
 
     #[tokio::test]
