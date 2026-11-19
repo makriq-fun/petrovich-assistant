@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 
 use crate::embed::EMB_DIM;
 use crate::features::Features;
+use crate::micro::TfliteHead;
 use crate::model::{Head, WakeModel, CTX};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -15,9 +16,23 @@ pub struct Detection {
     pub at_ms: u64,
 }
 
+enum HeadKind {
+    Json(Head),
+    Tflite(TfliteHead),
+}
+
+impl HeadKind {
+    fn score(&self, x: &[f32]) -> f32 {
+        match self {
+            Self::Json(h) => h.score(x),
+            Self::Tflite(h) => h.score(x),
+        }
+    }
+}
+
 pub struct Detector {
     features: Features,
-    head: Head,
+    head: HeadKind,
     threshold: f32,
     refractory_ms: u64,
     gain: u32,
@@ -42,7 +57,7 @@ impl Detector {
         let threshold = (threshold.unwrap_or(model.threshold) + sensitivity).clamp(0.05, 0.999);
         Ok(Self {
             features,
-            head: model.head.clone(),
+            head: HeadKind::Json(model.head.clone()),
             threshold,
             refractory_ms,
             gain: gain.max(1),
@@ -57,6 +72,31 @@ impl Detector {
 
     pub fn threshold(&self) -> f32 {
         self.threshold
+    }
+
+    pub fn new_tflite(
+        head: TfliteHead,
+        assets: &Path,
+        threshold: f32,
+        sensitivity: f32,
+        gain: u32,
+        refractory_ms: u64,
+    ) -> Result<Self> {
+        let features = Features::load(assets).context("загрузка feature-backbone")?;
+        let threshold = (threshold + sensitivity).clamp(0.05, 0.999);
+        Ok(Self {
+            features,
+            head: HeadKind::Tflite(head),
+            threshold,
+            refractory_ms,
+            gain: gain.max(1),
+            ring: vec![0.0; CTX * EMB_DIM],
+            have: 0,
+            run: 0,
+            last_hit: None,
+            last_score: 0.0,
+            scratch: Vec::new(),
+        })
     }
 
     pub fn last_score(&self) -> f32 {

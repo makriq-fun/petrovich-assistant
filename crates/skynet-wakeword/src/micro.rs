@@ -13,7 +13,28 @@ use serde::Deserialize;
 
 use crate::detector::Detection;
 
-const TFLITE: &str = "/system/vendor/quasar/libs/libtflite.so";
+const TFLITE_VENDOR: &str = "/system/vendor/quasar/libs/libtflite.so";
+const TFLITE_PRIVATE: &str = "libtensorflowlite_c.so";
+
+/// Сначала своя TFLite рядом с бинарником, затем библиотека прошивки.
+/// Переменная `SKYNET_TFLITE` нужна только для диагностики.
+fn library_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("SKYNET_TFLITE").map(PathBuf::from) {
+        if p.is_file() {
+            return p;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for p in [dir.join(TFLITE_PRIVATE), dir.join("lib").join(TFLITE_PRIVATE)] {
+                if p.is_file() {
+                    return p;
+                }
+            }
+        }
+    }
+    PathBuf::from(TFLITE_VENDOR)
+}
 
 #[repr(C)]
 struct MfHandle {
@@ -45,6 +66,7 @@ struct Tflite {
     output: unsafe extern "C" fn(*mut TfInterpreter, c_int) -> *mut TfTensor,
     copy_in: unsafe extern "C" fn(*mut TfTensor, *const c_void, usize) -> c_int,
     copy_out: unsafe extern "C" fn(*mut TfTensor, *mut c_void, usize) -> c_int,
+    tensor_bytes: unsafe extern "C" fn(*const TfTensor) -> usize,
     invoke: unsafe extern "C" fn(*mut TfInterpreter) -> c_int,
 }
 
@@ -99,8 +121,10 @@ impl Tflite {
     }
 
     fn load() -> Result<Self> {
-        // SAFETY: библиотека прошивки, символы проверяются ниже.
-        let lib = unsafe { Library::new(TFLITE) }.with_context(|| format!("dlopen {TFLITE}"))?;
+        let path = library_path();
+        // SAFETY: библиотека проверяется по символам ниже.
+        let lib = unsafe { Library::new(&path) }
+            .with_context(|| format!("dlopen {}", path.display()))?;
         unsafe fn sym<T: Copy>(lib: &Library, name: &[u8]) -> Result<T> {
             // SAFETY: T — точный тип символа C API.
             unsafe { lib.get::<T>(name) }
@@ -122,9 +146,116 @@ impl Tflite {
                 output: sym(&lib, b"TfLiteInterpreterGetOutputTensor\0")?,
                 copy_in: sym(&lib, b"TfLiteTensorCopyFromBuffer\0")?,
                 copy_out: sym(&lib, b"TfLiteTensorCopyToBuffer\0")?,
+                tensor_bytes: sym(&lib, b"TfLiteTensorByteSize\0")?,
                 invoke: sym(&lib, b"TfLiteInterpreterInvoke\0")?,
                 _lib: lib,
             })
+        }
+    }
+}
+
+/// Стандартная голова openWakeWord: вход `[1,16,96]` float32,
+/// выход `[1,1]` float32. Эмбеддинги считает `Features` (OWW1).
+pub struct TfliteHead {
+    tflite: Tflite,
+    model: *mut TfModel,
+    interp: *mut TfInterpreter,
+    input: *mut TfTensor,
+    output: *mut TfTensor,
+}
+
+// SAFETY: экземпляр используется одним потоком; C-указатели не разделяются.
+unsafe impl Send for TfliteHead {}
+
+impl TfliteHead {
+    pub fn load(path: &Path) -> Result<Self> {
+        let tflite = Tflite::load()?;
+        // SAFETY: валидный путь; модель живёт, пока жив TfliteHead.
+        let (model, interp) = unsafe {
+            let cpath = CString::new(path.to_string_lossy().as_bytes())
+                .with_context(|| path.display().to_string())?;
+            let model = (tflite.model_create_file)(cpath.as_ptr());
+            if model.is_null() {
+                bail!("TfLiteModelCreateFromFile: {path:?}");
+            }
+            let options = (tflite.options_create)();
+            let interp = (tflite.interp_create)(model, options);
+            (tflite.options_delete)(options);
+            if interp.is_null() {
+                (tflite.model_delete)(model);
+                bail!("TfLiteInterpreterCreate");
+            }
+            if (tflite.allocate)(interp) != 0 {
+                (tflite.interp_delete)(interp);
+                (tflite.model_delete)(model);
+                bail!("TfLiteInterpreterAllocateTensors");
+            }
+            (model, interp)
+        };
+        let input = unsafe { (tflite.input)(interp, 0) };
+        let output = unsafe { (tflite.output)(interp, 0) };
+        if input.is_null() || output.is_null() {
+            unsafe {
+                (tflite.interp_delete)(interp);
+                (tflite.model_delete)(model);
+            }
+            bail!("TFLite: нет входного/выходного тензора");
+        }
+        let in_bytes = unsafe { (tflite.tensor_bytes)(input) };
+        let out_bytes = unsafe { (tflite.tensor_bytes)(output) };
+        if in_bytes != 16 * 96 * 4 || out_bytes != 4 {
+            // SAFETY: тензоры принадлежат interp.
+            unsafe {
+                (tflite.interp_delete)(interp);
+                (tflite.model_delete)(model);
+            }
+            bail!(
+                "TFLite: вход {in_bytes} байт (нужно {}), выход {out_bytes} байт",
+                16 * 96 * 4
+            );
+        }
+        Ok(Self {
+            tflite,
+            model,
+            interp,
+            input,
+            output,
+        })
+    }
+
+    /// `x` — 16 эмбеддингов по 96, старые первыми.
+    pub fn score(&self, x: &[f32]) -> f32 {
+        if x.len() != 16 * 96 {
+            return 0.0;
+        }
+        let mut out = 0.0f32;
+        // SAFETY: размеры проверены при загрузке.
+        unsafe {
+            if (self.tflite.copy_in)(self.input, x.as_ptr().cast(), x.len() * 4) != 0 {
+                return 0.0;
+            }
+            if (self.tflite.invoke)(self.interp) != 0 {
+                return 0.0;
+            }
+            if (self.tflite.copy_out)(
+                self.output,
+                (&mut out as *mut f32).cast(),
+                std::mem::size_of::<f32>(),
+            ) != 0
+            {
+                return 0.0;
+            }
+        }
+        out
+    }
+}
+
+impl Drop for TfliteHead {
+    fn drop(&mut self) {
+        // SAFETY: указатели созданы в load и ещё не освобождены.
+        unsafe {
+            (self.tflite.interp_delete)(self.interp);
+            (self.tflite.model_delete)(self.model);
         }
     }
 }
@@ -173,6 +304,7 @@ pub struct MicroWakeWord {
     output: *mut TfTensor,
     frontend: *mut MfHandle,
     pending: Vec<i16>,
+    tensor: [i8; 120],
     stride: usize,
     stride_max: usize,
     cutoff: u8,
@@ -206,21 +338,24 @@ impl MicroWakeWord {
         if !model_path.is_file() {
             bail!("нет TFLite-модели: {}", model_path.display());
         }
+        let vendor = library_path() == Path::new(TFLITE_VENDOR);
         let tflite = Tflite::load()?;
         let model_bytes =
             std::fs::read(&model_path).with_context(|| model_path.display().to_string())?;
-        if let (Some(need), Some(have)) =
-            (model_min_runtime(&model_bytes), tflite.runtime_version())
-        {
-            if need > have {
-                bail!(
-                    "модель требует TFLite {}.{}, прошивка {}.{}; \
-                     используйте openWakeWord-модель",
-                    need.0,
-                    need.1,
-                    have.0,
-                    have.1
-                );
+        if vendor {
+            if let (Some(need), Some(have)) =
+                (model_min_runtime(&model_bytes), tflite.runtime_version())
+            {
+                if need > have {
+                    bail!(
+                        "модель требует TFLite {}.{}, прошивка {}.{}; \
+                         используйте openWakeWord-модель",
+                        need.0,
+                        need.1,
+                        have.0,
+                        have.1
+                    );
+                }
             }
         }
         // SAFETY: валидный путь; модель живёт, пока жив MicroWakeWord.
@@ -277,6 +412,7 @@ impl MicroWakeWord {
             output,
             frontend,
             pending: Vec::new(),
+            tensor: [0; 120],
             stride: 0,
             stride_max,
             cutoff,
@@ -310,6 +446,7 @@ impl MicroWakeWord {
         // SAFETY: указатели валидны; сбрасываем состояние фронтенда и окно.
         unsafe { mf_reset(self.frontend) };
         self.pending.clear();
+        self.tensor.fill(0);
         self.stride = 0;
         self.window.fill(0);
         self.pos = 0;
@@ -341,11 +478,10 @@ impl MicroWakeWord {
     }
 
     fn feed_features(&mut self, features: &[i8; 40], now_ms: u64, out: &mut Vec<Detection>) {
-        let mut tensor = [0i8; 120];
-        tensor[self.stride * 40..(self.stride + 1) * 40].copy_from_slice(features);
+        self.tensor[self.stride * 40..(self.stride + 1) * 40].copy_from_slice(features);
         // SAFETY: tensor на 120 int8.
         unsafe {
-            if (self.tflite.copy_in)(self.input, tensor.as_ptr().cast(), tensor.len()) != 0 {
+            if (self.tflite.copy_in)(self.input, self.tensor.as_ptr().cast(), self.tensor.len()) != 0 {
                 return;
             }
         }

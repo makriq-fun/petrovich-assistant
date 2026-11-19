@@ -12,7 +12,7 @@ pub mod tensors;
 use std::path::{Path, PathBuf};
 
 pub use detector::{Detection, Detector};
-pub use micro::MicroWakeWord;
+pub use micro::{MicroWakeWord, TfliteHead};
 pub use model::WakeModel;
 
 enum Backend {
@@ -36,6 +36,29 @@ impl WakeWord {
         gain: u32,
         refractory_ms: u64,
     ) -> anyhow::Result<Self> {
+        if model_path.extension().and_then(|e| e.to_str()) == Some("tflite") {
+            let name = model_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("wakeword")
+                .to_owned();
+            let head = TfliteHead::load(model_path)
+                .map_err(|e| anyhow::anyhow!("{}: {e:#}", model_path.display()))?;
+            let detector = Detector::new_tflite(
+                head,
+                assets,
+                threshold.unwrap_or(0.5),
+                sensitivity,
+                gain,
+                refractory_ms,
+            )
+            .map_err(|e| anyhow::anyhow!("{}: {e:#}", assets.display()))?;
+            return Ok(Self {
+                name,
+                backend: Backend::OpenWakeWord(Box::new(detector)),
+                model_path: model_path.to_path_buf(),
+            });
+        }
         if micro::is_micro_manifest(model_path) {
             let micro = MicroWakeWord::load(model_path, threshold, sensitivity, refractory_ms)
                 .map_err(|e| anyhow::anyhow!("{}: {e:#}", model_path.display()))?;
