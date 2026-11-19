@@ -8,7 +8,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```
 
-На момент написания: **140 тестов** в workspace и 7 Python-тестов установщика.
+На момент написания: **144 теста** в workspace и 7 Python-тестов установщика.
 Что покрыто:
 
 - конфигурация: значения по умолчанию, неизвестные ключи, каналы, URL,
