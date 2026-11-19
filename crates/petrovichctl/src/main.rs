@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use petrovich_core::config::{Config, DEFAULT_CONFIG};
 use petrovich_core::profile;
+use petrovich_core::text::SentenceChunker;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Диагностика petrovichd")]
@@ -468,10 +469,14 @@ fn weather_test(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
 fn llm_test(loaded: &petrovich_core::LoadedConfig, text: &str) -> Result<()> {
     let llm = petrovich_providers::OpenAiLlm::new(&loaded.config.llm, &loaded.secrets)?;
     let rt = tokio::runtime::Runtime::new()?;
-    let mut rx = rt.block_on(llm.chat_stream(
-        vec![petrovich_core::chat::ChatMessage::user(text)],
-        Vec::new(),
-    ))?;
+    let mut messages = Vec::new();
+    if !loaded.config.llm.system_prompt.trim().is_empty() {
+        messages.push(petrovich_core::chat::ChatMessage::system(
+            &loaded.config.llm.system_prompt,
+        ));
+    }
+    messages.push(petrovich_core::chat::ChatMessage::user(text));
+    let mut rx = rt.block_on(llm.chat_stream(messages, Vec::new()))?;
     let mut out = String::new();
     rt.block_on(async {
         while let Some(ev) = rx.recv().await {
@@ -483,7 +488,20 @@ fn llm_test(loaded: &petrovich_core::LoadedConfig, text: &str) -> Result<()> {
         }
         Ok::<(), anyhow::Error>(())
     })?;
-    println!("LLM: {}", out.trim());
+    let mut chunker = SentenceChunker::default();
+    let mut sentences = Vec::new();
+    chunker.push(&out, &mut sentences);
+    if let Some(s) = chunker.flush() {
+        sentences.push(s);
+    }
+    let mut spoken = sentences.join(" ");
+    if chunker.code_seen() && !spoken.contains("Код не пишу.") {
+        spoken.push_str(" Код не пишу.");
+    }
+    println!("LLM: {}", spoken.trim());
+    if chunker.code_seen() {
+        eprintln!("код вырезан из озвучки");
+    }
     Ok(())
 }
 
