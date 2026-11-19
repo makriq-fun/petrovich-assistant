@@ -111,8 +111,14 @@ enabled = ["time", "timer", "alarm", "volume", "music", "emotion", "web_fetch", 
 timeout_ms = 10000
 web_timeout_ms = 15000
 web_max_bytes = 1048576
-# Для поиска укажите SearXNG, например "http://127.0.0.1:8080/search".
+# Поиск: SearXNG JSON ("https://searx.example/search") или DuckDuckGo HTML
+# ("https://html.duckduckgo.com/html/"). Пусто — поиска нет.
 search_url = ""
+# Прокси только для поиска (если общий трафик идёт через другой прокси):
+# search_proxy = "socks5h://127.0.0.1:1080"
+search_proxy = ""
+# Tavily: ключ в secrets.env под этим именем. Пусто — поиск через search_url.
+search_api_key_env = ""
 # Только для отладки: разрешить web_fetch к частным адресам и HTTP.
 web_allow_private = false
 # Погода: Open-Meteo, ключ не нужен. Координаты задают место по умолчанию;

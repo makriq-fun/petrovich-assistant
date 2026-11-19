@@ -61,11 +61,11 @@ pub fn extract(html: &str, max_chars: usize) -> (Option<String>, String) {
     (title.filter(|t| !t.is_empty()), text)
 }
 
-fn collapse(s: &str) -> String {
+pub(crate) fn collapse(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn decode(s: &str) -> String {
+pub(crate) fn decode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(pos) = rest.find('&') {

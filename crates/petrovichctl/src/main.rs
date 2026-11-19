@@ -49,6 +49,8 @@ enum Cmd {
     LlmTest { text: String },
     /// Проверить инструмент погоды
     WeatherTest,
+    /// Проверить веб-поиск
+    SearchTest { query: String },
     /// Прочитать датчик освещённости (5 отсчётов)
     LightTest,
 }
@@ -58,7 +60,11 @@ fn main() -> Result<()> {
     let loaded = Config::load(&cli.config).map_err(|e| anyhow::anyhow!("{e}"))?;
     if matches!(
         &cli.cmd,
-        Cmd::LlmTest { .. } | Cmd::SttTest { .. } | Cmd::TtsTest { .. } | Cmd::WeatherTest
+        Cmd::LlmTest { .. }
+            | Cmd::SttTest { .. }
+            | Cmd::TtsTest { .. }
+            | Cmd::WeatherTest
+            | Cmd::SearchTest { .. }
     ) {
         enter_network_gid(&loaded.config);
     }
@@ -72,6 +78,7 @@ fn main() -> Result<()> {
         Cmd::SttTest { wav } => stt_test(&loaded, &wav),
         Cmd::LlmTest { text } => llm_test(&loaded, &text),
         Cmd::WeatherTest => weather_test(&loaded),
+        Cmd::SearchTest { query } => search_test(&loaded, &query),
         Cmd::LightTest => light_test(&loaded),
     }
 }
@@ -463,6 +470,35 @@ fn weather_test(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
     )?;
     let rt = tokio::runtime::Runtime::new()?;
     println!("{}", rt.block_on(w.current())?);
+    Ok(())
+}
+
+fn search_test(loaded: &petrovich_core::LoadedConfig, query: &str) -> Result<()> {
+    let t = &loaded.config.tools;
+    let search_key = loaded
+        .secrets
+        .get(&t.search_api_key_env)
+        .map(str::to_owned)
+        .unwrap_or_default();
+    if t.search_url.is_empty() && search_key.is_empty() {
+        anyhow::bail!("поиск не настроен: нужен search_url или ключ Tavily");
+    }
+    let web = petrovich_tools::Web::with_search_proxy(
+        t.web_timeout_ms,
+        t.web_max_bytes,
+        t.web_allow_private,
+        &t.search_proxy,
+    )?
+    .with_search_api(search_key);
+    let rt = tokio::runtime::Runtime::new()?;
+    let hits = rt.block_on(web.search(&t.search_url, query))?;
+    if hits.is_empty() {
+        println!("Ничего не найдено.");
+        return Ok(());
+    }
+    for (i, hit) in hits.iter().enumerate() {
+        println!("{}. {}\n{}\n{}", i + 1, hit.title, hit.url, hit.snippet);
+    }
     Ok(())
 }
 

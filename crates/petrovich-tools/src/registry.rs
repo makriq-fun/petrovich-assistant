@@ -190,7 +190,7 @@ impl ToolContext {
             ),
             "web_search" => ToolDefinition::new(
                 "web_search",
-                "Поиск в интернете (SearXNG)",
+                "Поиск в интернете",
                 obj(
                     json!({"query":{"type":"string","minLength":1,"maxLength":300}}),
                     json!(["query"]),

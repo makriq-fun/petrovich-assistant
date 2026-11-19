@@ -136,6 +136,7 @@ tail -f /data/petrovich/log/petrovichd.log
 | `petrovichctl wake-test file.wav` | прогон модели активации по записи |
 | `petrovichctl audio-test 5` | запись с микрофонов и уровни каналов |
 | `petrovichctl light-test` | пять отсчётов датчика освещённости |
+| `petrovichctl search-test "запрос"` | проверка веб-поиска |
 | `installer ... rollback` | предыдущий релиз и проверка |
 | `installer ... restore` | снять помощника и вернуть init-скрипты Quasar |
 
@@ -177,7 +178,7 @@ DNS/NTP задаются отдельно; см. [docs/security.md](docs/securit
 ## Разработка
 
 ```bash
-cargo test --workspace          # 150 тестов
+cargo test --workspace          # 154 теста
 cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```

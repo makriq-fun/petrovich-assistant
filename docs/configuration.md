@@ -112,7 +112,9 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 | `timeout_ms` | `10000` | обычные инструменты |
 | `web_timeout_ms` | `15000` | веб и погода |
 | `web_max_bytes` | `1048576` | предел ответа |
-| `search_url` | `""` | SearXNG JSON; пусто — поиска нет |
+| `search_url` | `""` | SearXNG JSON или DuckDuckGo HTML (`https://html.duckduckgo.com/html/`); пусто — поиска нет |
+| `search_proxy` | `""` | прокси только для поиска, например `socks5h://127.0.0.1:1080` |
+| `search_api_key_env` | `""` | переменная secrets.env с ключом Tavily; непусто — поиск через Tavily |
 | `web_allow_private` | `false` | только отладка: частные адреса и HTTP |
 | `weather_url` | `https://api.open-meteo.com/v1/forecast` | endpoint погоды |
 | `weather_geocoding_url` | `https://geocoding-api.open-meteo.com/v1/search` | геокодинг для города; пусто — только координаты |
@@ -125,7 +127,9 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 
 Инструмент доступен, только если он одновременно в `enabled`, настроен и
 разрешён. `weather` требует `weather_url`, а без координат — названного
-города; `web_search` — `search_url`;
+города; `web_search` — `search_url` (SearXNG JSON или DuckDuckGo HTML),
+`search_proxy` — отдельный прокси для него; `search_api_key_env` — ключ Tavily
+(при наличии ключа `search_url` не используется);
 `run_code` — `sandbox_command`; `music` — `music_command`.
 Таймеры и будильники живут в памяти демона: перезапуск их сбрасывает.
 

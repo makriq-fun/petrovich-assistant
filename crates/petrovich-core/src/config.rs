@@ -625,9 +625,16 @@ pub struct ToolsConfig {
     pub web_timeout_ms: u64,
     #[serde(default = "default_web_max_bytes")]
     pub web_max_bytes: usize,
-    /// SearXNG JSON endpoint, например http://127.0.0.1:8080/search.
+    /// SearXNG JSON или DuckDuckGo HTML endpoint.
     #[serde(default)]
     pub search_url: String,
+    /// Прокси только для поиска, например socks5h://127.0.0.1:1080.
+    /// Нужен, если основной трафик идёт через общий прокси.
+    #[serde(default)]
+    pub search_proxy: String,
+    /// Переменная secrets.env с ключом Tavily; непусто — поиск через Tavily.
+    #[serde(default)]
+    pub search_api_key_env: String,
     /// Разрешить web_fetch к частным адресам и HTTP. Только для отладки.
     #[serde(default)]
     pub web_allow_private: bool,
@@ -662,6 +669,8 @@ impl Default for ToolsConfig {
             web_timeout_ms: default_web_timeout_ms(),
             web_max_bytes: default_web_max_bytes(),
             search_url: String::new(),
+            search_proxy: String::new(),
+            search_api_key_env: String::new(),
             web_allow_private: false,
             weather_url: default_weather_url(),
             weather_geocoding_url: default_weather_geocoding_url(),
@@ -682,6 +691,7 @@ fn default_tools_enabled() -> Vec<String> {
         "alarm",
         "volume",
         "music",
+        "web_search",
         "weather",
         "emotion",
         "web_fetch",
@@ -1059,6 +1069,19 @@ impl Config {
         }
         if !self.tools.search_url.is_empty() {
             validate_http_url("tools.search_url", &self.tools.search_url)?;
+        }
+        if !self.tools.search_proxy.trim().is_empty() {
+            let p = self.tools.search_proxy.trim();
+            if !(p.starts_with("socks5h://")
+                || p.starts_with("socks5://")
+                || p.starts_with("http://")
+                || p.starts_with("https://"))
+            {
+                return invalid(
+                    "tools.search_proxy должен начинаться с socks5h://, socks5://, http:// или https://"
+                        .into(),
+                );
+            }
         }
         if !self.tools.weather_url.is_empty() {
             validate_http_url("tools.weather_url", &self.tools.weather_url)?;

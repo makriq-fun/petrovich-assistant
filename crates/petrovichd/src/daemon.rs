@@ -121,11 +121,18 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     let timers = TimerManager::new(ui_tx.clone(), announce_tx);
     let alarms = AlarmManager::new(ui_tx.clone(), alarm_tx);
     let chime = Arc::new(LocalChime::new(playback.clone()));
-    let web = Web::new(
+    let search_key = loaded
+        .secrets
+        .get(&cfg.tools.search_api_key_env)
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let web = Web::with_search_proxy(
         cfg.tools.web_timeout_ms,
         cfg.tools.web_max_bytes,
         cfg.tools.web_allow_private,
-    )?;
+        &cfg.tools.search_proxy,
+    )?
+    .with_search_api(search_key);
     let music: Option<Arc<dyn MusicControl>> = CommandMusic::new(cfg.tools.music_command.clone())
         .map(|m| Arc::new(m) as Arc<dyn MusicControl>);
     let mut tools = ToolContext::new(
