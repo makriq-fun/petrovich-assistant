@@ -70,6 +70,18 @@ state_chimes = true
 response_timeout_ms = 180000
 max_tool_rounds = 2
 
+[memory]
+# Долговременная память: факты, которые ассистент сохраняет инструментом
+# remember и помнит после сброса диалога и перезапуска. Файл создаётся с
+# правами 0600.
+enabled = true
+# Пусто — <daemon.state_dir>/memory.json.
+# path = "/data/petrovich/state/memory.json"
+max_entries = 200
+max_chars = 8000
+# Сколько символов памяти добавлять в системный промпт.
+prompt_chars = 2000
+
 [stt]
 # openai, fish или command
 provider = "openai"
@@ -99,7 +111,10 @@ tools = true
 system_prompt = """Ты — Петрович, голосовой помощник в колонке. Отвечай по-русски, кратко и по делу.
 Ответ должен хорошо звучать вслух: без списков, разметки и сносок. Никогда не пиши
 код, команды оболочки, SQL или конфигурацию; если просят — ответь ровно: «Код не пишу.»
-Если нужен инструмент, вызови его; не выдумывай результаты."""
+Если нужен инструмент, вызови его; не выдумывай результаты.
+Важный факт о пользователе (имя, город, привычки, предпочтения) или просьбу запомнить
+сохраняй инструментом remember; просьбу забыть выполняй инструментом forget.
+Не сохраняй пароли, ключи и другие секреты."""
 
 [tts]
 # openai, fish или command
@@ -115,7 +130,7 @@ retries = 2
 max_bytes = 16777216
 
 [tools]
-enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search", "emotion", "web_fetch", "weather", "reset_dialog", "stop"]
+enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search", "emotion", "web_fetch", "weather", "remember", "forget", "reset_dialog", "stop"]
 timeout_ms = 10000
 web_timeout_ms = 15000
 web_max_bytes = 1048576

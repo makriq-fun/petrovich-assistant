@@ -8,6 +8,7 @@ pub mod config;
 pub mod errors;
 pub mod events;
 pub mod history;
+pub mod memory;
 pub mod ports;
 pub mod profile;
 pub mod text;

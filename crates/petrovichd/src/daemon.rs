@@ -1,7 +1,7 @@
 //! Жизненный цикл демона и голосовой автомат.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -11,6 +11,7 @@ use petrovich_audio::{AudioFrontend, LocalChime};
 use petrovich_core::config::{Config, DialogConfig, LoadedConfig};
 use petrovich_core::events::{UiEvent, UiNotice, VoiceState};
 use petrovich_core::history::ConversationHistory;
+use petrovich_core::memory::{inject_shared, Memory, SharedMemory};
 use petrovich_core::ports::{Chime, ChimeSound, MusicControl, VolumeControl};
 use petrovich_core::profile::HardwareProfile;
 use petrovich_hw::ButtonEvent;
@@ -82,6 +83,7 @@ struct App {
     vad: petrovich_audio::vad::Vad,
     frontend: AudioFrontend,
     history: ConversationHistory,
+    memory: Option<SharedMemory>,
     turn: TurnContext,
     task_tx: mpsc::Sender<TurnEvent>,
     started: Instant,
@@ -180,6 +182,19 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         None
     };
     let youtube = YouTubePlayer::new(&cfg.tools, cfg.audio.playback_pcm.clone())?;
+    let memory = if cfg.memory.enabled {
+        let path = cfg.memory_path();
+        let memory = Memory::load(
+            &path,
+            cfg.memory.max_entries,
+            cfg.memory.max_chars,
+            cfg.memory.prompt_chars,
+        );
+        tracing::info!("память: {} фактов ({})", memory.len(), path.display());
+        Some(Arc::new(RwLock::new(memory)))
+    } else {
+        None
+    };
     let mut tools = ToolContext::new(
         volume.clone(),
         music,
@@ -209,6 +224,9 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
             )?,
         };
         tools = tools.with_weather(weather.with_geocoding(cfg.tools.weather_geocoding_url.clone()));
+    }
+    if let Some(memory) = &memory {
+        tools = tools.with_memory(memory.clone());
     }
     let hardware = petrovich_hw::start(profile, &cfg.hardware, ui_rx);
     let mut buttons = hardware.buttons;
@@ -260,6 +278,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         vad,
         frontend,
         history,
+        memory,
         turn,
         task_tx,
         started: Instant::now(),
@@ -526,7 +545,10 @@ impl App {
 
     fn start_turn(&mut self, pcm: Vec<i16>) {
         self.history.expire_if_idle();
-        let snapshot = self.history.snapshot();
+        let mut snapshot = self.history.snapshot();
+        if let Some(memory) = &self.memory {
+            inject_shared(memory, &mut snapshot);
+        }
         tracing::info!("ход диалога: STT → LLM → TTS");
         self.youtube.duck();
         self.mode = Mode::Thinking;
@@ -822,6 +844,18 @@ pub fn check(loaded: &LoadedConfig) -> Result<()> {
             }
             println!("активация: {}", cfg.wakeword.model.display());
         }
+    }
+    if cfg.memory.enabled {
+        let path = cfg.memory_path();
+        let memory = Memory::load(
+            &path,
+            cfg.memory.max_entries,
+            cfg.memory.max_chars,
+            cfg.memory.prompt_chars,
+        );
+        println!("память: {} фактов ({})", memory.len(), path.display());
+    } else {
+        println!("память: выключена");
     }
     println!(
         "провайдеры: STT {:?}, LLM {}, TTS {:?}",

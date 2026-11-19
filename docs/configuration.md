@@ -113,6 +113,23 @@ personal/non-commercial использования; не добавляйте и
 | `response_timeout_ms` | `180000` | предел одного хода вместе с озвучкой |
 | `max_tool_rounds` | `2` | раундов вызова инструментов (0..5) |
 
+## `[memory]`
+
+| Ключ | По умолчанию | Смысл |
+|---|---|---|
+| `enabled` | `true` | долговременная память и инструменты `remember`/`forget` |
+| `path` | `<state_dir>/memory.json` | файл фактов, права `0600` |
+| `max_entries` | `200` | предел числа фактов (1..1000) |
+| `max_chars` | `8000` | предел суммарной длины |
+| `prompt_chars` | `2000` | сколько символов памяти попадает в системный промпт |
+
+Память хранит короткие факты о пользователе: имя, город, предпочтения,
+договорённости. `remember` сохраняет факт, `forget` удаляет совпадения по
+подстроке, пустой аргумент очищает память. Факты не сбрасываются
+`reset_dialog` и переживают перезапуск; в системный промпт добавляются самые
+свежие из них в пределах `prompt_chars`. Это не история диалога: история
+по-прежнему живёт в памяти процесса и ограничена `[dialog]`.
+
 ## `[stt]`, `[llm]`, `[tts]`
 
 Общие поля: `base_url`, `model`, `api_key_env`, `timeout_ms`, `retries`.
@@ -129,7 +146,7 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `enabled` | `time,timer,alarm,volume,music,youtube,web_search,emotion,web_fetch,weather,reset_dialog,stop` | белый список |
+| `enabled` | `time,timer,alarm,volume,music,youtube,web_search,emotion,web_fetch,weather,remember,forget,reset_dialog,stop` | белый список |
 | `timeout_ms` | `10000` | обычные инструменты |
 | `web_timeout_ms` | `15000` | веб и погода |
 | `web_max_bytes` | `1048576` | предел ответа |
@@ -152,7 +169,8 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 города; `web_search` — `search_url` (SearXNG JSON или DuckDuckGo HTML),
 `search_proxy` — отдельный прокси для него; `search_api_key_env` — ключ Tavily
 (при наличии ключа `search_url` не используется);
-`run_code` — `sandbox_command`; `music` — `music_command`.
+`run_code` — `sandbox_command`; `music` — `music_command`;
+`remember`/`forget` — `memory.enabled`.
 `youtube` не требует отдельной программы: звук извлекается и декодируется
 самим демоном; `youtube_proxy` лишь направляет его трафик через byedpi.
 Таймеры и будильники живут в памяти демона: перезапуск их сбрасывает.

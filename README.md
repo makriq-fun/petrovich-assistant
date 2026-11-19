@@ -36,6 +36,9 @@
   «хватит» останавливают только передний план — ассистента или музыку;
 - потоковый LLM (SSE) и потоковый PCM-TTS; кэш коротких фраз и синтез
   следующей фразы, пока играет текущая;
+- долговременная память: факты о пользователе сохраняются в
+  `<state_dir>/memory.json` и переживают сброс диалога и перезапуск;
+  ассистент добавляет их в промпт и умеет забывать по просьбе;
 - инструменты: время, таймеры и будильники, громкость, музыка через Spotya
   (отдельный инструмент, без Spotya просто не публикуется), звук YouTube без
   картинки (подкасты; через byedpi, без yt-dlp/mpv), эмоции, погода
@@ -99,7 +102,7 @@ flowchart LR
 # На ПК: собрать релиз под ARMv7
 cargo install cross --git https://github.com/cross-rs/cross
 scripts/build.sh
-# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.2-armv7.tar.gz
+# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.3-armv7.tar.gz
 
 # Установка по SSH (ключ root уже настроен)
 python3 installer/petrovich_install.py --ssh-host station install \
@@ -182,7 +185,7 @@ DNS/NTP задаются отдельно; см. [docs/security.md](docs/securit
 ## Разработка
 
 ```bash
-cargo test --workspace          # 154 теста
+cargo test --workspace          # 177 тестов (4 сетевых игнорируются)
 cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```

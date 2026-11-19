@@ -788,7 +788,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "petrovich-audio"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "libc",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "petrovich-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "petrovich-hw"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "petrovich-providers"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "petrovich-tools"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -859,6 +859,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -867,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "petrovich-wakeword"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "cc",
@@ -881,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "petrovichctl"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -900,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "petrovichd"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-trait",

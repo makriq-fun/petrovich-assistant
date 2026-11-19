@@ -9,6 +9,7 @@ use chrono::{Datelike, Local, NaiveTime, Timelike};
 use petrovich_core::chat::ToolDefinition;
 use petrovich_core::config::ToolsConfig;
 use petrovich_core::events::{Emotion, UiEvent};
+use petrovich_core::memory::SharedMemory;
 use petrovich_core::ports::{Chime, ChimeSound, MusicControl, VolumeControl, YouTubeControl};
 use serde_json::{json, Value};
 use tokio::process::Command;
@@ -48,6 +49,7 @@ pub struct ToolContext {
     alarms: AlarmManager,
     web: Web,
     weather: Option<Weather>,
+    memory: Option<SharedMemory>,
     chime: Arc<dyn Chime>,
     ui: mpsc::UnboundedSender<UiEvent>,
     cfg: ToolsConfig,
@@ -75,6 +77,7 @@ impl ToolContext {
             alarms,
             web,
             weather: None,
+            memory: None,
             chime,
             ui,
             cfg,
@@ -89,6 +92,11 @@ impl ToolContext {
 
     pub fn with_youtube(mut self, youtube: Arc<dyn YouTubeControl>) -> Self {
         self.youtube = Some(youtube);
+        self
+    }
+
+    pub fn with_memory(mut self, memory: SharedMemory) -> Self {
+        self.memory = Some(memory);
         self
     }
 
@@ -111,6 +119,8 @@ impl ToolContext {
             "web_search",
             "web_fetch",
             "weather",
+            "remember",
+            "forget",
             "run_code",
             "reset_dialog",
             "stop",
@@ -127,6 +137,7 @@ impl ToolContext {
             "youtube" => self.youtube.is_some(),
             "web_search" => !self.cfg.search_url.is_empty() || self.web.has_search_api(),
             "weather" => self.weather.is_some(),
+            "remember" | "forget" => self.memory.is_some(),
             "run_code" => !self.cfg.sandbox_command.is_empty(),
             _ => true,
         }
@@ -229,6 +240,22 @@ impl ToolContext {
                 "Текущая погода и прогноз на день. location — город или место; без него берётся настроенное место",
                 obj(
                     json!({"location":{"type":"string","maxLength":120}}),
+                    json!([]),
+                ),
+            ),
+            "remember" => ToolDefinition::new(
+                "remember",
+                "Запомнить факт о пользователе надолго: имя, город, предпочтения, договорённости. Не сохраняй пароли, ключи и другие секреты",
+                obj(
+                    json!({"text":{"type":"string","minLength":1,"maxLength":500}}),
+                    json!(["text"]),
+                ),
+            ),
+            "forget" => ToolDefinition::new(
+                "forget",
+                "Удалить из долговременной памяти факты, содержащие text. Пустой text очищает всю память",
+                obj(
+                    json!({"text":{"type":"string","maxLength":200}}),
                     json!([]),
                 ),
             ),
@@ -542,6 +569,34 @@ impl ToolContext {
                 let location = args.get("location").and_then(Value::as_str);
                 Ok(ToolResult::text(w.current_at(location).await?))
             }
+            "remember" => {
+                let memory = self
+                    .memory
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("память не настроена"))?;
+                let text = args.get("text").and_then(Value::as_str).unwrap_or("");
+                let added = {
+                    let mut memory = memory.write().unwrap_or_else(|e| e.into_inner());
+                    memory.add(text)?
+                };
+                Ok(ToolResult::text(if added {
+                    "Запомнил."
+                } else {
+                    "Уже помню."
+                }))
+            }
+            "forget" => {
+                let memory = self
+                    .memory
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("память не настроена"))?;
+                let text = args.get("text").and_then(Value::as_str).unwrap_or("");
+                let removed = {
+                    let mut memory = memory.write().unwrap_or_else(|e| e.into_inner());
+                    memory.forget(text)?
+                };
+                Ok(ToolResult::text(format!("Удалено записей: {removed}.")))
+            }
             "run_code" => {
                 if self.cfg.sandbox_command.is_empty() {
                     bail!("run_code: песочница не настроена");
@@ -594,7 +649,9 @@ fn parse_hhmm(text: &str) -> Result<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use petrovich_core::memory::Memory;
     use petrovich_core::ports::VolumeStatus;
+    use std::sync::RwLock;
     use tokio::sync::mpsc;
 
     struct FakeVolume;
@@ -808,6 +865,52 @@ mod tests {
             c.execute("reset_dialog", "{}").await.unwrap().control,
             Some(ControlAction::ResetDialog)
         );
+    }
+
+    #[tokio::test]
+    async fn memory_tools_persist_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        let mem = Arc::new(RwLock::new(Memory::load(&path, 10, 1000, 500)));
+        let c = ctx(&["remember", "forget"]).with_memory(mem);
+        assert!(c
+            .definitions()
+            .iter()
+            .any(|d| d.function.name == "remember"));
+        assert_eq!(
+            c.execute("remember", r#"{"text":"Любит зелёный чай"}"#)
+                .await
+                .unwrap()
+                .content,
+            "Запомнил."
+        );
+        assert_eq!(
+            c.execute("remember", r#"{"text":"любит зелёный чай"}"#)
+                .await
+                .unwrap()
+                .content,
+            "Уже помню."
+        );
+        let reloaded = Memory::load(&path, 10, 1000, 500);
+        assert_eq!(reloaded.facts(), &["Любит зелёный чай".to_owned()]);
+        assert_eq!(
+            c.execute("forget", r#"{"text":"чай"}"#)
+                .await
+                .unwrap()
+                .content,
+            "Удалено записей: 1."
+        );
+        assert!(Memory::load(&path, 10, 1000, 500).is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_tools_require_memory() {
+        let c = ctx(&["remember", "forget"]);
+        assert!(c
+            .definitions()
+            .iter()
+            .all(|d| d.function.name != "remember"));
+        assert!(c.execute("remember", r#"{"text":"факт"}"#).await.is_err());
     }
 
     #[tokio::test]

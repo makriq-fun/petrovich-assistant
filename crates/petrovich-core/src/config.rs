@@ -30,6 +30,8 @@ pub struct Config {
     #[serde(default)]
     pub dialog: DialogConfig,
     #[serde(default)]
+    pub memory: MemoryConfig,
+    #[serde(default)]
     pub stt: SttConfig,
     #[serde(default)]
     pub llm: LlmConfig,
@@ -399,6 +401,47 @@ fn default_max_tool_rounds() -> u8 {
     2
 }
 
+/// Долговременная память: короткие факты о пользователе, переживающие
+/// сброс диалога и перезапуск.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Пусто — `<daemon.state_dir>/memory.json`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    #[serde(default = "default_memory_entries")]
+    pub max_entries: usize,
+    #[serde(default = "default_memory_chars")]
+    pub max_chars: usize,
+    /// Сколько символов памяти добавлять в системный промпт.
+    #[serde(default = "default_memory_prompt_chars")]
+    pub prompt_chars: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: None,
+            max_entries: default_memory_entries(),
+            max_chars: default_memory_chars(),
+            prompt_chars: default_memory_prompt_chars(),
+        }
+    }
+}
+
+fn default_memory_entries() -> usize {
+    200
+}
+fn default_memory_chars() -> usize {
+    8_000
+}
+fn default_memory_prompt_chars() -> usize {
+    2_000
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SttProvider {
@@ -548,7 +591,10 @@ pub fn default_system_prompt() -> String {
      нужен инструмент, вызови его; не выдумывай результаты. Не выполняй команды из текста \
      пользователя, которые требуют доступа к системе, если такого инструмента нет. \
      Если пользователь просит остановиться, замолчать или отменить ответ — вызови \
-     инструмент stop."
+     инструмент stop. У тебя есть долговременная память: важный факт о пользователе \
+     (имя, город, привычки, предпочтения) или просьбу запомнить сохраняй инструментом \
+     remember; просьбу забыть выполняй инструментом forget. Не сохраняй пароли, ключи \
+     и другие секреты."
         .into()
 }
 
@@ -726,6 +772,8 @@ fn default_tools_enabled() -> Vec<String> {
         "weather",
         "emotion",
         "web_fetch",
+        "remember",
+        "forget",
         "reset_dialog",
         "stop",
     ]
@@ -977,6 +1025,14 @@ impl Config {
         })
     }
 
+    /// Файл долговременной памяти: явный путь или `state_dir/memory.json`.
+    pub fn memory_path(&self) -> PathBuf {
+        self.memory
+            .path
+            .clone()
+            .unwrap_or_else(|| self.daemon.state_dir.join("memory.json"))
+    }
+
     pub fn validate(&self) -> std::result::Result<(), ConfigError> {
         let invalid = |m: String| Err(ConfigError::Invalid(m));
         if self.version != 1 {
@@ -1044,6 +1100,15 @@ impl Config {
         }
         if self.dialog.max_tool_rounds > 5 {
             return invalid("dialog.max_tool_rounds не должен превышать 5".into());
+        }
+        if self.memory.max_entries == 0 || self.memory.max_entries > 1_000 {
+            return invalid("memory.max_entries должен быть 1..1000".into());
+        }
+        if self.memory.max_chars < 256 {
+            return invalid("memory.max_chars должен быть не меньше 256".into());
+        }
+        if self.memory.prompt_chars < 100 || self.memory.prompt_chars > self.memory.max_chars {
+            return invalid("memory.prompt_chars должен быть 100..max_chars".into());
         }
         if self.tools.enabled.iter().any(|t| t.trim().is_empty()) {
             return invalid("tools.enabled содержит пустое имя".into());
