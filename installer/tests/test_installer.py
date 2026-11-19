@@ -32,12 +32,27 @@ class Tests(unittest.TestCase):
     def test_supported_models(self):
         self.assertIn("station-mini2", ji.SUPPORTED)
 
-    def test_model_uploads_include_manifest_and_tflite(self):
-        uploads = ji.model_uploads(ji.ROOT / "assets/wakeword/skynet_mww.json")
-        targets = {remote for _, remote in uploads}
-        self.assertIn("/data/petrovich/models/skynet_mww.json", targets)
-        self.assertIn("/data/petrovich/models/wakeword.json", targets)
-        self.assertIn("/data/petrovich/models/skynet_mww.tflite", targets)
+    def test_default_model_is_single_tflite(self):
+        model = ji.ROOT / "assets/wakeword/petrovich.tflite"
+        uploads = ji.model_uploads(model)
+        self.assertEqual(
+            uploads,
+            [(model, "/data/petrovich/models/petrovich.tflite")],
+        )
+
+    def test_set_wakeword_model_only_in_section(self):
+        text = (
+            '[stt]\nmodel = "whisper"\n\n'
+            '[wakeword]\nmodel = "/data/skynet/models/wakeword.json"\n'
+            'assets = "/data/petrovich/assets/oww.bin"\n'
+        )
+        updated = ji._set_wakeword_model(
+            text, "/data/petrovich/models/petrovich.tflite"
+        )
+        self.assertIn('[stt]\nmodel = "whisper"', updated)
+        self.assertIn('model = "/data/petrovich/models/petrovich.tflite"', updated)
+        self.assertIn('assets = "/data/petrovich/assets/oww.bin"', updated)
+        self.assertNotIn("wakeword.json", updated)
 
 
 if __name__ == "__main__":

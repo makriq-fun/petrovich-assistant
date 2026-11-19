@@ -1,40 +1,31 @@
-# Модель активации
+# Модель активации «Петрович»
 
 ## Что входит в релиз
 
-В `assets/wakeword/` лежит готовая пара microWakeWord v2:
+В `assets/wakeword/` лежит единственная модель проекта:
 
-- `skynet_mww.json` — манифест (`type: micro`, порог 0.9, окно 10);
-- `skynet_mww.tflite` — int8 streaming-модель.
+- `petrovich.tflite` — openWakeWord-голова для слова «Петрович»:
+  вход `[1, 16, 96]` float32, выход `[1, 1]` float32 (score);
+  манифест не нужен.
 
-Источник — [olegchumakov/microwakeword-models](https://github.com/olegchumakov/microwakeword-models),
-каталог `skynet/`. Модель обучена на слово «Скайнет» (русский). Продукт
-называется «Петрович», но встроенная модель по-прежнему реагирует на
-«Скайнет»: слово активации задаётся моделью, а не именем проекта. Для
-активации словом «Петрович» нужна отдельная обученная модель. Автор
-встроенной модели — kelstar; файл лицензии в upstream отсутствует, права
-принадлежат автору. Подробности —
-[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+Для работы головы обязателен `assets/oww.bin` — контейнер `OWW1` с
+мел-фильтрами и весами эмбеддингов openWakeWord / Google speech_embedding.
+Он не содержит модели слова и записей голоса.
 
-Установщик копирует манифест и `.tflite` в `/data/petrovich/models/` и указывает
-на них `[wakeword] model`.
+Установщик копирует модель в `/data/petrovich/models/petrovich.tflite` и
+прописывает её в `[wakeword] model`. Других моделей активации в репозитории
+нет.
 
 ## Требования
 
-- `libtflite.so` из прошивки: `/system/vendor/quasar/libs/libtflite.so`;
-- фронтенд TFLM microfrontend компилируется в `petrovich-wakeword` из
-  Apache-2.0 исходников в `third_party/`;
-- вход — 16 кГц моно, кадр 10 мс.
+- TFLite C API: `/system/vendor/quasar/libs/libtflite.so` из прошивки либо
+  `libtensorflowlite_c.so` рядом с `petrovichd`;
+- вход — 16 кГц моно, кадр 10 мс;
+- для «Петрович» на Станции Мини 2 рабочие значения: `threshold = 0.5`,
+  `gain = 1`.
 
-Если `libtflite.so` нет, microWakeWord не загрузится. В этом случае
-используйте openWakeWord-модель и `assets/oww.bin` (см. ниже) либо выключите
-активацию и запускайте диалог кнопкой.
-
-Версия `libtflite.so` должна быть не ниже `min_runtime_version` модели.
-Встроенная модель собрана с `2.22.0-rc0`; на прошивке `2020.02.1` стоит
-`libtflite` 2.12, поэтому модель не запускается. `petrovichd` сравнивает версии
-и возвращает ошибку вместо падения; для такой прошивки используйте
-openWakeWord.
+Если библиотеки TFLite нет, голова не загрузится; активацию можно выключить
+и начинать диалог кнопкой.
 
 ## Проверка
 
@@ -45,54 +36,45 @@ openWakeWord.
 
 `wake-test` принимает WAV PCM16, приводит к 16 кГц/моно и печатает score по
 шагам. Для калибровки используйте записи из той же комнаты и тот же тракт
-(`vqe_0`/микрофоны). Порог и `gain` подбирайте на отложенных записях, а не по
-паспорту.
+(`vqe_0`/микрофоны).
+
+Проверка конфигурации без запуска аудио:
+
+```bash
+/data/petrovich/current/petrovichd \
+  --config /data/petrovich/config.toml --check-config
+```
 
 ## Тюнинг
 
-- `probability_cutoff` в манифесте — базовый порог; `[wakeword] threshold`
-  переопределяет его;
-- `sensitivity` отрицательный — чаще срабатывания, положительный — реже;
-- `gain` (по умолчанию 32) компенсирует уровень `vqe_0`; слишком большой
-  клиппирует;
-- `refractory_ms` защищает от повторного срабатывания на хвосте слова.
+- `[wakeword] threshold` — порог срабатывания; переопределяет значение из
+  модели (у «Петрович» манифеста нет, поэтому задаётся только здесь);
+- `sensitivity` — смещение порога: отрицательное чаще, положительное реже;
+- `gain` — усиление PCM до детектора; слишком большой клиппирует;
+- `refractory_ms` — пауза между срабатываниями.
 
 Меняйте по одному параметру и проверяйте на записях, которых не было в
 обучении.
 
-## Альтернатива: openWakeWord
+## Своя модель
 
-Проект по-прежнему поддерживает openWakeWord-совместимый формат:
-
-- `assets/oww.bin` — контейнер `OWW1` с мел-фильтрами и весами эмбеддингов;
-- `wakeword.json` — голова модели: `name`, `threshold`, `head` с весами
-  `w1/b1/w2/b2/w3/b3` (16 эмбеддингов по 96, окно 1,28 с).
-
-Детектор требует два подряд окна выше порога и затем рефрактерный период.
-Такой вариант не зависит от `libtflite.so`, но модель головы нужно обучить
-или импортировать отдельно:
+Установщик принимает `.tflite`-голову openWakeWord или JSON-манифест
+openWakeWord/microWakeWord:
 
 ```bash
 python3 installer/petrovich_install.py --ssh-host station install \
-  --wakeword-model ./wakeword.json
+  --config config.toml --secrets secrets.env \
+  --wakeword-model ./my_wakeword.tflite
 ```
 
-Установщик кладёт выбранный файл в `/data/petrovich/models/skynet_mww.json`
-(универсальное имя) и, если в манифесте есть поле `model`, рядом — указанный
-`.tflite`. Так работает и microWakeWord, и openWakeWord-модель.
-
-Готовую TFLite-голову openWakeWord (вход `[1, 16, 96]`, выход score) можно
-указать прямо в `[wakeword] model`; манифест для неё не нужен, но `assets`
-обязателен, а `gain` обычно равен `1`. Такой файл установщик пока не
-загружает — положите его в `/data/petrovich/models/` вручную.
+Файл попадает в `/data/petrovich/models/`, а `[wakeword] model` в конфиге
+переписывается на него. Для JSON-манифеста рядом загружается указанный в нём
+`.tflite`. Сторонние модели в репозиторий не входят.
 
 ## Лицензии
 
-- Код feature extraction написан заново по открытой реализации openWakeWord
-  (Apache-2.0).
+- `assets/wakeword/petrovich.tflite` добавлен владельцем проекта; права на
+  веса принадлежат автору модели.
 - `assets/oww.bin` — мел-фильтры и веса эмбеддингов openWakeWord/Google
-  speech_embedding.
-- Предобученные wake-word модели openWakeWord (CC BY-NC-SA 4.0) **не**
-  включены.
-- Модель «Скайнет» распространяется отдельно от AGPL-кода; условия уточняйте
-  у автора.
+  speech_embedding (Apache-2.0).
+- Сторонние предобученные wake-word модели (CC BY-NC-SA 4.0) **не** включены.

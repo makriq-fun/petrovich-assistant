@@ -255,10 +255,7 @@ pub fn strip_wake_word(text: &str) -> String {
     let clean = first
         .trim_matches(|c: char| !c.is_alphanumeric())
         .to_lowercase();
-    if matches!(
-        clean.as_str(),
-        "петрович" | "petrovich" | "скайнет" | "скаенет" | "skynet" | "джарвис" | "jarvis"
-    ) {
+    if matches!(clean.as_str(), "петрович" | "petrovich") {
         words.collect::<Vec<_>>().join(" ")
     } else {
         t.to_owned()
@@ -312,7 +309,6 @@ mod tests {
     #[test]
     fn strips_russian_and_english_wake_word() {
         assert_eq!(strip_wake_word("Петрович, какая погода?"), "какая погода?");
-        assert_eq!(strip_wake_word("Скайнет, какая погода?"), "какая погода?");
         assert_eq!(strip_wake_word("petrovich what time"), "what time");
         assert_eq!(strip_wake_word("погода"), "погода");
         assert_eq!(strip_wake_word("Петрович"), "");

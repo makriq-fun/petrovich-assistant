@@ -238,7 +238,7 @@ impl Default for WakewordConfig {
 }
 
 fn default_wakeword_model() -> PathBuf {
-    PathBuf::from("/data/petrovich/models/skynet_mww.json")
+    PathBuf::from("/data/petrovich/models/petrovich.tflite")
 }
 fn default_wakeword_assets() -> PathBuf {
     PathBuf::from("/data/petrovich/assets/oww.bin")
@@ -247,7 +247,7 @@ fn default_refractory_ms() -> u64 {
     2_000
 }
 fn default_wake_gain() -> u32 {
-    32
+    1
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

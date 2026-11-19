@@ -16,15 +16,15 @@
 | Проверка | Состояние |
 |---|---|
 | 122 теста workspace, clippy `-D warnings` | проходят на хосте |
-| Python-тесты установщика | 6 проходят |
-| Модель активации | microWakeWord требует TFLite ≥ 2.22; на прошивке 2020.02.1 (2.12) работает openWakeWord |
+| Python-тесты установщика | 7 проходят |
+| Модель активации | openWakeWord «Петрович»; загрузка и `--check-config` проверены на колонке |
 | Кросс-сборка ARMv7 glibc | собрана ARMv7-сборка glibc 2.23 |
 | ALSA/VQE/LED/часы/кнопки/датчик света на колонке | требуют проверки на устройстве |
 | Живые STT/LLM/TTS | в тестах mock; реальные API требуют проверки |
 
 ## Возможности
 
-- локальная активация по слову (microWakeWord или openWakeWord, без облака);
+- локальная активация по слову (openWakeWord, без облака);
 - непрерывный диалог: после ответа можно задать уточняющий вопрос без
   повторной активации;
 - прерывание ответа новым словом активации, голосом поверх озвучки или кнопкой;
@@ -48,11 +48,12 @@
 
 ## Модель активации
 
-В релиз входит сторонняя microWakeWord-модель, обученная на слово «Скайнет»
-(`assets/wakeword/skynet_mww.json` и `.tflite`). Отображаемое имя продукта —
-«Петрович»; чтобы активировать его словом «Петрович», подключите свою модель
-через `--wakeword-model` или `[wakeword] model`. Подробности и ограничения —
-[docs/wakeword-model.md](docs/wakeword-model.md).
+В релиз входит одна модель — openWakeWord-голова «Петрович»
+(`assets/wakeword/petrovich.tflite`). Вместе с `assets/oww.bin` она даёт
+локальную активацию по слову «Петрович» без облака. Порог задаётся в
+`[wakeword] threshold` (на колонке — 0.5). Других моделей в репозитории нет;
+свою можно передать через `--wakeword-model` или `[wakeword] model`.
+Подробности — [docs/wakeword-model.md](docs/wakeword-model.md).
 
 ## Архитектура
 
@@ -76,7 +77,8 @@ flowchart LR
 
 ## Быстрый старт
 
-Требуется взломанная колонка с root, SSH или ADB, и совместимая модель.
+Требуется взломанная колонка с root, SSH или ADB. Модель активации «Петрович»
+входит в релиз; своя модель нужна только для замены.
 Перед первой установкой подготовьте:
 
 1. `config.toml` на основе [config/config.example.toml](config/config.example.toml):
@@ -103,12 +105,13 @@ python3 installer/petrovich_install.py --ssh-host station install \
 ```bash
 python3 installer/petrovich_install.py --ssh-host station install \
   --config ./config.toml --secrets ./secrets.env \
-  --wakeword-model ./my_wakeword.json
+  --wakeword-model ./my_wakeword.tflite
 ```
 
-Для microWakeWord нужен `libtflite.so` из прошивки
-(`/system/vendor/quasar/libs/libtflite.so`). Если библиотеки нет, используйте
-openWakeWord-модель и `assets/oww.bin`.
+Для загрузки модели нужен `libtflite.so` из прошивки
+(`/system/vendor/quasar/libs/libtflite.so`) либо `libtensorflowlite_c.so`
+рядом с `petrovichd`. Встроенная модель «Петрович» — openWakeWord и работает
+с `assets/oww.bin`; microWakeWord нужен только для своей модели этого типа.
 
 После установки проверьте на колонке:
 

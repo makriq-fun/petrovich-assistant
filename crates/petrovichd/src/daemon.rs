@@ -542,7 +542,27 @@ pub fn check(loaded: &LoadedConfig) -> Result<()> {
     println!("модель: {} ({})", profile.model_name, profile.codename);
     if cfg.wakeword.enabled {
         check_file(&cfg.wakeword.model, "модель активации")?;
-        if petrovich_wakeword::micro::is_micro_manifest(&cfg.wakeword.model) {
+        if cfg.wakeword.model.extension().and_then(|e| e.to_str()) == Some("tflite") {
+            check_file(&cfg.wakeword.assets, "feature-backbone")?;
+            petrovich_wakeword::TfliteHead::load(&cfg.wakeword.model)
+                .map_err(|e| anyhow::anyhow!("модель активации: {e:#}"))?;
+            let assets = std::fs::read(&cfg.wakeword.assets)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", cfg.wakeword.assets.display()))?;
+            let tensors = petrovich_wakeword::tensors::read(&assets)
+                .map_err(|e| anyhow::anyhow!("backbone: {e:#}"))?;
+            if !tensors.contains_key("mel.filters") {
+                bail!("в backbone нет mel.filters");
+            }
+            println!(
+                "активация: openWakeWord «{}» ({})",
+                cfg.wakeword
+                    .model
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("wakeword"),
+                cfg.wakeword.model.display()
+            );
+        } else if petrovich_wakeword::micro::is_micro_manifest(&cfg.wakeword.model) {
             let manifest = std::fs::read_to_string(&cfg.wakeword.model)
                 .map_err(|e| anyhow::anyhow!("{}: {e}", cfg.wakeword.model.display()))?;
             let v: serde_json::Value = serde_json::from_str(&manifest)

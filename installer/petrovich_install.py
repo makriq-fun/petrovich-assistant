@@ -305,7 +305,9 @@ def upload_file(
 
 
 def model_uploads(local_model: Path) -> list[tuple[Path, str]]:
-    """Файлы модели и их цели на устройстве; манифест нужен под двумя именами."""
+    """Файлы модели и их цели на устройстве."""
+    if local_model.suffix == ".tflite":
+        return [(local_model, f"{DEVICE_ROOT}/models/{local_model.name}")]
     try:
         manifest = json.loads(local_model.read_text())
     except Exception as e:
@@ -317,10 +319,7 @@ def model_uploads(local_model: Path) -> list[tuple[Path, str]]:
         if not sibling.is_file():
             raise InstallError(f"нет TFLite рядом с манифестом: {sibling}")
         uploads.append((sibling, f"{DEVICE_ROOT}/models/{Path(tflite_name).name}"))
-    # skynet_mww.json — текущий путь; wakeword.json — совместимость со старой
-    # конфигурацией, которую rewrite_config ещё не успел обновить.
-    uploads.append((local_model, f"{DEVICE_ROOT}/models/skynet_mww.json"))
-    uploads.append((local_model, f"{DEVICE_ROOT}/models/wakeword.json"))
+    uploads.append((local_model, f"{DEVICE_ROOT}/models/{local_model.name}"))
     return uploads
 
 
@@ -476,18 +475,6 @@ for L in /data/skynet /data/jarvis; do
   for p in config.toml secrets.env install.json; do
     [ -f "$L/$p" ] && [ ! -e "$D/$p" ] && cp -p "$L/$p" "$D/$p" || true
   done
-  for p in models assets; do
-    if [ -d "$L/$p" ] && [ -z "$(ls -A "$D/$p" 2>/dev/null)" ]; then
-      cp -a "$L/$p/." "$D/$p/" || true
-    fi
-  done
-  if [ -s "$L/models/wakeword.json" ] && [ ! -e "$D/models/wakeword.old.json" ]; then
-    cp -p "$L/models/wakeword.json" "$D/models/wakeword.old.json" || true
-  fi
-  if [ -d "$L/releases" ] && [ -z "$(ls -A "$D/releases" 2>/dev/null)" ]; then
-    mkdir -p "$D/releases"
-    cp -a "$L/releases/." "$D/releases/" || true
-  fi
   if [ -d "$L/backups/quasar-init" ]; then
     cp -a "$L/backups/quasar-init/." "$D/backups/quasar-init/" || true
   fi
@@ -498,8 +485,22 @@ done
     )
 
 
-def rewrite_config(t: Transport, dry: bool, rewrite_model: bool = True):
-    """Обновляет пути прежней установки и (опционально) имя модели."""
+def _set_wakeword_model(text: str, model_path: str) -> str:
+    lines: list[str] = []
+    in_wakeword = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_wakeword = stripped == "[wakeword]"
+        elif in_wakeword and stripped.startswith("model") and "=" in stripped:
+            line = f'model = "{model_path}"'
+        lines.append(line)
+    updated = "\n".join(lines)
+    return updated + ("\n" if text.endswith("\n") else "")
+
+
+def rewrite_config(t: Transport, dry: bool, model_path: str):
+    """Обновляет пути прежней установки и путь модели активации."""
     if dry:
         return
     local = Path(tempfile.mkdtemp()) / "config.toml"
@@ -517,26 +518,11 @@ def rewrite_config(t: Transport, dry: bool, rewrite_model: bool = True):
         .replace("/run/skynetd.pid", "/run/petrovichd.pid")
         .replace("/run/jarvisd.pid", "/run/petrovichd.pid")
     )
-    if rewrite_model:
-        updated = updated.replace("models/wakeword.json", "models/skynet_mww.json")
-    else:
-        updated = updated.replace(
-            "models/wakeword.json", "models/wakeword.old.json"
-        )
+    updated = _set_wakeword_model(updated, model_path)
     if updated != text:
         local.write_text(updated)
         upload_file(t, local, f"{DEVICE_ROOT}/config.toml", "644")
-        suffix = " и модель активации" if rewrite_model else ""
-        print(f"конфигурация: пути{suffix} обновлены")
-
-
-def device_has_legacy_model(t: Transport) -> bool:
-    out = t.script(
-        "for d in /data/skynet /data/jarvis; do "
-        "test -s \"$d/models/wakeword.json\" && echo yes && break; done || true",
-        check=False,
-    )
-    return out.stdout.strip() == b"yes"
+        print("конфигурация: пути и модель активации обновлены")
 
 
 def health(t: Transport, version: str, timeout: int = 15) -> bool:
@@ -566,9 +552,11 @@ def set_current(t: Transport, version: str):
         "set -eu\n"
         f"cd {DEVICE_ROOT}\n"
         f"[ -x releases/{shlex.quote(version)}/petrovichd ] || {{ echo 'нет релиза' >&2; exit 1; }}\n"
-        f"ln -sfn releases/{shlex.quote(version)} current.next\n"
-        "mv -Tf current.next current 2>/dev/null || mv -f current.next current\n"
-        "readlink current\n"
+        f"rm -f {DEVICE_ROOT}/current.next\n"
+        f"ln -s releases/{shlex.quote(version)} {DEVICE_ROOT}/current.next\n"
+        f"rm -f {DEVICE_ROOT}/current\n"
+        f"mv {DEVICE_ROOT}/current.next {DEVICE_ROOT}/current\n"
+        f"readlink {DEVICE_ROOT}/current\n"
     )
 
 
@@ -657,38 +645,20 @@ cp -f "$D/current/supervise.sh" "$D/supervise.sh" 2>/dev/null || true
             upload_secret(t, Path(args.secrets), f"{DEVICE_ROOT}/secrets.env")
         elif not info.installed:
             print("ВНИМАНИЕ: secrets.env не загружен; создайте его на колонке (chmod 600)")
-        # Модель активации: явный файл, старая openWakeWord-модель или
-        # встроенная microWakeWord «Скайнет».
-        bundled = ROOT / "assets/wakeword/skynet_mww.json"
-        legacy_model = (
-            not args.wakeword_model and info.legacy and device_has_legacy_model(t)
-        )
+        # Модель активации: явный файл или встроенная «Петрович».
         local_model = (
             Path(args.wakeword_model)
             if args.wakeword_model
-            else None if legacy_model else bundled
+            else ROOT / "assets/wakeword/petrovich.tflite"
         )
-        if legacy_model:
-            print(
-                "модель активации: openWakeWord из прежней установки "
-                "(microWakeWord не ставится)"
-            )
-        elif local_model is not None and local_model.is_file():
-            for src, dst in model_uploads(local_model):
-                upload_file(t, src, dst, "644")
-            print(f"модель активации: {local_model.name}")
-        else:
-            t.script(
-                r"""
-set -eu
-D=/data/petrovich
-if [ ! -s "$D/models/skynet_mww.json" ] && [ -s /data/opt/wakeword/model.json ]; then
-  cp /data/opt/wakeword/model.json "$D/models/skynet_mww.json"
-  echo "модель активации импортирована из /data/opt/wakeword"
-fi
-"""
-            )
-        rewrite_config(t, args.dry_run, rewrite_model=not legacy_model)
+        if not local_model.is_file():
+            raise InstallError(f"нет модели активации: {local_model}")
+        uploads = model_uploads(local_model)
+        for src, dst in uploads:
+            upload_file(t, src, dst, "644")
+        model_dest = next(dst for src, dst in uploads if src == local_model)
+        print(f"модель активации: {local_model.name}")
+        rewrite_config(t, args.dry_run, model_dest)
         deploy_release(t, artifact, ctl, version, args.dry_run)
         t.script(f"set -eu\ntouch {DEVICE_ROOT}/enabled\n")
         try:

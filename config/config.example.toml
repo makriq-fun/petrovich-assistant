@@ -30,15 +30,14 @@ aec_delay_ms = 0
 
 [wakeword]
 enabled = true
-# Встроенная сторонняя microWakeWord-модель обучена на слово «Скайнет»
-# (assets/wakeword). Для активации словом «Петрович» укажите свою модель.
-# Для openWakeWord-модели укажите JSON и assets/oww.bin.
-model = "/data/petrovich/models/skynet_mww.json"
+# Встроенная openWakeWord-голова «Петрович» (assets/wakeword/petrovich.tflite).
+# Для другой модели укажите свой файл и assets/oww.bin.
+model = "/data/petrovich/models/petrovich.tflite"
 assets = "/data/petrovich/assets/oww.bin"
 # Смещение к порогу модели: -0.1 делает срабатывание чаще.
 sensitivity = 0.0
 refractory_ms = 2000
-gain = 32
+gain = 1
 
 [vad]
 min_speech_ms = 300

@@ -15,9 +15,8 @@ install -m644 config/config.example.toml "$stage/$name/config/config.example.tom
 install -m644 config/secrets.example.env "$stage/$name/config/secrets.example.env"
 install -m644 assets/oww.bin assets/oww.bin.sha256 "$stage/$name/assets/"
 mkdir -p "$stage/$name/assets/wakeword"
-install -m644 assets/wakeword/skynet_mww.json \
-  assets/wakeword/skynet_mww.tflite \
-  assets/wakeword/README.md "$stage/$name/assets/wakeword/"
+install -m644 assets/wakeword/petrovich.tflite assets/wakeword/README.md \
+  "$stage/$name/assets/wakeword/"
 install -m755 packaging/supervise.sh "$stage/$name/packaging/supervise.sh"
 install -m755 packaging/init.d/S99petrovich "$stage/$name/packaging/init.d/S99petrovich"
 cp -r installer/. "$stage/$name/installer/"

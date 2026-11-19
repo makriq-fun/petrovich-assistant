@@ -1,18 +1,17 @@
-# Модель активации «Скайнет»
+# Модель активации «Петрович»
 
-Пара файлов из репозитория
-[olegchumakov/microwakeword-models](https://github.com/olegchumakov/microwakeword-models),
-каталог `skynet/`:
+`petrovich.tflite` — openWakeWord-голова для слова «Петрович»:
 
-- `skynet_mww.json` — манифест microWakeWord v2;
-- `skynet_mww.tflite` — int8-модель, streaming.
+- вход `[1, 16, 96]` float32 — 16 эмбеддингов по 96;
+- выход `[1, 1]` float32 — score;
+- манифест не нужен, файл указывается прямо в `[wakeword] model`;
+- обязателен `assets/oww.bin` — мел-фильтры и веса эмбеддингов.
 
-Модель обучена на слово «Скайнет» (русский). Продукт называется «Петрович»,
-но встроенная модель реагирует на «Скайнет»; для слова «Петрович» нужна
-отдельная модель. Автор модели — kelstar; файл
-лицензии в upstream отсутствует, права принадлежат автору. Подробности — в
-[THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md).
+Установщик копирует модель в `/data/petrovich/models/petrovich.tflite`.
+Порог задаётся в `[wakeword] threshold` (на колонке — 0.5), чувствительность —
+`sensitivity`.
 
-Для microWakeWord нужен `libtflite.so` из прошивки станции
-(`/system/vendor/quasar/libs/libtflite.so`). Если библиотеки нет,
-используйте openWakeWord-модель и `assets/oww.bin`.
+Других моделей активации в репозитории нет. Сторонние модели можно передать
+через `--wakeword-model` (`.tflite` или JSON-манифест openWakeWord/microWakeWord).
+
+Подробности — [../../docs/wakeword-model.md](../../docs/wakeword-model.md).

@@ -9,14 +9,10 @@
 - доступ к выбранным STT/LLM/TTS (OpenAI-совместимый API или локальные
   сервисы).
 
-Встроенная microWakeWord-модель обучена на слово «Скайнет»; отдельный файл
-нужен для своей модели, в том числе для активации словом «Петрович» (см.
-[wakeword-model.md](wakeword-model.md)).
-Для microWakeWord требуется `libtflite` не ниже версии из модели (встроенная —
-2.22). Если на колонке более старый `libtflite`, используйте openWakeWord:
-установщик при наличии прежней модели в `/data/skynet/models/wakeword.json`
-или `/data/jarvis/models/wakeword.json` сохраняет
-её как `wakeword.old.json` и не заменяет на micro.
+Встроенная модель — openWakeWord «Петрович»
+(`assets/wakeword/petrovich.tflite`); она активируется словом «Петрович» и не
+требует отдельного файла. Свою модель можно передать через
+`--wakeword-model` (см. [wakeword-model.md](wakeword-model.md)).
 
 Установщик проверяет модель и прошивку до записи. Для другой модели нужен
 `--allow-unknown-model`, но профиль железа всё равно должен существовать в
@@ -79,7 +75,7 @@ python3 installer/petrovich_install.py --transport adb --serial <серийны�
 ```bash
 python3 installer/petrovich_install.py --ssh-host station install \
   --config config.toml --secrets secrets.env \
-  --wakeword-model ./my_wakeword.json
+  --wakeword-model ./my_wakeword.tflite
 ```
 
 Сначала полезен план:
@@ -93,8 +89,9 @@ python3 installer/petrovich_install.py --ssh-host station --dry-run install
 1. проверяет root, модель, прошивку и свободное место;
 2. сохраняет `/data/petrovich`, прежние `/data/skynet` и `/data/jarvis`, а также init-скрипты в
    `backups/install-<UTC>.tar.gz`, скачивает копию на ПК, сверяет SHA256;
-3. если найдена старая установка, переносит конфигурацию, секреты, модели,
-   assets и релизы в `/data/petrovich` (старая папка не удаляется);
+3. если найдена старая установка, переносит конфигурацию, секреты и
+   init-скрипты Quasar в `/data/petrovich`; старые модели и релизы не
+   импортируются, старая папка не удаляется;
 4. загружает релиз в `releases/<версия>` и проверяет файлы;
 5. атомарно переключает `current`;
 6. устанавливает `S99petrovich` и шим Quasar: пока существует
@@ -103,11 +100,10 @@ python3 installer/petrovich_install.py --ssh-host station --dry-run install
 8. при неудаче переключается на предыдущий релиз; если его нет — снимает
    `enabled` и оставляет Алису выключенной.
 
-Если `--wakeword-model` не задан, ставится встроенная модель «Скайнет» из
-`assets/wakeword/`. Старая `wakeword.json` в `/data/petrovich/models/` тоже
-обновляется копией встроенной модели; конфигурация переписывается на
-`skynet_mww.json`. Если встроенной модели нет, установщик попробует
-импортировать `/data/opt/wakeword/model.json`.
+Если `--wakeword-model` не задан, ставится встроенная `petrovich.tflite` из
+`assets/wakeword/`, а `[wakeword] model` в конфиге переписывается на неё.
+Старые модели из `/data/skynet`, `/data/jarvis` и `/data/opt/wakeword` не
+импортируются.
 
 ## Обновление
 
