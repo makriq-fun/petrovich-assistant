@@ -366,7 +366,9 @@ fn default_history_ttl() -> u64 {
     900
 }
 fn default_response_timeout_ms() -> u64 {
-    60_000
+    // Ход включает не только LLM, но и синтез с воспроизведением всех фраз.
+    // Минуты хватает только на короткий ответ; подробный ответ обрывался.
+    180_000
 }
 fn default_max_tool_rounds() -> u8 {
     2
@@ -450,6 +452,10 @@ pub struct LlmConfig {
     pub base_url: String,
     #[serde(default = "default_llm_model")]
     pub model: String,
+    /// Модели, которые пробуются по порядку, если основная вернула 429,
+    /// 404 или отказ разбора вызова инструментов.
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
     #[serde(default = "default_llm_key_env")]
     pub api_key_env: String,
     #[serde(default = "default_system_prompt")]
@@ -473,6 +479,7 @@ impl Default for LlmConfig {
         Self {
             base_url: default_llm_url(),
             model: default_llm_model(),
+            fallback_models: Vec::new(),
             api_key_env: default_llm_key_env(),
             system_prompt: default_system_prompt(),
             temperature: default_temperature(),

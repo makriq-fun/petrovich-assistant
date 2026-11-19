@@ -115,6 +115,9 @@ python3 installer/petrovich_install.py --ssh-host station upgrade
 
 Конфигурация и секреты без явных `--config/--secrets` не перезаписываются.
 Старые релизы остаются для отката (установщик не удаляет их автоматически).
+`libtensorflowlite_c.so` не входит в архив, но при обновлении копируется из
+текущего релиза в новый: без него загрузчик возьмёт старый
+`/system/vendor/quasar/libs/libtflite.so` и упадёт на модели openWakeWord.
 
 ## Независимые DNS и NTP
 

@@ -73,6 +73,8 @@ command = ["whisper-cli", "-m", "/data/petrovich/models/ggml-base.bin",
 [llm]
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
+# Необязательно: резервные модели того же endpoint.
+fallback_models = ["gpt-4o"]
 api_key_env = "PETROVICH_LLM_API_KEY"
 temperature = 0.4
 max_tokens = 800
@@ -87,6 +89,11 @@ system_prompt = "..."
 `choices[0].delta.content` и `delta.tool_calls` (id/name/arguments
 накапливаются по `index`). `[DONE]`, `finish_reason`, `usage`
 поддерживаются. При `stream=false` — обычный JSON.
+
+Если модель вернула 429, 404 `model_not_found` или 400 `tool_use_failed`,
+шлюз сразу пробует следующую из `fallback_models`; 5xx и сетевые ошибки
+повторяются на той же модели `retries` раз. 401 и прочие ошибки запроса
+резерв не включают — это ошибка конфигурации, а не модели.
 
 Инструменты передаются как OpenAI `tools`; при непустом списке добавляется
 `tool_choice=auto`. Демон исполняет вызовы, добавляет `tool`-сообщения и

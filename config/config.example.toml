@@ -59,7 +59,7 @@ barge_in_voice = false
 wake_chime = true
 # Подтверждения «услышал», «готово», «остановлено», «диалог очищен».
 state_chimes = true
-response_timeout_ms = 60000
+response_timeout_ms = 180000
 max_tool_rounds = 2
 
 [stt]
@@ -75,6 +75,9 @@ retries = 2
 [llm]
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
+# Резервные модели того же endpoint: включаются при 429/404 и при отказе
+# разбора вызова инструмента. Пусто — только основная модель.
+fallback_models = []
 api_key_env = "PETROVICH_LLM_API_KEY"
 temperature = 0.4
 max_tokens = 800

@@ -300,6 +300,7 @@ fn stale_dmix_ids(shm_text: &str, sem_text: &str, alive: impl Fn(i32) -> bool) -
         key: i32,
         id: i32,
         cpid: i32,
+        nattch: i32,
     }
     let entries: Vec<Shm> = shm_text
         .lines()
@@ -313,13 +314,21 @@ fn stale_dmix_ids(shm_text: &str, sem_text: &str, alive: impl Fn(i32) -> bool) -
                 key: parse_id(f[0])?,
                 id: parse_id(f[1])?,
                 cpid: parse_id(f[4])?,
+                nattch: parse_id(f[6])?,
             })
         })
         .collect();
     let Some(creator) = entries.iter().find(|e| e.key == 1024) else {
         return StaleDmix::default();
     };
-    if alive(creator.cpid) {
+    // Живой создатель или хотя бы один живой клиент: трогать нельзя.
+    // Удаление такого сегмента обрывает dmix у Spotya/другого клиента, и
+    // освободившийся slave остаётся занятым до его перезапуска.
+    if alive(creator.cpid)
+        || entries
+            .iter()
+            .any(|e| (e.key == 1024 || e.key == 1025) && e.nattch > 0)
+    {
         return StaleDmix::default();
     }
     let shm = entries
@@ -356,14 +365,31 @@ mod tests {
     fn stale_dmix_with_dead_creator_is_removed() {
         let shm = "\
 key shmid perms size cpid lpid nattch uid gid cuid cgid atime dtime ctime rss swap
-1024 10 666 496 999999 999999 1 0 0 0 0 0 0 0 4096 0
-1025 11 666 61440 999999 999999 1 0 0 0 0 0 0 0 61440 0";
+1024 10 666 496 999999 999999 0 0 0 0 0 0 0 0 4096 0
+1025 11 666 61440 999999 999999 0 0 0 0 0 0 0 0 61440 0";
         let sem = "\
 key semid perms nsems uid gid cuid cgid otime ctime
 1024 20 666 1 0 0 0 0 0 0";
         let ids = stale_dmix_ids(shm, sem, |pid| pid != 999_999);
         assert_eq!(ids.shm, vec![10, 11]);
         assert_eq!(ids.sem, vec![20]);
+    }
+
+    #[test]
+    fn detached_client_keeps_dmix_alive() {
+        let shm = "\
+key shmid perms size cpid lpid nattch uid gid cuid cgid atime dtime ctime rss swap
+1024 10 666 496 999999 999999 0 0 0 0 0 0 0 0 4096 0
+1025 11 666 61440 999999 999999 1 0 0 0 0 0 0 0 61440 0";
+        let sem = "\
+key semid perms nsems uid gid cuid cgid otime ctime
+1024 20 666 1 0 0 0 0 0 0";
+        let ids = stale_dmix_ids(shm, sem, |pid| pid != 999_999);
+        assert!(
+            ids.shm.is_empty(),
+            "нельзя удалять сегмент с живым клиентом"
+        );
+        assert!(ids.sem.is_empty());
     }
 
     #[test]

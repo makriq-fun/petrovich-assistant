@@ -15,7 +15,7 @@
 
 | Проверка | Состояние |
 |---|---|
-| 140 тестов workspace, clippy `-D warnings` | проходят на хосте |
+| Тесты workspace, clippy `-D warnings` | проходят на хосте |
 | Python-тесты установщика | 7 проходят |
 | Модель активации | openWakeWord «Петрович»; загрузка и `--check-config` проверены на колонке |
 | Кросс-сборка ARMv7 glibc | собрана ARMv7-сборка glibc 2.23 |
@@ -95,7 +95,7 @@ flowchart LR
 # На ПК: собрать релиз под ARMv7
 cargo install cross --git https://github.com/cross-rs/cross
 scripts/build.sh
-# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.0-armv7.tar.gz
+# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.1-armv7.tar.gz
 
 # Установка по SSH (ключ root уже настроен)
 python3 installer/petrovich_install.py --ssh-host station install \

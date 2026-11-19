@@ -577,6 +577,19 @@ def deploy_release(t: Transport, artifact: Path, ctl: Path, version: str, dry: b
     t.script(f"set -eu\nmkdir -p {remote_dir}\n")
     upload_file(t, artifact, f"{remote_dir}/petrovichd", "755", verify=True)
     upload_file(t, ctl, f"{remote_dir}/petrovichctl", "755", verify=True)
+    # TFLite C API не входит в релиз (бинарь прошивки/лицензия), но нужен
+    # рядом с petrovichd. Иначе загрузчик уходит на старый
+    # /system/vendor/quasar/libs/libtflite.so и падает на модели OWW.
+    t.script(
+        f"set -eu\n"
+        f"D={DEVICE_ROOT}\n"
+        f"src=$(readlink -f \"$D/current\" 2>/dev/null || true)\n"
+        f"dst={remote_dir}/libtensorflowlite_c.so\n"
+        f"if [ ! -f \"$dst\" ] && [ -n \"$src\" ] && [ -f \"$src/libtensorflowlite_c.so\" ]; then\n"
+        f"  cp -p \"$src/libtensorflowlite_c.so\" \"$dst\"\n"
+        f"  echo \"TFLite: сохранён из $src\"\n"
+        f"fi\n"
+    )
 
 
 def _default_binary(name: str) -> Path:
@@ -924,7 +937,7 @@ def main(argv=None) -> int:
         s = sub.add_parser(name)
         s.add_argument("--artifact")
         s.add_argument("--petrovichctl")
-        s.add_argument("--version", default="0.2.0")
+        s.add_argument("--version", default="0.2.1")
         s.add_argument("--config")
         s.add_argument("--secrets")
         s.add_argument("--wakeword-model")
