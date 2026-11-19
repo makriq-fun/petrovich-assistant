@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/skynet-core",
-    "crates/skynet-audio",
-    "crates/skynet-wakeword",
-    "crates/skynet-providers",
-    "crates/skynet-tools",
-    "crates/skynet-hw",
-    "crates/skynetd",
-    "crates/skynetctl",
+    "crates/petrovich-core",
+    "crates/petrovich-audio",
+    "crates/petrovich-wakeword",
+    "crates/petrovich-providers",
+    "crates/petrovich-tools",
+    "crates/petrovich-hw",
+    "crates/petrovichd",
+    "crates/petrovichctl",
 ]
 
 [workspace.package]
@@ -16,8 +16,8 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 license = "AGPL-3.0-only"
-repository = "https://github.com/makriq/skynet-station"
-authors = ["Skynet Station contributors"]
+repository = "https://github.com/makriq/petrovich-assistant"
+authors = ["Petrovich Assistant contributors"]
 
 [workspace.dependencies]
 anyhow = "1"
@@ -37,12 +37,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"
 
-skynet-core = { path = "crates/skynet-core" }
-skynet-audio = { path = "crates/skynet-audio" }
-skynet-wakeword = { path = "crates/skynet-wakeword" }
-skynet-providers = { path = "crates/skynet-providers" }
-skynet-tools = { path = "crates/skynet-tools" }
-skynet-hw = { path = "crates/skynet-hw" }
+petrovich-core = { path = "crates/petrovich-core" }
+petrovich-audio = { path = "crates/petrovich-audio" }
+petrovich-wakeword = { path = "crates/petrovich-wakeword" }
+petrovich-providers = { path = "crates/petrovich-providers" }
+petrovich-tools = { path = "crates/petrovich-tools" }
+petrovich-hw = { path = "crates/petrovich-hw" }
 
 [profile.release]
 opt-level = 3

@@ -23,9 +23,9 @@
 Проверка на колонке:
 
 ```bash
-/data/skynet/current/skynetctl --config /data/skynet/config.toml doctor
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml doctor
 # войти в логи:
-tail -f /data/skynet/log/skynetd.log
+tail -f /data/petrovich/log/petrovichd.log
 ```
 
 В журнале при старте: `VQE 'yandexmini_2': N входных кадров -> M выходных`
@@ -104,7 +104,7 @@ evdev-устройство `sar0_pad0`:
 Проверка:
 
 ```bash
-/data/skynet/current/skynetctl --config /data/skynet/config.toml light-test
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml light-test
 ```
 
 ## Ограничения

@@ -1,4 +1,4 @@
-# Модель активации «Скаенет»
+# Модель активации
 
 ## Что входит в релиз
 
@@ -8,18 +8,21 @@
 - `skynet_mww.tflite` — int8 streaming-модель.
 
 Источник — [olegchumakov/microwakeword-models](https://github.com/olegchumakov/microwakeword-models),
-каталог `skynet/`. Модель обучена на слово «Скайнет» (русский); в интерфейсе
-проекта используется отображаемое имя «Скаенет». Автор модели — kelstar;
-файл лицензии в upstream отсутствует, права принадлежат автору. Подробности —
+каталог `skynet/`. Модель обучена на слово «Скайнет» (русский). Продукт
+называется «Петрович», но встроенная модель по-прежнему реагирует на
+«Скайнет»: слово активации задаётся моделью, а не именем проекта. Для
+активации словом «Петрович» нужна отдельная обученная модель. Автор
+встроенной модели — kelstar; файл лицензии в upstream отсутствует, права
+принадлежат автору. Подробности —
 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
-Установщик копирует манифест и `.tflite` в `/data/skynet/models/` и указывает
+Установщик копирует манифест и `.tflite` в `/data/petrovich/models/` и указывает
 на них `[wakeword] model`.
 
 ## Требования
 
 - `libtflite.so` из прошивки: `/system/vendor/quasar/libs/libtflite.so`;
-- фронтенд TFLM microfrontend компилируется в `skynet-wakeword` из
+- фронтенд TFLM microfrontend компилируется в `petrovich-wakeword` из
   Apache-2.0 исходников в `third_party/`;
 - вход — 16 кГц моно, кадр 10 мс.
 
@@ -29,15 +32,15 @@
 
 Версия `libtflite.so` должна быть не ниже `min_runtime_version` модели.
 Встроенная модель собрана с `2.22.0-rc0`; на прошивке `2020.02.1` стоит
-`libtflite` 2.12, поэтому модель не запускается. `skynetd` сравнивает версии
+`libtflite` 2.12, поэтому модель не запускается. `petrovichd` сравнивает версии
 и возвращает ошибку вместо падения; для такой прошивки используйте
 openWakeWord.
 
 ## Проверка
 
 ```bash
-/data/skynet/current/skynetctl \
-  --config /data/skynet/config.toml wake-test take.wav
+/data/petrovich/current/petrovichctl \
+  --config /data/petrovich/config.toml wake-test take.wav
 ```
 
 `wake-test` принимает WAV PCM16, приводит к 16 кГц/моно и печатает score по
@@ -70,13 +73,18 @@ openWakeWord.
 или импортировать отдельно:
 
 ```bash
-python3 installer/skynet_install.py --ssh-host station install \
+python3 installer/petrovich_install.py --ssh-host station install \
   --wakeword-model ./wakeword.json
 ```
 
-Установщик кладёт выбранный файл в `/data/skynet/models/skynet_mww.json`
+Установщик кладёт выбранный файл в `/data/petrovich/models/skynet_mww.json`
 (универсальное имя) и, если в манифесте есть поле `model`, рядом — указанный
 `.tflite`. Так работает и microWakeWord, и openWakeWord-модель.
+
+Готовую TFLite-голову openWakeWord (вход `[1, 16, 96]`, выход score) можно
+указать прямо в `[wakeword] model`; манифест для неё не нужен, но `assets`
+обязателен, а `gain` обычно равен `1`. Такой файл установщик пока не
+загружает — положите его в `/data/petrovich/models/` вручную.
 
 ## Лицензии
 
@@ -86,5 +94,5 @@ python3 installer/skynet_install.py --ssh-host station install \
   speech_embedding.
 - Предобученные wake-word модели openWakeWord (CC BY-NC-SA 4.0) **не**
   включены.
-- Модель «Скаенет» распространяется отдельно от AGPL-кода; условия уточняйте
+- Модель «Скайнет» распространяется отдельно от AGPL-кода; условия уточняйте
   у автора.

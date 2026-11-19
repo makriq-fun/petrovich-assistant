@@ -1,12 +1,12 @@
-# Конфигурация skynetd. Скопируйте в /data/skynet/config.toml.
-# Секреты — в отдельный файл /data/skynet/secrets.env с правами 0600.
+# Конфигурация petrovichd. Скопируйте в /data/petrovich/config.toml.
+# Секреты — в отдельный файл /data/petrovich/secrets.env с правами 0600.
 version = 1
 
 [daemon]
 log_level = "info"
-state_dir = "/data/skynet/state"
-pid_file = "/run/skynetd.pid"
-secrets_file = "/data/skynet/secrets.env"
+state_dir = "/data/petrovich/state"
+pid_file = "/run/petrovichd.pid"
+secrets_file = "/data/petrovich/secrets.env"
 # Для устройств без zoneinfo: "MSK-3"; иначе "Europe/Moscow".
 timezone = "Europe/Moscow"
 
@@ -30,10 +30,11 @@ aec_delay_ms = 0
 
 [wakeword]
 enabled = true
-# microWakeWord-модель «Скаенет» входит в релиз (assets/wakeword).
+# Встроенная сторонняя microWakeWord-модель обучена на слово «Скайнет»
+# (assets/wakeword). Для активации словом «Петрович» укажите свою модель.
 # Для openWakeWord-модели укажите JSON и assets/oww.bin.
-model = "/data/skynet/models/skynet_mww.json"
-assets = "/data/skynet/assets/oww.bin"
+model = "/data/petrovich/models/skynet_mww.json"
+assets = "/data/petrovich/assets/oww.bin"
 # Смещение к порогу модели: -0.1 делает срабатывание чаще.
 sensitivity = 0.0
 refractory_ms = 2000
@@ -65,7 +66,7 @@ max_tool_rounds = 2
 provider = "openai"
 base_url = "https://api.openai.com/v1"
 model = "whisper-1"
-api_key_env = "SKYNET_STT_API_KEY"
+api_key_env = "PETROVICH_STT_API_KEY"
 language = "ru"
 timeout_ms = 30000
 retries = 2
@@ -73,14 +74,14 @@ retries = 2
 [llm]
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
-api_key_env = "SKYNET_LLM_API_KEY"
+api_key_env = "PETROVICH_LLM_API_KEY"
 temperature = 0.4
 max_tokens = 800
 timeout_ms = 60000
 retries = 2
 stream = true
 tools = true
-system_prompt = """Ты — Скаенет, голосовой помощник в колонке. Отвечай по-русски, кратко и по делу.
+system_prompt = """Ты — Петрович, голосовой помощник в колонке. Отвечай по-русски, кратко и по делу.
 Ответ должен хорошо звучать вслух: без списков, разметки и сносок. Если нужен инструмент,
 вызови его; не выдумывай результаты."""
 
@@ -90,7 +91,7 @@ provider = "openai"
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini-tts"
 voice = "alloy"
-api_key_env = "SKYNET_TTS_API_KEY"
+api_key_env = "PETROVICH_TTS_API_KEY"
 format = "pcm"
 sample_rate = 24000
 timeout_ms = 30000

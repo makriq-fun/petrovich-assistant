@@ -1,9 +1,9 @@
-# Скаенет — независимый голосовой помощник для Яндекс Станций
+# Петрович — независимый голосовой помощник для Яндекс Станций
 
-`skynetd` — демон на Rust, который заменяет голосовой стек Яндекса на самой
-колонке. Активация «Скаенет» происходит локально, речь распознаётся внешним
-STT, ответ строит LLM с инструментами, озвучка приходит из TTS и играет через
-динамик колонки. Серверного посредника, Home Assistant и облака Яндекса нет.
+`petrovichd` — демон на Rust, который заменяет голосовой стек Яндекса на самой
+колонке. Активация происходит локально, речь распознаётся внешним STT, ответ
+строит LLM с инструментами, озвучка приходит из TTS и играет через динамик
+колонки. Серверного посредника, Home Assistant и облака Яндекса нет.
 
 Поддерживается **Станция Мини 2** (`station-mini2`). Остальные модели
 добавляются записью в таблицу профилей, без переписывания логики.
@@ -24,10 +24,10 @@ STT, ответ строит LLM с инструментами, озвучка �
 
 ## Возможности
 
-- локальная активация по слову «Скаенет» (microWakeWord, без облака);
+- локальная активация по слову (microWakeWord или openWakeWord, без облака);
 - непрерывный диалог: после ответа можно задать уточняющий вопрос без
   повторной активации;
-- прерывание ответа новым «Скаенет», голосом поверх озвучки или кнопкой;
+- прерывание ответа новым словом активации, голосом поверх озвучки или кнопкой;
 - остановка словами «стоп», «хватит», «замолчи» обрабатывается локально,
   без обращения к LLM; после остановки помощник возвращается в ожидание;
 - потоковый LLM (SSE) и потоковый PCM-TTS;
@@ -40,10 +40,19 @@ STT, ответ строит LLM с инструментами, озвучка �
 - светодиоды, часы, кнопки и аппаратный мут микрофонов; плавные анимации;
 - автояркость кольца и часов по датчику `ltr308als01`;
 - установка через ADB/SSH, backup, атомарные релизы, health-check, откат;
-- миграция прежней установки `/data/jarvis` в `/data/skynet`;
+- миграция прежних установок `/data/skynet` и `/data/jarvis` в
+  `/data/petrovich`;
 - отключение Quasar: при падении помощника Алиса автоматически не
   запускается;
 - независимые DNS/NTP и проверка отсутствия обращений к Яндексу.
+
+## Модель активации
+
+В релиз входит сторонняя microWakeWord-модель, обученная на слово «Скайнет»
+(`assets/wakeword/skynet_mww.json` и `.tflite`). Отображаемое имя продукта —
+«Петрович»; чтобы активировать его словом «Петрович», подключите свою модель
+через `--wakeword-model` или `[wakeword] model`. Подробности и ограничения —
+[docs/wakeword-model.md](docs/wakeword-model.md).
 
 ## Архитектура
 
@@ -51,7 +60,7 @@ STT, ответ строит LLM с инструментами, озвучка �
 flowchart LR
     Mic[4 микрофона + 2 референса] --> ALSA[ALSA default 48 кГц]
     ALSA --> VQE[VQE прошивки или AEC/ресемплер]
-    VQE --> WW[Локальный детектор «Скаенет»]
+    VQE --> WW[Локальный детектор активации]
     VQE --> VAD[VAD и запись фразы]
     VAD --> STT[STT HTTP]
     STT --> LLM[LLM + инструменты]
@@ -60,7 +69,7 @@ flowchart LR
     Play --> Speaker[Динамик]
     Play -. референс .-> VQE
     LLM --> Tools[Таймеры, громкость, музыка, погода, веб]
-    Daemon[skynetd] --> HW[LED, часы, кнопки, мут, датчик света]
+    Daemon[petrovichd] --> HW[LED, часы, кнопки, мут, датчик света]
 ```
 
 Подробно: [docs/architecture.md](docs/architecture.md), [железо Мини 2](docs/hardware-mini2.md).
@@ -81,19 +90,18 @@ flowchart LR
 # На ПК: собрать релиз под ARMv7
 cargo install cross --git https://github.com/cross-rs/cross
 scripts/build.sh
-# dist/skynetd, dist/skynetctl, dist/skynet-station-0.2.0-armv7.tar.gz
+# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.0-armv7.tar.gz
 
 # Установка по SSH (ключ root уже настроен)
-python3 installer/skynet_install.py --ssh-host station install \
+python3 installer/petrovich_install.py --ssh-host station install \
   --config ./config.toml --secrets ./secrets.env
 ```
 
-Модель активации «Скаенет» входит в релиз
-(`assets/wakeword/skynet_mww.json`). Установщик сам кладёт её в
-`/data/skynet/models/`. Свою модель можно передать явно:
+Установщик сам кладёт выбранную модель активации в
+`/data/petrovich/models/`. Свою модель можно передать явно:
 
 ```bash
-python3 installer/skynet_install.py --ssh-host station install \
+python3 installer/petrovich_install.py --ssh-host station install \
   --config ./config.toml --secrets ./secrets.env \
   --wakeword-model ./my_wakeword.json
 ```
@@ -105,23 +113,23 @@ openWakeWord-модель и `assets/oww.bin`.
 После установки проверьте на колонке:
 
 ```bash
-/data/skynet/current/skynetctl --config /data/skynet/config.toml doctor
-/data/skynet/current/skynetctl --config /data/skynet/config.toml status
-tail -f /data/skynet/log/skynetd.log
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml doctor
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml status
+tail -f /data/petrovich/log/petrovichd.log
 ```
 
-Скажите «Скаенет», дождитесь мягкого сигнала и задайте вопрос.
+Скажите слово активации, дождитесь мягкого сигнала и задайте вопрос.
 
 ## Управление
 
 | Команда | Назначение |
 |---|---|
-| `skynetctl status` | процесс, память, релиз, модель |
-| `skynetctl doctor` | ALSA, VQE, кнопки, часы, датчик света, Quasar, DNS, место |
-| `skynetctl logs -n 100` | журнал демона |
-| `skynetctl wake-test file.wav` | прогон модели активации по записи |
-| `skynetctl audio-test 5` | запись с микрофонов и уровни каналов |
-| `skynetctl light-test` | пять отсчётов датчика освещённости |
+| `petrovichctl status` | процесс, память, релиз, модель |
+| `petrovichctl doctor` | ALSA, VQE, кнопки, часы, датчик света, Quasar, DNS, место |
+| `petrovichctl logs -n 100` | журнал демона |
+| `petrovichctl wake-test file.wav` | прогон модели активации по записи |
+| `petrovichctl audio-test 5` | запись с микрофонов и уровни каналов |
+| `petrovichctl light-test` | пять отсчётов датчика освещённости |
 | `installer ... rollback` | предыдущий релиз и проверка |
 | `installer ... restore` | снять помощника и вернуть init-скрипты Quasar |
 
@@ -152,7 +160,7 @@ tail -f /data/skynet/log/skynetd.log
 ## Независимость от Яндекса
 
 Установщик отключает автозапуск Quasar шимом init-скрипта. Демон никогда не
-запускает Quasar как запасной вариант. `skynetctl doctor` проверяет, что
+запускает Quasar как запасной вариант. `petrovichctl doctor` проверяет, что
 `maind`/`quasar_launcher2` не работают, а домены Яндекса не разрешаются.
 DNS/NTP задаются отдельно; см. [docs/security.md](docs/security.md).
 Полностью исключить сетевые обращения можно только при корректно

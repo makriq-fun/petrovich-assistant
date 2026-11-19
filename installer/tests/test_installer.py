@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import skynet_install as ji
+import petrovich_install as ji
 
 
 class Tests(unittest.TestCase):
@@ -20,8 +20,8 @@ class Tests(unittest.TestCase):
     def test_shim_keeps_original_and_marker(self):
         text = ji.shim_for("S97quasar")
         self.assertIn(ji.MARKER, text)
-        self.assertIn("/data/skynet/backups/quasar-init/S97quasar.orig", text)
-        self.assertIn("/data/skynet/enabled", text)
+        self.assertIn("/data/petrovich/backups/quasar-init/S97quasar.orig", text)
+        self.assertIn("/data/petrovich/enabled", text)
 
     def test_version_validation(self):
         self.assertEqual(ji.validate_version("0.1.0"), "0.1.0")
@@ -35,9 +35,9 @@ class Tests(unittest.TestCase):
     def test_model_uploads_include_manifest_and_tflite(self):
         uploads = ji.model_uploads(ji.ROOT / "assets/wakeword/skynet_mww.json")
         targets = {remote for _, remote in uploads}
-        self.assertIn("/data/skynet/models/skynet_mww.json", targets)
-        self.assertIn("/data/skynet/models/wakeword.json", targets)
-        self.assertIn("/data/skynet/models/skynet_mww.tflite", targets)
+        self.assertIn("/data/petrovich/models/skynet_mww.json", targets)
+        self.assertIn("/data/petrovich/models/wakeword.json", targets)
+        self.assertIn("/data/petrovich/models/skynet_mww.tflite", targets)
 
 
 if __name__ == "__main__":

@@ -771,6 +771,140 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "petrovich-audio"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "libloading",
+ "petrovich-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "petrovich-core"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "petrovich-hw"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "libc",
+ "petrovich-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "petrovich-providers"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "petrovich-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "petrovich-tools"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "petrovich-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "petrovich-wakeword"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "cc",
+ "libloading",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "petrovichctl"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "futures-util",
+ "petrovich-audio",
+ "petrovich-core",
+ "petrovich-hw",
+ "petrovich-providers",
+ "petrovich-tools",
+ "petrovich-wakeword",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "petrovichd"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "clap",
+ "futures-util",
+ "libc",
+ "petrovich-audio",
+ "petrovich-core",
+ "petrovich-hw",
+ "petrovich-providers",
+ "petrovich-tools",
+ "petrovich-wakeword",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1117,140 +1251,6 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
-]
-
-[[package]]
-name = "skynet-audio"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "libc",
- "libloading",
- "skynet-core",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "skynet-core"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "toml",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "skynet-hw"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "chrono",
- "libc",
- "skynet-core",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "skynet-providers"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "skynet-core",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "skynet-tools"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "skynet-core",
- "thiserror",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "skynet-wakeword"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cc",
- "libloading",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "skynetctl"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "futures-util",
- "serde_json",
- "skynet-audio",
- "skynet-core",
- "skynet-hw",
- "skynet-providers",
- "skynet-tools",
- "skynet-wakeword",
- "tokio",
-]
-
-[[package]]
-name = "skynetd"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "clap",
- "futures-util",
- "libc",
- "serde_json",
- "skynet-audio",
- "skynet-core",
- "skynet-hw",
- "skynet-providers",
- "skynet-tools",
- "skynet-wakeword",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -3,12 +3,14 @@
 ## Что сохраняется
 
 Установщик перед изменениями создаёт на колонке
-`/data/skynet/backups/install-<UTC>.tar.gz` и скачивает копию на ПК в
+`/data/petrovich/backups/install-<UTC>.tar.gz` и скачивает копию на ПК в
 `backups/`. В архив входят:
 
 - `config.toml`, `secrets.env` (если есть), `models/`, `assets/`;
 - `enabled`, `supervise.sh`, `install.json`;
-- `/etc/init.d/S99skynet` и оригиналы init-скриптов Quasar.
+- `/etc/init.d/S99petrovich` и оригиналы init-скриптов Quasar;
+- при наличии — файлы прежних установок `/data/skynet` и `/data/jarvis`
+  и их init-скрипты.
 
 Релизы (`releases/`) в архив не входят, чтобы не занимать дефицитное место;
 их можно собрать заново. SHA256 архива записывается в `backups/*.json` и
@@ -17,9 +19,9 @@
 ## Откат релиза
 
 ```bash
-python3 installer/skynet_install.py --ssh-host station rollback
+python3 installer/petrovich_install.py --ssh-host station rollback
 # или конкретный:
-python3 installer/skynet_install.py --ssh-host station rollback --release <версия>
+python3 installer/petrovich_install.py --ssh-host station rollback --release <версия>
 ```
 
 Установщик останавливает супервизор и демон, переключает `current` на выбранный
@@ -29,40 +31,40 @@ python3 installer/skynet_install.py --ssh-host station rollback --release <ве�
 Ручной вариант:
 
 ```bash
-kill "$(cat /data/skynet/supervise.pid)" 2>/dev/null || true
-kill "$(cat /run/skynetd.pid)" 2>/dev/null || true
-ln -sfn releases/<версия> /data/skynet/current
-/etc/init.d/S99skynet
+kill "$(cat /data/petrovich/supervise.pid)" 2>/dev/null || true
+kill "$(cat /run/petrovichd.pid)" 2>/dev/null || true
+ln -sfn releases/<версия> /data/petrovich/current
+/etc/init.d/S99petrovich
 ```
 
 ## Вернуть штатный стек
 
 ```bash
-python3 installer/skynet_install.py --ssh-host station restore
+python3 installer/petrovich_install.py --ssh-host station restore
 ```
 
 Что делает `restore`:
 
-1. останавливает супервизор и skynetd;
-2. удаляет `/data/skynet/enabled`;
+1. останавливает супервизор и petrovichd;
+2. удаляет `/data/petrovich/enabled`;
 3. восстанавливает оригиналы init-скриптов Quasar из
-   `/data/skynet/backups/quasar-init/*.orig`;
-4. удаляет `/etc/init.d/S99skynet`;
+   `/data/petrovich/backups/quasar-init/*.orig`;
+4. удаляет `/etc/init.d/S99petrovich`, `S99skynet` и `S99jarvis`;
 5. возвращает rootfs в ro.
 
 После этого **вручную перезагрузите** колонку. Установщик не запускает Алису
 сам: это осознанное решение, чтобы не включать облако Яндекса неожиданно.
-Данные `/data/skynet` (конфигурация, модель) остаются; удалите их вручную,
+Данные `/data/petrovich` (конфигурация, модель) остаются; удалите их вручную,
 если они не нужны.
 
 ## Если демон не запускается
 
-1. `/data/skynet/log/skynetd.log` — последние строки;
-2. `skynetctl doctor` — модель, ALSA, VQE, место;
-3. `skynetctl --check-config` — конфигурация и файлы;
+1. `/data/petrovich/log/petrovichd.log` — последние строки;
+2. `petrovichctl doctor` — модель, ALSA, VQE, место;
+3. `petrovichctl --check-config` — конфигурация и файлы;
 4. `ps` — не остался ли `maind`/`quasar_launcher2`;
 5. `df -k /data` — место;
-6. `cat /run/skynetd.pid`, `/proc/<pid>`.
+6. `cat /run/petrovichd.pid`, `/proc/<pid>`.
 
 Супервизор после 5 падений останавливается и **не** запускает Quasar. Это
 защита от нежелательного подключения к Яндексу, но требует ручного
@@ -74,7 +76,7 @@ python3 installer/skynet_install.py --ssh-host station restore
   консольный доступ к плате; инструкции зависят от прошивки.
 - Повреждение `/data`: помощник не запустится; штатный стек тоже может быть
   отключён шимом. Верните оригиналы из
-  `/data/skynet/backups/quasar-init/` или переустановите прошивку.
+  `/data/petrovich/backups/quasar-init/` или переустановите прошивку.
 - Повреждение rootfs: требуется восстановление NAND/прошивки. В этом
   репозитории нет автоматического восстановления NAND; используйте
   проверенную процедуру для вашей ревизии и **сначала сохраните дамп**.

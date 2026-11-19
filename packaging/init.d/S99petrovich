@@ -1,0 +1,11 @@
+#!/bin/sh
+# Запускает petrovichd после загрузки. Если /data/petrovich/enabled отсутствует,
+# ничего не делает: штатный Quasar тогда может работать как раньше.
+D=/data/petrovich
+[ -f "$D/enabled" ] || exit 0
+[ -x "$D/supervise.sh" ] || exit 0
+[ -x "$D/current/petrovichd" ] || exit 0
+mkdir -p "$D/log" "$D/state" /run
+# Никогда не поднимаем Алису как запасной вариант.
+/system/vendor/quasar/q stop >/dev/null 2>&1 || true
+setsid "$D/supervise.sh" </dev/null >/dev/null 2>&1 &

@@ -1,6 +1,6 @@
 {
   "type": "micro",
-  "wake_word": "Скаенет",
+  "wake_word": "Скайнет",
   "author": "kelstar",
   "model": "skynet_mww.tflite",
   "trained_languages": [

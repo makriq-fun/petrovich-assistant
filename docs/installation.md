@@ -9,16 +9,18 @@
 - доступ к выбранным STT/LLM/TTS (OpenAI-совместимый API или локальные
   сервисы).
 
-Модель активации «Скаенет» входит в релиз (microWakeWord); отдельный файл
-нужен только для своей модели (см. [wakeword-model.md](wakeword-model.md)).
+Встроенная microWakeWord-модель обучена на слово «Скайнет»; отдельный файл
+нужен для своей модели, в том числе для активации словом «Петрович» (см.
+[wakeword-model.md](wakeword-model.md)).
 Для microWakeWord требуется `libtflite` не ниже версии из модели (встроенная —
 2.22). Если на колонке более старый `libtflite`, используйте openWakeWord:
-установщик при наличии прежней `/data/jarvis/models/wakeword.json` сохраняет
+установщик при наличии прежней модели в `/data/skynet/models/wakeword.json`
+или `/data/jarvis/models/wakeword.json` сохраняет
 её как `wakeword.old.json` и не заменяет на micro.
 
 Установщик проверяет модель и прошивку до записи. Для другой модели нужен
 `--allow-unknown-model`, но профиль железа всё равно должен существовать в
-`skynet-core::profile`.
+`petrovich-core::profile`.
 
 ## Сборка
 
@@ -29,9 +31,9 @@ scripts/build.sh
 
 Результат:
 
-- `dist/skynetd` — демон ARMv7, динамический glibc 2.23 (совместим с 2.30 на Мини 2);
-- `dist/skynetctl` — диагностика;
-- `dist/skynet-station-<версия>-armv7.tar.gz` — выпуск;
+- `dist/petrovichd` — демон ARMv7, динамический glibc 2.23 (совместим с 2.30 на Мини 2);
+- `dist/petrovichctl` — диагностика;
+- `dist/petrovich-assistant-<версия>-armv7.tar.gz` — выпуск;
 - `dist/SHA256SUMS`.
 
 Для проверки на ПК: `TARGET=host scripts/build.sh`.
@@ -61,21 +63,21 @@ $EDITOR config.toml secrets.env
 SSH (ключ root уже настроен):
 
 ```bash
-python3 installer/skynet_install.py --ssh-host station install \
+python3 installer/petrovich_install.py --ssh-host station install \
   --config config.toml --secrets secrets.env
 ```
 
 ADB:
 
 ```bash
-python3 installer/skynet_install.py --transport adb --serial <серийный> install \
+python3 installer/petrovich_install.py --transport adb --serial <серийный> install \
   --config config.toml --secrets secrets.env
 ```
 
 Своя модель (необязательно):
 
 ```bash
-python3 installer/skynet_install.py --ssh-host station install \
+python3 installer/petrovich_install.py --ssh-host station install \
   --config config.toml --secrets secrets.env \
   --wakeword-model ./my_wakeword.json
 ```
@@ -83,26 +85,26 @@ python3 installer/skynet_install.py --ssh-host station install \
 Сначала полезен план:
 
 ```bash
-python3 installer/skynet_install.py --ssh-host station --dry-run install
+python3 installer/petrovich_install.py --ssh-host station --dry-run install
 ```
 
 Порядок действий установщика:
 
 1. проверяет root, модель, прошивку и свободное место;
-2. сохраняет `/data/skynet`, прежнюю `/data/jarvis` и init-скрипты в
+2. сохраняет `/data/petrovich`, прежние `/data/skynet` и `/data/jarvis`, а также init-скрипты в
    `backups/install-<UTC>.tar.gz`, скачивает копию на ПК, сверяет SHA256;
 3. если найдена старая установка, переносит конфигурацию, секреты, модели,
-   assets и релизы в `/data/skynet` (старая папка не удаляется);
+   assets и релизы в `/data/petrovich` (старая папка не удаляется);
 4. загружает релиз в `releases/<версия>` и проверяет файлы;
 5. атомарно переключает `current`;
-6. устанавливает `S99skynet` и шим Quasar: пока существует
-   `/data/skynet/enabled`, штатный стек не запускается;
+6. устанавливает `S99petrovich` и шим Quasar: пока существует
+   `/data/petrovich/enabled`, штатный стек не запускается;
 7. запускает супервизор и ждёт `--check-config` и живой pid;
 8. при неудаче переключается на предыдущий релиз; если его нет — снимает
    `enabled` и оставляет Алису выключенной.
 
-Если `--wakeword-model` не задан, ставится встроенная модель «Скаенет» из
-`assets/wakeword/`. Старая `wakeword.json` в `/data/skynet/models/` тоже
+Если `--wakeword-model` не задан, ставится встроенная модель «Скайнет» из
+`assets/wakeword/`. Старая `wakeword.json` в `/data/petrovich/models/` тоже
 обновляется копией встроенной модели; конфигурация переписывается на
 `skynet_mww.json`. Если встроенной модели нет, установщик попробует
 импортировать `/data/opt/wakeword/model.json`.
@@ -111,7 +113,7 @@ python3 installer/skynet_install.py --ssh-host station --dry-run install
 
 ```bash
 scripts/build.sh
-python3 installer/skynet_install.py --ssh-host station upgrade
+python3 installer/petrovich_install.py --ssh-host station upgrade
 ```
 
 Конфигурация и секреты без явных `--config/--secrets` не перезаписываются.
@@ -120,24 +122,24 @@ python3 installer/skynet_install.py --ssh-host station upgrade
 ## Независимые DNS и NTP
 
 ```bash
-python3 installer/skynet_install.py --ssh-host station privacy \
+python3 installer/petrovich_install.py --ssh-host station privacy \
   --dns 1.1.1.1 --dns 9.9.9.9 --ntp time.cloudflare.com
 # откат:
-python3 installer/skynet_install.py --ssh-host station privacy --revert
+python3 installer/petrovich_install.py --ssh-host station privacy --revert
 ```
 
 Команда сохраняет прежние `/etc/resolv.conf` и конфигурацию NTP в
-`/data/skynet/backups/privacy-*`, перемонтирует rootfs на запись и обратно.
+`/data/petrovich/backups/privacy-*`, перемонтирует rootfs на запись и обратно.
 DHCP/NetworkManager может перезаписать `resolv.conf` после перезагрузки —
-проверьте через `skynetctl doctor`.
+проверьте через `petrovichctl doctor`.
 
 ## Проверка
 
 ```bash
-/data/skynet/current/skynetctl --config /data/skynet/config.toml status
-/data/skynet/current/skynetctl --config /data/skynet/config.toml doctor
-/data/skynet/current/skynetctl --config /data/skynet/config.toml audio-test 5
-tail -n 100 /data/skynet/log/skynetd.log
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml status
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml doctor
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml audio-test 5
+tail -n 100 /data/petrovich/log/petrovichd.log
 ```
 
 `doctor` проверяет: профиль, модель, backbone, VQE, `amixer`, кнопки, часы,
@@ -149,10 +151,10 @@ GPIO мута, отсутствие `maind`/`quasar_launcher2`, разрешен
 
 На колонке:
 
-1. «Скаенет» → сигнал активации;
+1. слово активации → сигнал активации;
 2. вопрос → ответ;
 3. уточняющий вопрос без повторной активации;
-4. «Скаенет» во время ответа → ответ прерывается;
+4. слово активации во время ответа → ответ прерывается;
 5. кнопки громкости, действие, аппаратный мут;
 6. светодиоды и часы;
 7. таймер;
@@ -164,11 +166,11 @@ GPIO мута, отсутствие `maind`/`quasar_launcher2`, разрешен
 
 | Симптом | Что смотреть |
 |---|---|
-| `skynetd не запустился` | `/data/skynet/log/skynetd.log`, `skynetctl doctor` |
+| `petrovichd не запустился` | `/data/petrovich/log/petrovichd.log`, `petrovichctl doctor` |
 | нет активации | модель/backbone, `wake-test`, порог, усиление, мут |
 | нет звука | `amixer`, `aplay`/`speaker-test`, `[audio] playback_pcm` |
 | нет ответа LLM | ключ, URL, сертификат, журнал провайдера |
-| Quasar всё ещё работает | шим init-скрипта, `ps`, `skynetctl doctor` |
+| Quasar всё ещё работает | шим init-скрипта, `ps`, `petrovichctl doctor` |
 | мало места | удалить старые `releases/` после успешной проверки |
 
 Точные ограничения: [testing.md](testing.md), [recovery.md](recovery.md).

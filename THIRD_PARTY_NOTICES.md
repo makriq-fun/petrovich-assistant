@@ -13,14 +13,14 @@
 - Авторство: © Morvex885 и участники Pulsar
 - Что использовано:
   - схема загрузки `libasound` через `dlopen` и обхода версионированных
-    символов (`crates/skynet-audio/src/alsa.rs`);
+    символов (`crates/petrovich-audio/src/alsa.rs`);
   - восстановленные сигнатуры C API VQE и порядок загрузки зависимостей
-    прошивки (`crates/skynet-audio/src/vqe.rs`);
+    прошивки (`crates/petrovich-audio/src/vqe.rs`);
   - таблица аппаратных параметров Мини 2, имена sysfs-светодиодов и часов,
-    GPIO мута, evdev-кнопки (`crates/skynet-core/src/profile.rs`,
-    `crates/skynet-hw/**`);
+    GPIO мута, evdev-кнопки (`crates/petrovich-core/src/profile.rs`,
+    `crates/petrovich-hw/**`);
   - сведения о каналах VQE и смысле выходов из `docs/hardware.md`.
-- Изменения: код сокращён до задач skynetd, удалены спотеры, ESPHome,
+- Изменения: код сокращён до задач petrovichd, удалены спотеры, ESPHome,
   Sendspin и Zigbee; добавлены собственный голосовой автомат, VAD, NLMS,
   провайдеры и установщик. Полный текст изменений — история этого
   репозитория.
@@ -56,9 +56,9 @@
 - Источник: <https://github.com/WhiteJ-f/open-station-assistant>
 - Лицензия: MIT.
 - Использовано как пример автономного помощника и локального «Jarvis»;
-  исходный код не копировался. Архитектура skynetd самостоятельная.
+  исходный код не копировался. Архитектура petrovichd самостоятельная.
 
-## Модель активации «Скаенет»
+## Модель активации «Скайнет»
 
 - Источник: <https://github.com/olegchumakov/microwakeword-models>,
   каталог `skynet/`.
@@ -70,8 +70,8 @@
   AGPL-3.0-only кода проекта; права принадлежат автору модели. При
   распространении сборки уточните условия у автора.
 - В репозитории: `assets/wakeword/skynet_mww.json` и
-  `assets/wakeword/skynet_mww.tflite`. Это модель для слова «Скайнет»; в
-  интерфейсе проекта используется отображаемое имя «Скаенет».
+  `assets/wakeword/skynet_mww.tflite`. Это модель для слова «Скайнет»; продукт
+  называется «Петрович», но слово активации задаётся моделью.
 
 ## Модели голоса Piper
 

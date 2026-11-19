@@ -22,15 +22,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cross
-      - run: cross build --locked --release --target armv7-unknown-linux-gnueabihf -p skynetd -p skynetctl
+      - run: cross build --locked --release --target armv7-unknown-linux-gnueabihf -p petrovichd -p petrovichctl
       - run: |
           mkdir -p dist
-          install -m755 target/armv7-unknown-linux-gnueabihf/release/skynetd dist/skynetd
-          install -m755 target/armv7-unknown-linux-gnueabihf/release/skynetctl dist/skynetctl
+          install -m755 target/armv7-unknown-linux-gnueabihf/release/petrovichd dist/petrovichd
+          install -m755 target/armv7-unknown-linux-gnueabihf/release/petrovichctl dist/petrovichctl
           ./scripts/package.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: skynet-station-armv7
+          name: petrovich-assistant-armv7
           path: dist/*.tar.gz
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -42,11 +42,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cross
-      - run: cross build --locked --release --target armv7-unknown-linux-gnueabihf -p skynetd -p skynetctl
+      - run: cross build --locked --release --target armv7-unknown-linux-gnueabihf -p petrovichd -p petrovichctl
       - run: |
           mkdir -p dist
-          install -m755 target/armv7-unknown-linux-gnueabihf/release/skynetd dist/skynetd
-          install -m755 target/armv7-unknown-linux-gnueabihf/release/skynetctl dist/skynetctl
+          install -m755 target/armv7-unknown-linux-gnueabihf/release/petrovichd dist/petrovichd
+          install -m755 target/armv7-unknown-linux-gnueabihf/release/petrovichctl dist/petrovichctl
           ./scripts/package.sh
       - uses: softprops/action-gh-release@v2
         with:

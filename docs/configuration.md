@@ -1,7 +1,7 @@
 # Конфигурация
 
-Файл по умолчанию — `/data/skynet/config.toml`, секреты —
-`/data/skynet/secrets.env` (права `0600`). Неизвестные ключи запрещены:
+Файл по умолчанию — `/data/petrovich/config.toml`, секреты —
+`/data/petrovich/secrets.env` (права `0600`). Неизвестные ключи запрещены:
 опечатка останавливает загрузку, а не оставляет небезопасное значение.
 
 Пример: [config/config.example.toml](../config/config.example.toml).
@@ -11,9 +11,9 @@
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
 | `log_level` | `info` | фильтр `tracing`, можно переопределить `RUST_LOG` |
-| `state_dir` | `/data/skynet/state` | состояние/журналы |
-| `pid_file` | `/run/skynetd.pid` | pid демона |
-| `secrets_file` | `/data/skynet/secrets.env` | секреты, `0600` |
+| `state_dir` | `/data/petrovich/state` | состояние/журналы |
+| `pid_file` | `/run/petrovichd.pid` | pid демона |
+| `secrets_file` | `/data/petrovich/secrets.env` | секреты, `0600` |
 | `run_gid` | нет | дополнительный GID, например группа прокси |
 | `timezone` | системный | `Europe/Moscow` или `MSK-3`, если zoneinfo нет |
 
@@ -47,8 +47,8 @@
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
 | `enabled` | `true` | локальная активация |
-| `model` | `/data/skynet/models/skynet_mww.json` | microWakeWord «Скаенет» |
-| `assets` | `/data/skynet/assets/oww.bin` | мел + эмбеддинги для openWakeWord |
+| `model` | `/data/petrovich/models/skynet_mww.json` | microWakeWord «Скайнет» (сторонняя модель) |
+| `assets` | `/data/petrovich/assets/oww.bin` | мел + эмбеддинги для openWakeWord |
 | `threshold` | из модели | переопределение порога |
 | `sensitivity` | `0.0` | смещение порога; отрицательное — чувствительнее |
 | `refractory_ms` | `2000` | пауза между срабатываниями |
@@ -63,7 +63,9 @@
 personal/non-commercial использования; не добавляйте их в репозиторий без
 коммерческой лицензии.
 Повреждённый JSON не роняет демон, а даёт понятную ошибку при старте.
-Модель «Скаенет» входит в релиз; `assets` нужен только для openWakeWord.
+Модель «Скайнет» входит в релиз; `assets` нужен только для openWakeWord.
+Чтобы активировать помощника словом «Петрович», подключите свою модель через
+`--wakeword-model` или `model`.
 
 ## `[vad]`
 
@@ -85,7 +87,7 @@ personal/non-commercial использования; не добавляйте и
 | `history_turns` | `8` | ходов в истории |
 | `history_chars` | `12000` | символов в истории |
 | `history_ttl_s` | `900` | простой до очистки |
-| `barge_in` | `true` | голос или «Скаенет» прерывает ответ |
+| `barge_in` | `true` | голос или слово активации прерывает ответ |
 | `wake_chime` | `true` | звук активации |
 | `state_chimes` | `true` | звуки «услышал», «готово», «остановлено», «очищено» |
 | `response_timeout_ms` | `60000` | предел одного хода |
@@ -148,12 +150,12 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 
 ## Переопределения
 
-- `SKYNET_CONFIG` — путь к конфигурации;
+- `PETROVICH_CONFIG` — путь к конфигурации;
 - `RUST_LOG` — уровень журнала;
-- `SKYNET_HARDWARE_MODEL` — подмена профиля для тестов/диагностики.
+- `PETROVICH_HARDWARE_MODEL` — подмена профиля для тестов/диагностики.
 
 Проверка без запуска:
 
 ```bash
-skynetd --config config.toml --check-config
+petrovichd --config config.toml --check-config
 ```

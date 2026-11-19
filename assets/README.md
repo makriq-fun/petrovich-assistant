@@ -1,8 +1,8 @@
 # Ресурсы активации
 
-`wakeword/` — встроенная модель microWakeWord «Скаенет»:
+`wakeword/` — встроенная сторонняя модель microWakeWord «Скайнет»:
 `skynet_mww.json` и `skynet_mww.tflite`. Установщик копирует их в
-`/data/skynet/models/`.
+`/data/petrovich/models/`.
 
 `oww.bin` — контейнер `OWW1` с мел-фильтрами и весами эмбеддингов
 openWakeWord / Google speech_embedding (Apache-2.0). Он не содержит

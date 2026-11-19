@@ -35,12 +35,12 @@ python3 -m unittest discover -s installer/tests -v
 
 ## Совместимость и качество активации
 
-- openWakeWord-пайплайн: тест `crates/skynet-wakeword/tests/parity.rs` — те же
+- openWakeWord-пайплайн: тест `crates/petrovich-wakeword/tests/parity.rs` — те же
   16 окон на детерминированном тоне, расхождение эмбеддингов < 0.25 (разный
   порядок f32-сумм). На четырёх реальных записях «Джарвис» старый детектор
   давал те же срабатывания; это проверка пайплайна, не качества в новой
   комнате.
-- microWakeWord «Скаенет»: автор модели сообщает точность 99.77% на
+- microWakeWord «Скайнет» (встроенная сторонняя модель): автор модели сообщает точность 99.77% на
   валидации и 81% отложенных синтетических позитивов выше порога 0.9
   (95% для клипов ≥1.2 с). Ложных срабатываний на 22 записях «Алиса» не
   было. Независимой проверки на этой колонке в репозитории нет.
@@ -74,11 +74,11 @@ python3 -m unittest discover -s installer/tests -v
 ## Проверка на колонке
 
 ```bash
-/data/skynet/current/skynetctl --config /data/skynet/config.toml doctor
-/data/skynet/current/skynetctl --config /data/skynet/config.toml status
-/data/skynet/current/skynetctl --config /data/skynet/config.toml wake-test take.wav
-/data/skynet/current/skynetctl --config /data/skynet/config.toml light-test
-tail -f /data/skynet/log/skynetd.log
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml doctor
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml status
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml wake-test take.wav
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml light-test
+tail -f /data/petrovich/log/petrovichd.log
 ```
 
 `wake-test` принимает WAV PCM16, приводит к 16 кГц/моно и печатает score по
@@ -89,19 +89,19 @@ tail -f /data/skynet/log/skynetd.log
 
 | Проверка | Ожидание |
 |---|---|
-| «Скаенет» | мягкий сигнал, синее кольцо, Listening |
+| слово активации | мягкий сигнал, синее кольцо, Listening |
 | вопрос | распознан, слышен «услышал», ответ озвучен |
 | конец ответа | мягкий сигнал, зелёная волна, `8888` на часах |
 | «стоп» / кнопка | сигнал остановки, `----` на часах, возврат в ожидание |
 | сброс диалога | сигнал очистки, `0000` на часах |
 | датчик света | `light-test` показывает люксы; яркость меняется плавно |
 | уточнение без имени | новый ответ в пределах follow-up |
-| «Скаенет» во время ответа | звук прерван, новое слушание |
+| слово активации во время ответа | звук прерван, новое слушание |
 | кнопка во время ответа | ответ оборван, возврат в ожидание |
 | громкость кнопками | шаг 5%, кольцо показывает уровень |
 | мут | красное кольцо, активация не срабатывает |
 | таймер | звонок и озвучка, часы MM:00 для длинного таймера |
-| перезагрузка | skynetd поднялся, Алиса не отвечает |
+| перезагрузка | petrovichd поднялся, Алиса не отвечает |
 | `ps` | нет `maind`, `quasar_launcher2` |
 | `doctor` | нет FAIL; WARN разобраны |
 
@@ -115,4 +115,4 @@ GitHub Actions:
 - выпуск по тегу `v*` с tar и `SHA256SUMS`.
 
 Кросс-сборка в CI не равна проверке на устройстве. В этом окружении
-`armv7-unknown-linux-gnueabihf` собран в контейнере с glibc 2.23; `skynetd --version` и `--check-config` прошли под `qemu-arm`.
+`armv7-unknown-linux-gnueabihf` собран в контейнере с glibc 2.23; `petrovichd --version` и `--check-config` прошли под `qemu-arm`.
