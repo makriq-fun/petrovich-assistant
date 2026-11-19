@@ -48,7 +48,8 @@ $EDITOR config.toml secrets.env
 - `[stt]`, `[llm]`, `[tts]` — провайдеры и ключи;
 - `[tools] weather_url` — погода; координаты задают место по умолчанию,
   без них работает поиск по названному городу;
-- `[tools] search_url` — SearXNG, если нужен поиск;
+- `[tools] search_url` — SearXNG JSON или DuckDuckGo HTML, если нужен поиск;
+  `search_api_key_env` — ключ Tavily, если поиск идёт через Tavily;
 - `[tools] sandbox_command` — только если действительно нужен `run_code`;
 - `[hardware] model = "auto"`.
 
