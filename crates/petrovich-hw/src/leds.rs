@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
-use petrovich_core::events::{UiNotice, VoiceState};
+use petrovich_core::events::{Emotion, UiNotice, VoiceState};
 use petrovich_core::profile::HardwareProfile;
 
 pub const DEFAULT_LED_DIR: &str = "/sys/class/leds/";
@@ -206,6 +206,52 @@ pub fn notice_colors(notice: UiNotice, t: f32) -> Vec<[u8; 3]> {
             let level = 0.45 + 0.55 * pulse(t, 0.55);
             out.fill(color(1.0 * level, 0.82 * level, 0.55 * level));
         }
+        UiNotice::Alarm => {
+            let level = 0.55 + 0.45 * pulse(t, 0.42);
+            out.fill(color(1.0 * level, 0.30 * level, 0.02 * level));
+        }
+        UiNotice::Emotion(e) => return emotion_colors(e, t),
+    }
+    out
+}
+
+/// Цветовая «мимика» кольца для эмоций.
+pub fn emotion_colors(emotion: Emotion, t: f32) -> Vec<[u8; 3]> {
+    let mut out = vec![[0u8; 3]; PIXELS];
+    match emotion {
+        Emotion::Happy => {
+            let level = 0.45 + 0.55 * pulse(t, 0.8);
+            out.fill(color(1.0 * level, 0.62 * level, 0.08 * level));
+        }
+        Emotion::Sad => {
+            let level = (-t / 1.6).exp();
+            out.fill(color(0.08 * level, 0.24 * level, 0.85 * level));
+        }
+        Emotion::Surprised => {
+            let level = 0.4 + 0.6 * pulse(t, 0.25);
+            out.fill(color(0.15 * level, 0.85 * level, 1.0 * level));
+        }
+        Emotion::Angry => {
+            let level = 0.5 + 0.5 * pulse(t, 0.36);
+            out.fill(color(1.0 * level, 0.02 * level, 0.02 * level));
+        }
+        Emotion::Calm => {
+            let level = 0.3 + 0.7 * smoothstep(pulse(t, 2.0));
+            out.fill(color(0.02 * level, 0.55 * level, 0.42 * level));
+        }
+        Emotion::Greeting => {
+            let pos = (t / 0.9 * PIXELS as f32).rem_euclid(PIXELS as f32);
+            for (i, p) in out.iter_mut().enumerate() {
+                let d = (i as f32 - pos).rem_euclid(PIXELS as f32);
+                let d = d.min(PIXELS as f32 - d);
+                let level = (1.0 - d / 2.0).max(0.0);
+                *p = color(0.15 * level, 0.9 * level, 0.35 * level);
+            }
+        }
+        Emotion::Neutral => {
+            let level = (-t / 1.2).exp() * 0.7;
+            out.fill(color(0.6 * level, 0.65 * level, 0.7 * level));
+        }
     }
     out
 }
@@ -246,6 +292,8 @@ pub fn notice_duration(notice: UiNotice) -> Duration {
         UiNotice::Done | UiNotice::Stopped | UiNotice::Cleared => Duration::from_millis(1200),
         UiNotice::Error => Duration::from_millis(1800),
         UiNotice::Timer => Duration::from_millis(2400),
+        UiNotice::Alarm => Duration::from_millis(3200),
+        UiNotice::Emotion(_) => Duration::from_millis(2500),
     }
 }
 
@@ -298,6 +346,8 @@ mod tests {
             UiNotice::Cleared,
             UiNotice::Error,
             UiNotice::Timer,
+            UiNotice::Alarm,
+            UiNotice::Emotion(Emotion::Happy),
         ] {
             assert_eq!(notice_colors(n, 0.3).len(), 6);
         }

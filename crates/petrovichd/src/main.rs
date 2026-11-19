@@ -2,6 +2,7 @@
 
 mod daemon;
 mod music;
+mod tts_cache;
 mod turn;
 
 use std::path::PathBuf;

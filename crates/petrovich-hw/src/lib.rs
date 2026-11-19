@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use chrono::Timelike as _;
 use petrovich_core::config::HardwareConfig;
-use petrovich_core::events::{TimerEvent, UiEvent, UiNotice, VoiceState};
+use petrovich_core::events::{AlarmEvent, TimerEvent, UiEvent, UiNotice, VoiceState};
 use petrovich_core::profile::HardwareProfile;
 use tokio::sync::mpsc;
 
@@ -121,6 +121,8 @@ async fn run_ui(
     let mut error_until = tokio::time::Instant::now();
     let mut notice: Option<(UiNotice, tokio::time::Instant)> = None;
     let mut timer_deadline: Option<tokio::time::Instant> = None;
+    let mut alarm_time: Option<(u32, u32)> = None;
+    let mut alarm_until = tokio::time::Instant::now();
     let start = tokio::time::Instant::now();
     let mut last = start;
     let mut light_target = 1.0f32;
@@ -157,6 +159,17 @@ async fn run_ui(
                     }
                     Some(UiEvent::Timer(TimerEvent::Cancelled { .. })) => {
                         timer_deadline = None;
+                    }
+                    Some(UiEvent::Alarm(AlarmEvent::Started { hour, minute, .. })) => {
+                        alarm_time = Some((hour, minute));
+                        alarm_until = tokio::time::Instant::now() + Duration::from_secs(3);
+                    }
+                    Some(UiEvent::Alarm(AlarmEvent::Fired { .. })) => {
+                        alarm_time = None;
+                        notice = Some((UiNotice::Alarm, tokio::time::Instant::now()));
+                    }
+                    Some(UiEvent::Emotion(e)) => {
+                        notice = Some((UiNotice::Emotion(e), tokio::time::Instant::now()));
                     }
                     Some(UiEvent::Muted(m)) => muted = m,
                     Some(UiEvent::SpeechStarted) => state = VoiceState::Speaking,
@@ -237,7 +250,14 @@ async fn run_ui(
 
         if let Some(c) = clock.as_mut().filter(|c| c.enabled()) {
             c.set_brightness((clock_brightness * light_factor).clamp(0.0, 1.0));
-            let r = if let Some(dl) = timer_deadline {
+            let r = if now < volume_until {
+                c.show_volume(volume_percent)
+            } else if now < alarm_until {
+                match alarm_time {
+                    Some((hour, minute)) => c.show_time_level(hour, minute, 0),
+                    None => clock_time(c, state, t),
+                }
+            } else if let Some(dl) = timer_deadline {
                 if dl > now {
                     c.show_timer(dl.duration_since(now).as_secs())
                 } else {

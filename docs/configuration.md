@@ -85,9 +85,10 @@ personal/non-commercial использования; не добавляйте и
 | `history_turns` | `8` | ходов в истории |
 | `history_chars` | `12000` | символов в истории |
 | `history_ttl_s` | `900` | простой до очистки |
-| `barge_in` | `true` | голос или слово активации прерывает ответ |
+| `barge_in` | `true` | слово активации или кнопка прерывает ответ |
+| `barge_in_voice` | `false` | перебивание голосом; включать только с рабочим AEC |
 | `wake_chime` | `true` | звук активации |
-| `state_chimes` | `true` | звуки «услышал», «готово», «остановлено», «очищено» |
+| `state_chimes` | `true` | звуки «услышал», «перестал слушать», «готово», «остановлено», «очищено» |
 | `response_timeout_ms` | `60000` | предел одного хода |
 | `max_tool_rounds` | `2` | раундов вызова инструментов (0..5) |
 
@@ -103,23 +104,26 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `enabled` | `time,timer,volume,music,web_fetch,weather,reset_dialog,stop` | белый список |
+| `enabled` | `time,timer,alarm,volume,music,emotion,web_fetch,weather,reset_dialog,stop` | белый список |
 | `timeout_ms` | `10000` | обычные инструменты |
 | `web_timeout_ms` | `15000` | веб и погода |
 | `web_max_bytes` | `1048576` | предел ответа |
 | `search_url` | `""` | SearXNG JSON; пусто — поиска нет |
 | `web_allow_private` | `false` | только отладка: частные адреса и HTTP |
 | `weather_url` | `https://api.open-meteo.com/v1/forecast` | endpoint погоды |
+| `weather_geocoding_url` | `https://geocoding-api.open-meteo.com/v1/search` | геокодинг для города; пусто — только координаты |
 | `weather_latitude` | нет | широта |
 | `weather_longitude` | нет | долгота |
 | `weather_place` | `""` | название в ответе |
 | `sandbox_command` | `[]` | argv песочницы; пусто — `run_code` выключен |
 | `sandbox_timeout_ms` | `5000` | предел кода |
-| `music_command` | `[]` | команда Spotiya; `{action}` подставляется в argv, иначе действие добавляется последним |
+| `music_command` | `[]` | команда Spotiya, например `["/data/opt/spotify-connect/spotiya", "--{action}"]`; `{action}` подставляется в argv, иначе действие добавляется последним |
 
 Инструмент доступен, только если он одновременно в `enabled`, настроен и
-разрешён. `weather` требует координат; `web_search` — `search_url`;
+разрешён. `weather` требует `weather_url`, а без координат — названного
+города; `web_search` — `search_url`;
 `run_code` — `sandbox_command`; `music` — `music_command`.
+Таймеры и будильники живут в памяти демона: перезапуск их сбрасывает.
 
 ## `[hardware]`
 

@@ -11,8 +11,9 @@ use url::Url;
 pub struct Weather {
     client: reqwest::Client,
     url: String,
-    latitude: f64,
-    longitude: f64,
+    geocoding_url: String,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
     place: String,
     allow_private: bool,
     max_bytes: usize,
@@ -37,22 +38,113 @@ impl Weather {
         Ok(Self {
             client,
             url: url.into(),
-            latitude,
-            longitude,
+            geocoding_url: "https://geocoding-api.open-meteo.com/v1/search".into(),
+            latitude: Some(latitude),
+            longitude: Some(longitude),
             place: place.into(),
             allow_private,
             max_bytes: 256 * 1024,
         })
     }
 
+    /// Погода только по названию места: без координат по умолчанию.
+    pub fn without_coordinates(
+        url: impl Into<String>,
+        timeout_ms: u64,
+        allow_private: bool,
+    ) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .context("клиент погоды")?;
+        Ok(Self {
+            client,
+            url: url.into(),
+            geocoding_url: "https://geocoding-api.open-meteo.com/v1/search".into(),
+            latitude: None,
+            longitude: None,
+            place: String::new(),
+            allow_private,
+            max_bytes: 256 * 1024,
+        })
+    }
+
+    pub fn with_geocoding(mut self, url: impl Into<String>) -> Self {
+        self.geocoding_url = url.into();
+        self
+    }
+
     pub async fn current(&self) -> Result<String> {
+        self.current_at(None).await
+    }
+
+    /// Погода в указанном месте; без места — координаты из конфигурации.
+    pub async fn current_at(&self, location: Option<&str>) -> Result<String> {
+        let (lat, lon, place) = self.resolve(location).await?;
+        self.fetch(lat, lon, &place).await
+    }
+
+    async fn resolve(&self, location: Option<&str>) -> Result<(f64, f64, String)> {
+        let Some(name) = location.map(str::trim).filter(|l| !is_generic_place(l)) else {
+            let (Some(lat), Some(lon)) = (self.latitude, self.longitude) else {
+                bail!("погода: назовите город (координаты не настроены)");
+            };
+            return Ok((lat, lon, self.place.clone()));
+        };
+        if self.geocoding_url.is_empty() {
+            let (Some(lat), Some(lon)) = (self.latitude, self.longitude) else {
+                bail!("геокодинг погоды не настроен");
+            };
+            return Ok((lat, lon, self.place.clone()));
+        }
+        let mut url = Url::parse(&self.geocoding_url).context("weather_geocoding_url")?;
+        if !self.allow_private && url.scheme() != "https" {
+            bail!("геокодинг погоды: нужен HTTPS");
+        }
+        url.query_pairs_mut()
+            .append_pair("name", name)
+            .append_pair("count", "1")
+            .append_pair("language", "ru")
+            .append_pair("format", "json");
+        let resp = self
+            .client
+            .get(url.clone())
+            .send()
+            .await
+            .with_context(|| format!("геокодинг {url}"))?;
+        if !resp.status().is_success() {
+            bail!("геокодинг: HTTP {}", resp.status());
+        }
+        let bytes = crate::http_read(resp, self.max_bytes).await?;
+        let v: Value = serde_json::from_slice(&bytes).context("геокодинг: не JSON")?;
+        let Some(first) = v.get("results").and_then(|r| r.get(0)) else {
+            bail!("Не нашёл место «{name}».");
+        };
+        let lat = first
+            .get("latitude")
+            .and_then(Value::as_f64)
+            .context("геокодинг: нет latitude")?;
+        let lon = first
+            .get("longitude")
+            .and_then(Value::as_f64)
+            .context("геокодинг: нет longitude")?;
+        let place = first
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(name)
+            .to_owned();
+        Ok((lat, lon, place))
+    }
+
+    async fn fetch(&self, latitude: f64, longitude: f64, place: &str) -> Result<String> {
         let mut url = Url::parse(&self.url).context("weather_url")?;
         if !self.allow_private && url.scheme() != "https" {
             bail!("погода: нужен HTTPS");
         }
         url.query_pairs_mut()
-            .append_pair("latitude", &format!("{:.4}", self.latitude))
-            .append_pair("longitude", &format!("{:.4}", self.longitude))
+            .append_pair("latitude", &format!("{latitude:.4}"))
+            .append_pair("longitude", &format!("{longitude:.4}"))
             .append_pair(
                 "current",
                 "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m",
@@ -74,10 +166,10 @@ impl Weather {
         }
         let bytes = crate::http_read(resp, self.max_bytes).await?;
         let v: Value = serde_json::from_slice(&bytes).context("погода: не JSON")?;
-        self.format(&v)
+        Self::format(&v, place)
     }
 
-    fn format(&self, v: &Value) -> Result<String> {
+    fn format(v: &Value, place: &str) -> Result<String> {
         let cur = v.get("current").context("погода: нет current")?;
         let num = |obj: &Value, key: &str| obj.get(key).and_then(Value::as_f64);
         let temp = num(cur, "temperature_2m").context("погода: нет температуры")?;
@@ -100,8 +192,8 @@ impl Weather {
         let tmin = day("temperature_2m_min");
         let rain = day("precipitation_probability_max");
         let mut out = String::new();
-        if !self.place.is_empty() {
-            out.push_str(&self.place);
+        if !place.is_empty() {
+            out.push_str(place);
             out.push_str(": ");
         }
         out.push_str(&format!("{} {:.0} °C", description(code), temp));
@@ -130,6 +222,23 @@ impl Weather {
         out.push('.');
         Ok(out)
     }
+}
+
+/// «На улице», «сейчас», «здесь» — это не название места: берём координаты
+/// из конфигурации.
+fn is_generic_place(text: &str) -> bool {
+    matches!(
+        text.trim().to_lowercase().as_str(),
+        "" | "на улице"
+            | "улице"
+            | "сейчас"
+            | "здесь"
+            | "тут"
+            | "у нас"
+            | "дома"
+            | "outside"
+            | "here"
+    )
 }
 
 /// Русское описание кода WMO.
@@ -185,6 +294,34 @@ mod tests {
         assert!(text.contains("переменная облачность"), "{text}");
         assert!(text.contains("ветер"), "{text}");
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn geocodes_explicit_location() {
+        let (geo_url, geo) = serve_once(
+            200,
+            "application/json",
+            r#"{"results":[{"name":"Казань","latitude":55.7887,"longitude":49.1221}]}"#,
+        )
+        .await;
+        let (forecast_url, forecast) = serve_once(200, "application/json", &body()).await;
+        let w = Weather::new(forecast_url, 55.75, 37.61, "Москва", 5000, true)
+            .unwrap()
+            .with_geocoding(geo_url);
+        let text = w.current_at(Some("Казань")).await.unwrap();
+        assert!(text.contains("Казань"), "{text}");
+        assert!(!text.contains("Москва"), "{text}");
+        geo.await.unwrap();
+        forecast.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_location_uses_default() {
+        let (forecast_url, forecast) = serve_once(200, "application/json", &body()).await;
+        let w = Weather::new(forecast_url, 55.75, 37.61, "Москва", 5000, true).unwrap();
+        let text = w.current_at(Some("на улице")).await.unwrap();
+        assert!(text.contains("Москва"), "{text}");
+        forecast.await.unwrap();
     }
 
     #[test]

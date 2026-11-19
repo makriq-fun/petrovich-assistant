@@ -10,12 +10,27 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use petrovich_core::events::Emotion;
 use petrovich_core::profile::HardwareProfile;
 
 pub const DEFAULT_LED_DIR: &str = "/sys/class/leds/";
 
 const DIGITS: [u8; 10] = [0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f];
 const SEGS: usize = 7;
+
+// Буквы на семисегментном индикаторе для эмоций и статусов.
+const L_A: u8 = 0x77;
+const L_C: u8 = 0x39;
+const L_D: u8 = 0x5e;
+const L_G: u8 = 0x3d;
+const L_H: u8 = 0x76;
+const L_I: u8 = 0x06;
+const L_L: u8 = 0x38;
+const L_N: u8 = 0x54;
+const L_O: u8 = 0x3f;
+const L_P: u8 = 0x73;
+const L_R: u8 = 0x50;
+const L_S: u8 = 0x6d;
 
 pub struct Clock {
     segments: Vec<File>,
@@ -182,6 +197,17 @@ impl Clock {
         self.set_digits(&bytes, self.level, self.level)
     }
 
+    /// Показывает громкость 0..100: две младшие цифры, без двоеточия.
+    pub fn show_volume(&mut self, percent: i32) -> Result<()> {
+        let p = percent.clamp(0, 100);
+        let bytes = if p == 100 {
+            [1, 0, 0, 0]
+        } else {
+            [0, 0, (p / 10) as u8, (p % 10) as u8]
+        };
+        self.set_digits(&bytes, 0, self.level)
+    }
+
     pub fn all_off(&mut self) -> Result<()> {
         self.set_levels(&[0; 4], 0, 0)
     }
@@ -220,8 +246,23 @@ pub fn notice_masks(notice: petrovich_core::events::UiNotice) -> [u8; 4] {
         UiNotice::Done => [DIGITS[8]; 4],
         UiNotice::Stopped => [0x40; 4], // «----»
         UiNotice::Cleared => [DIGITS[0]; 4],
-        UiNotice::Error => [0x79; 4], // «EEEE»
+        UiNotice::Error => [0x79; 4],            // «EEEE»
+        UiNotice::Alarm => [L_A, L_L, L_A, L_R], // «ALAr»
+        UiNotice::Emotion(e) => emotion_masks(e),
         _ => [0; 4],
+    }
+}
+
+/// «Мимика» часов для эмоций. Нулевая маска означает «вернуться к времени».
+pub fn emotion_masks(emotion: Emotion) -> [u8; 4] {
+    match emotion {
+        Emotion::Happy => [L_H, L_A, L_P, L_P],
+        Emotion::Sad => [L_S, L_A, L_D, 0],
+        Emotion::Surprised => [L_O, L_H, 0, 0],
+        Emotion::Angry => [L_A, L_N, L_G, L_R],
+        Emotion::Calm => [L_C, L_A, L_L, 0],
+        Emotion::Greeting => [L_H, L_I, 0, 0],
+        Emotion::Neutral => [0; 4],
     }
 }
 
@@ -304,6 +345,29 @@ mod tests {
         assert_eq!(read(&d, "A3"), 0);
         assert_eq!(read(&d, "B3"), 255);
         assert_eq!(read(&d, "A4"), 255);
+    }
+
+    #[test]
+    fn volume_is_shown_without_colon() {
+        let d = tree();
+        let mut c = Clock::open(&MINI2, d.path(), 1.0);
+        c.show_volume(55).unwrap();
+        assert_eq!(read(&d, "A1"), 255);
+        assert_eq!(read(&d, "A3"), 255);
+        assert_eq!(read(&d, "PLUS1"), 0);
+        c.show_volume(100).unwrap();
+        assert_eq!(read(&d, "A1"), 0);
+        assert_eq!(read(&d, "B1"), 255);
+    }
+
+    #[test]
+    fn emotion_and_alarm_have_clock_masks() {
+        assert_eq!(emotion_masks(Emotion::Happy), [L_H, L_A, L_P, L_P]);
+        assert_eq!(
+            notice_masks(petrovich_core::events::UiNotice::Alarm),
+            [L_A, L_L, L_A, L_R]
+        );
+        assert_eq!(emotion_masks(Emotion::Neutral), [0; 4]);
     }
 
     #[test]

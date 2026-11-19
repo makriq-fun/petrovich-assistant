@@ -3,6 +3,7 @@
 //! спад и длинный release, чтобы сигналы не резали слух.
 
 use petrovich_core::errors::Result;
+use petrovich_core::events::Emotion;
 use petrovich_core::ports::{Chime, ChimeSound};
 
 use crate::frontend::PlaybackHandle;
@@ -35,6 +36,8 @@ pub fn samples(sound: ChimeSound) -> Vec<i16> {
     let seq: &[Note] = match sound {
         // Активация: мягкий восходящий интервал, не слишком громко.
         ChimeSound::Listening => &[(523.25, 240, 0.20, 2.2), (783.99, 360, 0.18, 2.6)],
+        // Перестали слушать: тихий нисходящий интервал.
+        ChimeSound::ListeningEnd => &[(392.0, 180, 0.13, 2.4), (329.63, 260, 0.12, 2.6)],
         // «Услышал»: короткий тихий отклик, чтобы не перебивать речь.
         ChimeSound::Heard => &[(440.0, 130, 0.12, 3.0), (554.37, 170, 0.10, 3.0)],
         // Ответ закончен: спокойный нисходящий интервал.
@@ -60,6 +63,18 @@ pub fn samples(sound: ChimeSound) -> Vec<i16> {
             (987.77, 180, 0.15, 2.0),
             (1318.51, 420, 0.14, 2.8),
         ],
+        ChimeSound::Alarm => &[
+            (880.0, 220, 0.18, 1.7),
+            (0.0, 120, 0.0, 0.0),
+            (880.0, 220, 0.18, 1.7),
+            (1174.66, 380, 0.17, 2.2),
+            (0.0, 350, 0.0, 0.0),
+            (880.0, 220, 0.18, 1.7),
+            (0.0, 120, 0.0, 0.0),
+            (880.0, 220, 0.18, 1.7),
+            (1174.66, 520, 0.16, 2.4),
+        ],
+        ChimeSound::Emotion(e) => emotion_notes(e),
     };
     let mut out = Vec::new();
     for &(hz, ms, amp, decay) in seq {
@@ -70,6 +85,38 @@ pub fn samples(sound: ChimeSound) -> Vec<i16> {
         }
     }
     out
+}
+
+/// Библиотека коротких эмоциональных фраз. Все звуки синтезируются локально,
+/// поэтому не требуют сторонних лицензий и файлов на колонке.
+fn emotion_notes(emotion: Emotion) -> &'static [Note] {
+    match emotion {
+        Emotion::Happy => &[
+            (523.25, 130, 0.17, 2.2),
+            (659.25, 130, 0.17, 2.2),
+            (783.99, 130, 0.16, 2.2),
+            (1046.50, 320, 0.15, 2.8),
+        ],
+        Emotion::Sad => &[
+            (440.0, 260, 0.15, 2.0),
+            (349.23, 300, 0.14, 2.1),
+            (293.66, 480, 0.13, 2.4),
+        ],
+        Emotion::Surprised => &[(987.77, 90, 0.19, 3.0), (1567.98, 240, 0.16, 2.6)],
+        Emotion::Angry => &[
+            (220.0, 180, 0.18, 2.6),
+            (233.08, 180, 0.17, 2.6),
+            (196.0, 300, 0.16, 2.2),
+        ],
+        Emotion::Calm => &[(392.0, 320, 0.13, 1.8), (523.25, 520, 0.12, 1.6)],
+        Emotion::Greeting => &[
+            (523.25, 140, 0.16, 2.2),
+            (659.25, 140, 0.15, 2.2),
+            (783.99, 140, 0.14, 2.2),
+            (659.25, 220, 0.13, 2.4),
+        ],
+        Emotion::Neutral => &[(440.0, 180, 0.12, 2.6)],
+    }
 }
 
 fn samples_for(ms: u32) -> usize {
@@ -131,12 +178,21 @@ mod tests {
     fn all_chimes_are_soft_and_nonempty() {
         for s in [
             ChimeSound::Listening,
+            ChimeSound::ListeningEnd,
             ChimeSound::Heard,
             ChimeSound::Done,
             ChimeSound::Stopped,
             ChimeSound::Cleared,
             ChimeSound::Timer,
+            ChimeSound::Alarm,
             ChimeSound::Error,
+            ChimeSound::Emotion(Emotion::Happy),
+            ChimeSound::Emotion(Emotion::Sad),
+            ChimeSound::Emotion(Emotion::Surprised),
+            ChimeSound::Emotion(Emotion::Angry),
+            ChimeSound::Emotion(Emotion::Calm),
+            ChimeSound::Emotion(Emotion::Greeting),
+            ChimeSound::Emotion(Emotion::Neutral),
         ] {
             let v = samples(s);
             assert!(!v.is_empty());

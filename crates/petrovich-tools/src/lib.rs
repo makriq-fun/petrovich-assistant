@@ -10,7 +10,7 @@ pub mod web;
 mod testutil;
 
 pub use registry::{ControlAction, ToolContext, ToolResult};
-pub use timers::{TimerFired, TimerInfo, TimerManager};
+pub use timers::{AlarmFired, AlarmInfo, AlarmManager, TimerFired, TimerInfo, TimerManager};
 pub use weather::Weather;
 pub use web::Web;
 

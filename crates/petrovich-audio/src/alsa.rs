@@ -25,6 +25,7 @@ type PcmReadi = unsafe extern "C" fn(*mut c_void, *mut c_void, c_long) -> c_long
 type PcmWritei = unsafe extern "C" fn(*const c_void, *const c_void, c_long) -> c_long;
 type PcmRecover = unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int;
 type PcmDrop = unsafe extern "C" fn(*mut c_void) -> c_int;
+type PcmDrain = unsafe extern "C" fn(*mut c_void) -> c_int;
 type PcmPrepare = unsafe extern "C" fn(*mut c_void) -> c_int;
 type StrError = unsafe extern "C" fn(c_int) -> *const c_char;
 
@@ -37,6 +38,7 @@ struct Alsa {
     writei: PcmWritei,
     recover: PcmRecover,
     drop_: PcmDrop,
+    drain: PcmDrain,
     prepare: PcmPrepare,
     strerror: StrError,
 }
@@ -78,6 +80,7 @@ impl Alsa {
                 writei: sym(&lib, b"snd_pcm_writei\0")?,
                 recover: sym(&lib, b"snd_pcm_recover\0")?,
                 drop_: sym(&lib, b"snd_pcm_drop\0")?,
+                drain: sym(&lib, b"snd_pcm_drain\0")?,
                 prepare: sym(&lib, b"snd_pcm_prepare\0")?,
                 strerror: sym(&lib, b"snd_strerror\0")?,
                 _lib: lib,
@@ -215,6 +218,18 @@ impl Pcm {
         Ok(())
     }
 
+    /// Доигрывает буфер и готовит поток к следующему звуку.
+    pub fn drain(&mut self) -> Result<()> {
+        // SAFETY: handle открыт; drain блокирует до опустошения буфера.
+        let rc = unsafe { (self.alsa.drain)(self.handle) };
+        if rc < 0 {
+            bail!("snd_pcm_drain: {}", self.alsa.text(rc));
+        }
+        // SAFETY: handle открыт.
+        unsafe { (self.alsa.prepare)(self.handle) };
+        Ok(())
+    }
+
     /// Немедленно выбрасывает буфер: нужно для прерывания ответа.
     pub fn stop(&mut self) {
         // SAFETY: handle открыт.
@@ -239,9 +254,128 @@ impl Drop for Pcm {
     }
 }
 
+/// Удаляет SysV-сегменты `dmix` (ipc_key 1024), оставшиеся от умершего
+/// сервера. Иначе первый `snd_pcm_writei` нового клиента навсегда
+/// застревает в `poll`: усилитель не включается, звука нет.
+pub fn cleanup_stale_dmix() {
+    let shm = std::fs::read_to_string("/proc/sysvipc/shm").unwrap_or_default();
+    let sem = std::fs::read_to_string("/proc/sysvipc/sem").unwrap_or_default();
+    let ids = stale_dmix_ids(&shm, &sem, |pid| {
+        pid > 0 && Path::new(&format!("/proc/{pid}")).exists()
+    });
+    for shmid in ids.shm {
+        // SAFETY: shmid взят из /proc/sysvipc/shm; IPC_RMID не читает buf.
+        let rc = unsafe { libc::shmctl(shmid, libc::IPC_RMID, std::ptr::null_mut()) };
+        if rc == 0 {
+            tracing::info!("dmix: удалён устаревший shm {shmid}");
+        } else {
+            tracing::warn!(
+                "dmix: не удалось удалить shm {shmid}: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    for semid in ids.sem {
+        // SAFETY: semid взят из /proc/sysvipc/sem; semnum 0.
+        let rc = unsafe { libc::semctl(semid, 0, libc::IPC_RMID) };
+        if rc == 0 {
+            tracing::info!("dmix: удалён устаревший sem {semid}");
+        } else {
+            tracing::warn!(
+                "dmix: не удалось удалить sem {semid}: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StaleDmix {
+    shm: Vec<i32>,
+    sem: Vec<i32>,
+}
+
+fn stale_dmix_ids(shm_text: &str, sem_text: &str, alive: impl Fn(i32) -> bool) -> StaleDmix {
+    struct Shm {
+        key: i32,
+        id: i32,
+        cpid: i32,
+    }
+    let entries: Vec<Shm> = shm_text
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 5 {
+                return None;
+            }
+            Some(Shm {
+                key: parse_id(f[0])?,
+                id: parse_id(f[1])?,
+                cpid: parse_id(f[4])?,
+            })
+        })
+        .collect();
+    let Some(creator) = entries.iter().find(|e| e.key == 1024) else {
+        return StaleDmix::default();
+    };
+    if alive(creator.cpid) {
+        return StaleDmix::default();
+    }
+    let shm = entries
+        .iter()
+        .filter(|e| e.key == 1024 || e.key == 1025)
+        .map(|e| e.id)
+        .collect();
+    let sem = sem_text
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 2 || parse_id(f[0])? != 1024 {
+                return None;
+            }
+            parse_id(f[1])
+        })
+        .collect();
+    StaleDmix { shm, sem }
+}
+
+fn parse_id(text: &str) -> Option<i32> {
+    text.parse().ok().or_else(|| {
+        text.strip_prefix("0x")
+            .and_then(|h| i32::from_str_radix(h, 16).ok())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_dmix_with_dead_creator_is_removed() {
+        let shm = "\
+key shmid perms size cpid lpid nattch uid gid cuid cgid atime dtime ctime rss swap
+1024 10 666 496 999999 999999 1 0 0 0 0 0 0 0 4096 0
+1025 11 666 61440 999999 999999 1 0 0 0 0 0 0 0 61440 0";
+        let sem = "\
+key semid perms nsems uid gid cuid cgid otime ctime
+1024 20 666 1 0 0 0 0 0 0";
+        let ids = stale_dmix_ids(shm, sem, |pid| pid != 999_999);
+        assert_eq!(ids.shm, vec![10, 11]);
+        assert_eq!(ids.sem, vec![20]);
+    }
+
+    #[test]
+    fn live_dmix_creator_is_kept() {
+        let shm = "\
+key shmid perms size cpid lpid nattch uid gid cuid cgid atime dtime ctime rss swap
+1024 10 666 496 1234 1234 1 0 0 0 0 0 0 0 4096 0
+1025 11 666 61440 1234 1234 1 0 0 0 0 0 0 0 61440 0";
+        let ids = stale_dmix_ids(shm, "", |pid| pid == 1234);
+        assert!(ids.shm.is_empty());
+        assert!(ids.sem.is_empty());
+    }
 
     #[test]
     fn missing_library_is_reported() {

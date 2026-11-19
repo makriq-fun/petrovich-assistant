@@ -15,7 +15,7 @@ use petrovich_core::profile::HardwareProfile;
 use petrovich_hw::ButtonEvent;
 use petrovich_providers::llm::OpenAiLlm;
 use petrovich_providers::{stt_from_config, tts_from_config};
-use petrovich_tools::{ControlAction, TimerManager, ToolContext, Weather, Web};
+use petrovich_tools::{AlarmManager, ControlAction, TimerManager, ToolContext, Weather, Web};
 use petrovich_wakeword::WakeWord;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
@@ -41,7 +41,11 @@ struct App {
     mode: Mode,
     muted: bool,
     follow_deadline: Option<tokio::time::Instant>,
+    /// Жёсткий предел текущего прослушивания: не даёт VAD и шуму
+    /// продлевать сессию бесконечно.
+    hard_deadline: Option<tokio::time::Instant>,
     ignore_until: tokio::time::Instant,
+    max_utterance_ms: u64,
     generation: u64,
     task: Option<JoinHandle<()>>,
     ui: mpsc::UnboundedSender<UiEvent>,
@@ -113,7 +117,10 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
 
     let (ui_tx, ui_rx) = mpsc::unbounded_channel();
     let (announce_tx, mut announce_rx) = mpsc::channel(4);
+    let (alarm_tx, mut alarm_rx) = mpsc::channel(4);
     let timers = TimerManager::new(ui_tx.clone(), announce_tx);
+    let alarms = AlarmManager::new(ui_tx.clone(), alarm_tx);
+    let chime = Arc::new(LocalChime::new(playback.clone()));
     let web = Web::new(
         cfg.tools.web_timeout_ms,
         cfg.tools.web_max_bytes,
@@ -125,30 +132,39 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         volume.clone(),
         music,
         timers,
+        alarms,
         web,
+        chime.clone(),
+        ui_tx.clone(),
         cfg.tools.clone(),
         cfg.hardware.volume_step,
     );
-    if let (Some(lat), Some(lon)) = (cfg.tools.weather_latitude, cfg.tools.weather_longitude) {
-        if !cfg.tools.weather_url.is_empty() {
-            tools = tools.with_weather(Weather::new(
+    if !cfg.tools.weather_url.is_empty() {
+        let weather = match (cfg.tools.weather_latitude, cfg.tools.weather_longitude) {
+            (Some(lat), Some(lon)) => Weather::new(
                 cfg.tools.weather_url.clone(),
                 lat,
                 lon,
                 cfg.tools.weather_place.clone(),
                 cfg.tools.web_timeout_ms,
                 cfg.tools.web_allow_private,
-            )?);
-        }
+            )?,
+            _ => Weather::without_coordinates(
+                cfg.tools.weather_url.clone(),
+                cfg.tools.web_timeout_ms,
+                cfg.tools.web_allow_private,
+            )?,
+        };
+        tools = tools.with_weather(weather.with_geocoding(cfg.tools.weather_geocoding_url.clone()));
     }
     let hardware = petrovich_hw::start(profile, &cfg.hardware, ui_rx);
     let mut buttons = hardware.buttons;
 
-    let chime = Arc::new(LocalChime::new(playback.clone()));
     let turn = TurnContext {
         llm,
         stt,
         tts,
+        tts_cache: crate::tts_cache::TtsCache::default(),
         tools,
         playback: playback.clone(),
         ui: ui_tx.clone(),
@@ -175,7 +191,9 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         mode: Mode::Idle,
         muted: false,
         follow_deadline: None,
+        hard_deadline: None,
         ignore_until: tokio::time::Instant::now(),
+        max_utterance_ms: cfg.vad.max_utterance_ms.max(1_000),
         generation: 0,
         task: None,
         ui: ui_tx,
@@ -206,7 +224,11 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     write_pid(&pid)?;
     tracing::info!("petrovichd {} готов", petrovich_core::VERSION);
     loop {
-        let deadline = app.follow_deadline;
+        let deadline = match (app.follow_deadline, app.hard_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
         let follow = async move {
             match deadline {
                 Some(d) => tokio::time::sleep_until(d).await,
@@ -221,6 +243,9 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
             _ = follow => {
                 if app.mode == Mode::Listening {
                     tracing::info!("ожидание речи истекло");
+                    if app.dialog.state_chimes {
+                        let _ = app.chime.play(ChimeSound::ListeningEnd);
+                    }
                     app.enter_idle();
                 }
             }
@@ -248,6 +273,23 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
                     });
                 }
             }
+            alarm = alarm_rx.recv() => {
+                if let Some(a) = alarm {
+                    let _ = app.chime.play(ChimeSound::Alarm);
+                    let ctx = app.turn.clone();
+                    let text = if a.label.is_empty() || a.label == "будильник" {
+                        format!("Будильник на {:02}:{:02}.", a.hour, a.minute)
+                    } else {
+                        format!("Будильник «{}» сработал.", a.label)
+                    };
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(1100)).await;
+                        if let Err(e) = speak_text(&ctx, &text).await {
+                            tracing::warn!("будильник: озвучка: {e:#}");
+                        }
+                    });
+                }
+            }
             ev = task_rx.recv() => {
                 if let Some(ev) = ev {
                     app.on_turn(ev);
@@ -265,6 +307,7 @@ impl App {
     fn enter_idle(&mut self) {
         self.mode = Mode::Idle;
         self.follow_deadline = None;
+        self.hard_deadline = None;
         self.vad.reset_utterance();
         let _ = self.ui.send(UiEvent::State(VoiceState::Idle));
     }
@@ -281,7 +324,14 @@ impl App {
         } else {
             self.dialog.listen_timeout_ms
         };
-        self.follow_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(ms));
+        let now = tokio::time::Instant::now();
+        self.follow_deadline = Some(now + Duration::from_millis(ms));
+        // Даже если VAD будет постоянно слышать «речь», сессия закончится:
+        // тайм-аут можно продлить не дольше, чем на одну максимальную фразу.
+        let cap_ms = ms
+            .saturating_add(self.max_utterance_ms)
+            .saturating_add(1_000);
+        self.hard_deadline = Some(now + Duration::from_millis(cap_ms));
         if let Some(w) = self.wake.as_mut() {
             w.reset();
         }
@@ -328,9 +378,17 @@ impl App {
                     }
                 }
                 Mode::Listening => {
+                    let was_in_speech = self.vad.in_speech();
                     let utts = self.vad.push(&frame.samples);
-                    if self.vad.in_speech() {
-                        self.follow_deadline = None;
+                    if let Some(d) = listen_deadline(
+                        tokio::time::Instant::now(),
+                        self.vad.in_speech(),
+                        was_in_speech,
+                        self.hard_deadline,
+                        self.max_utterance_ms,
+                        self.dialog.follow_up_ms,
+                    ) {
+                        self.follow_deadline = Some(d);
                     }
                     if let Some(u) = utts.into_iter().next() {
                         tracing::info!(
@@ -348,16 +406,25 @@ impl App {
                     // Голос поверх ответа: останавливаем озвучку сразу, не
                     // дожидаясь конца фразы. Дальше VAD в Listening завершит
                     // запись, и локальная команда «стоп» уйдёт без LLM.
-                    if self.playback.is_playing() {
+                    if self.dialog.barge_in_voice && self.playback.is_playing() {
                         let _ = self.vad.push(&frame.samples);
                         if self.vad.in_speech() {
                             tracing::info!("бардж-ин по голосу");
                             self.abort_turn();
                             self.playback.stop();
                             self.mode = Mode::Listening;
-                            self.follow_deadline = Some(
-                                tokio::time::Instant::now()
-                                    + Duration::from_millis(self.dialog.follow_up_ms),
+                            let now = tokio::time::Instant::now();
+                            self.follow_deadline =
+                                Some(now + Duration::from_millis(self.dialog.follow_up_ms));
+                            // VAD уже слышит речь: не сбрасываем буфер, но
+                            // ограничиваем сессию, как при обычном слушании.
+                            self.hard_deadline = Some(
+                                now + Duration::from_millis(
+                                    self.dialog
+                                        .follow_up_ms
+                                        .saturating_add(self.max_utterance_ms)
+                                        .saturating_add(1_000),
+                                ),
                             );
                             let _ = self.ui.send(UiEvent::State(VoiceState::Listening));
                             continue;
@@ -384,6 +451,7 @@ impl App {
         tracing::info!("ход диалога: STT → LLM → TTS");
         self.mode = Mode::Thinking;
         self.follow_deadline = None;
+        self.hard_deadline = None;
         let _ = self.ui.send(UiEvent::State(VoiceState::Thinking));
         self.feedback(ChimeSound::Heard, UiNotice::Heard);
         if let Some(w) = self.wake.as_mut() {
@@ -631,4 +699,59 @@ fn check_file(path: &std::path::Path, what: &str) -> Result<()> {
         bail!("{what} не найден: {}", path.display());
     }
     Ok(())
+}
+
+/// Новый тайм-аут ожидания речи после кадра VAD.
+///
+/// Во время речи срок продлевается на максимальную длительность фразы, но
+/// никогда не снимается полностью: короткий шум не должен оставлять режим
+/// `Listening` навсегда. `hard` — общий предел сессии.
+fn listen_deadline(
+    now: tokio::time::Instant,
+    in_speech: bool,
+    was_in_speech: bool,
+    hard: Option<tokio::time::Instant>,
+    max_utterance_ms: u64,
+    follow_up_ms: u64,
+) -> Option<tokio::time::Instant> {
+    let ms = if in_speech {
+        max_utterance_ms
+    } else if was_in_speech {
+        follow_up_ms.max(1_000)
+    } else {
+        return None;
+    };
+    let deadline = now + Duration::from_millis(ms);
+    Some(match hard {
+        Some(cap) => deadline.min(cap),
+        None => deadline,
+    })
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn short_blip_rearms_follow_up_instead_of_listening_forever() {
+        let now = tokio::time::Instant::now();
+        let d = listen_deadline(now, false, true, None, 12_000, 5_000)
+            .expect("после короткого шума дедлайн должен остаться");
+        assert_eq!(d.duration_since(now), Duration::from_millis(5_000));
+    }
+
+    #[test]
+    fn speech_extension_is_clamped_to_hard_cap() {
+        let now = tokio::time::Instant::now();
+        let hard = now + Duration::from_millis(6_000);
+        let d = listen_deadline(now, true, true, Some(hard), 12_000, 5_000)
+            .expect("во время речи дедлайн должен быть");
+        assert_eq!(d, hard);
+    }
+
+    #[test]
+    fn no_speech_keeps_existing_deadline() {
+        let now = tokio::time::Instant::now();
+        assert!(listen_deadline(now, false, false, None, 12_000, 5_000).is_none());
+    }
 }

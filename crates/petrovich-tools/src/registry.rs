@@ -5,14 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Local, NaiveTime, Timelike};
 use petrovich_core::chat::ToolDefinition;
 use petrovich_core::config::ToolsConfig;
-use petrovich_core::ports::{MusicControl, VolumeControl};
+use petrovich_core::events::{Emotion, UiEvent};
+use petrovich_core::ports::{Chime, ChimeSound, MusicControl, VolumeControl};
 use serde_json::{json, Value};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
-use crate::timers::TimerManager;
+use crate::timers::{AlarmManager, TimerManager};
 use crate::weather::Weather;
 use crate::web::Web;
 
@@ -42,18 +44,25 @@ pub struct ToolContext {
     volume: Arc<dyn VolumeControl>,
     music: Option<Arc<dyn MusicControl>>,
     timers: TimerManager,
+    alarms: AlarmManager,
     web: Web,
     weather: Option<Weather>,
+    chime: Arc<dyn Chime>,
+    ui: mpsc::UnboundedSender<UiEvent>,
     cfg: ToolsConfig,
     volume_step: i32,
 }
 
 impl ToolContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         volume: Arc<dyn VolumeControl>,
         music: Option<Arc<dyn MusicControl>>,
         timers: TimerManager,
+        alarms: AlarmManager,
         web: Web,
+        chime: Arc<dyn Chime>,
+        ui: mpsc::UnboundedSender<UiEvent>,
         cfg: ToolsConfig,
         volume_step: i32,
     ) -> Self {
@@ -61,8 +70,11 @@ impl ToolContext {
             volume,
             music,
             timers,
+            alarms,
             web,
             weather: None,
+            chime,
+            ui,
             cfg,
             volume_step: volume_step.clamp(1, 50),
         }
@@ -84,8 +96,10 @@ impl ToolContext {
         vec![
             "time",
             "timer",
+            "alarm",
             "volume",
             "music",
+            "emotion",
             "web_search",
             "web_fetch",
             "weather",
@@ -131,6 +145,27 @@ impl ToolContext {
                     json!(["seconds"]),
                 ),
             ),
+            "alarm" => ToolDefinition::new(
+                "alarm",
+                "Будильники: set на ближайшее HH:MM (сегодня или завтра), cancel по id, list",
+                obj(
+                    json!({
+                        "action": {"type":"string","enum":["set","cancel","list"]},
+                        "time": {"type":"string","pattern":"^([01]?[0-9]|2[0-3]):[0-5][0-9]$"},
+                        "label": {"type":"string","maxLength":80},
+                        "id": {"type":"integer","minimum":1}
+                    }),
+                    json!([]),
+                ),
+            ),
+            "emotion" => ToolDefinition::new(
+                "emotion",
+                "Показать эмоцию на часах и кольце коротким звуком",
+                obj(
+                    json!({"name":{"type":"string","enum":["happy","sad","surprised","angry","calm","greeting","neutral"]}}),
+                    json!(["name"]),
+                ),
+            ),
             "volume" => ToolDefinition::new(
                 "volume",
                 "Громкость колонки: set (0..100), up, down, get",
@@ -146,7 +181,10 @@ impl ToolContext {
                 "music",
                 "Управление музыкой через Spotiya",
                 obj(
-                    json!({"action":{"type":"string","enum":["play","pause","resume","next","previous","status"]}}),
+                    json!({
+                        "action":{"type":"string","enum":["play","pause","resume","next","previous","status"]},
+                        "query":{"type":"string","minLength":1,"maxLength":200}
+                    }),
                     json!(["action"]),
                 ),
             ),
@@ -168,8 +206,11 @@ impl ToolContext {
             ),
             "weather" => ToolDefinition::new(
                 "weather",
-                "Текущая погода и прогноз на день для настроенного места",
-                obj(json!({}), json!([])),
+                "Текущая погода и прогноз на день. location — город или место; без него берётся настроенное место",
+                obj(
+                    json!({"location":{"type":"string","maxLength":120}}),
+                    json!([]),
+                ),
             ),
             "run_code" => ToolDefinition::new(
                 "run_code",
@@ -276,6 +317,78 @@ impl ToolContext {
                     "Таймер «{label}» на {seconds} с запущен (id {id})."
                 )))
             }
+            "alarm" => {
+                let action = args.get("action").and_then(Value::as_str).unwrap_or("set");
+                match action {
+                    "cancel" => {
+                        let id = args
+                            .get("id")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| anyhow::anyhow!("alarm: для cancel нужен id"))?;
+                        if self.alarms.cancel(id).await {
+                            Ok(ToolResult::text(format!("Будильник {id} отменён.")))
+                        } else {
+                            Ok(ToolResult::text(format!("Будильника {id} нет.")))
+                        }
+                    }
+                    "list" => {
+                        let all = self.alarms.list().await;
+                        if all.is_empty() {
+                            return Ok(ToolResult::text("Будильников нет."));
+                        }
+                        let mut out = String::new();
+                        for a in all {
+                            out.push_str(&format!(
+                                "{:02}:{:02} «{}» (id {})\n",
+                                a.hour, a.minute, a.label, a.id
+                            ));
+                        }
+                        Ok(ToolResult::text(out.trim_end().to_owned()))
+                    }
+                    "set" => {
+                        let text = args
+                            .get("time")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| anyhow::anyhow!("alarm: нет time"))?;
+                        let (hour, minute) = parse_hhmm(text)?;
+                        let label = args
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .unwrap_or("будильник")
+                            .chars()
+                            .take(80)
+                            .collect::<String>();
+                        let now = Local::now();
+                        let mut target = now
+                            .date_naive()
+                            .and_hms_opt(hour, minute, 0)
+                            .ok_or_else(|| anyhow::anyhow!("alarm: неверное время"))?;
+                        if target <= now.naive_local() {
+                            target += chrono::Duration::days(1);
+                        }
+                        let seconds = (target - now.naive_local()).num_seconds().max(1) as u64;
+                        let id = self.alarms.add(seconds, hour, minute, label.clone()).await;
+                        Ok(ToolResult::text(format!(
+                            "Будильник «{label}» на {hour:02}:{minute:02} поставлен (id {id})."
+                        )))
+                    }
+                    _ => bail!("alarm: неизвестное действие {action}"),
+                }
+            }
+            "emotion" => {
+                let name = args
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("neutral");
+                let emotion = Emotion::parse(name)
+                    .ok_or_else(|| anyhow::anyhow!("emotion: неизвестная эмоция {name}"))?;
+                self.chime.play(ChimeSound::Emotion(emotion))?;
+                let _ = self.ui.send(UiEvent::Emotion(emotion));
+                Ok(ToolResult::text(format!(
+                    "Эмоция «{}» показана.",
+                    emotion.as_str()
+                )))
+            }
             "volume" => {
                 let action = args.get("action").and_then(Value::as_str).unwrap_or("get");
                 let status = match action {
@@ -291,6 +404,9 @@ impl ToolContext {
                     "get" => self.volume.get()?,
                     _ => bail!("volume: неизвестное действие {action}"),
                 };
+                if action != "get" {
+                    let _ = self.ui.send(UiEvent::Volume(status.percent));
+                }
                 Ok(ToolResult::text(format!(
                     "Громкость {}%{}.",
                     status.percent,
@@ -311,9 +427,14 @@ impl ToolContext {
                     .and_then(Value::as_str)
                     .unwrap_or("status");
                 match action {
-                    "play" => music.play()?,
-                    "pause" => music.pause()?,
+                    // Spotya: `--play` требует поисковый запрос, а «включи
+                    // музыку» без названия означает продолжить текущую.
+                    "play" => match args.get("query").and_then(Value::as_str) {
+                        Some(q) if !q.trim().is_empty() => music.play_query(q.trim())?,
+                        _ => music.resume()?,
+                    },
                     "resume" => music.resume()?,
+                    "pause" => music.pause()?,
                     "next" => music.next()?,
                     "previous" => music.previous()?,
                     "status" => return Ok(ToolResult::text(music.status()?)),
@@ -360,7 +481,8 @@ impl ToolContext {
                     .weather
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("погода не настроена"))?;
-                Ok(ToolResult::text(w.current().await?))
+                let location = args.get("location").and_then(Value::as_str);
+                Ok(ToolResult::text(w.current_at(location).await?))
             }
             "run_code" => {
                 if self.cfg.sandbox_command.is_empty() {
@@ -403,6 +525,12 @@ impl ToolContext {
             _ => bail!("неизвестный инструмент {name}"),
         }
     }
+}
+
+fn parse_hhmm(text: &str) -> Result<(u32, u32)> {
+    let t = NaiveTime::parse_from_str(text.trim(), "%H:%M")
+        .map_err(|_| anyhow::anyhow!("alarm: ожидается HH:MM"))?;
+    Ok((t.hour(), t.minute()))
 }
 
 #[cfg(test)]
@@ -455,21 +583,37 @@ mod tests {
         }
     }
 
-    fn ctx(enabled: &[&str]) -> ToolContext {
-        let (ui, _) = mpsc::unbounded_channel();
+    struct FakeChime;
+    impl Chime for FakeChime {
+        fn play(&self, _sound: ChimeSound) -> petrovich_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn ctx_ui(enabled: &[&str]) -> (ToolContext, mpsc::UnboundedReceiver<UiEvent>) {
+        let (ui, ui_rx) = mpsc::unbounded_channel();
         let (ann, _) = mpsc::channel(4);
+        let (alarm_ann, _) = mpsc::channel(4);
         let cfg = ToolsConfig {
             enabled: enabled.iter().map(|s| s.to_string()).collect(),
             ..ToolsConfig::default()
         };
-        ToolContext::new(
+        let ctx = ToolContext::new(
             Arc::new(FakeVolume),
             Some(Arc::new(FakeMusic)),
-            TimerManager::new(ui, ann),
+            TimerManager::new(ui.clone(), ann),
+            AlarmManager::new(ui.clone(), alarm_ann),
             Web::new(5000, 100_000, true).unwrap(),
+            Arc::new(FakeChime),
+            ui,
             cfg,
             5,
-        )
+        );
+        (ctx, ui_rx)
+    }
+
+    fn ctx(enabled: &[&str]) -> ToolContext {
+        ctx_ui(enabled).0
     }
 
     #[tokio::test]
@@ -509,6 +653,44 @@ mod tests {
                 .content,
             "играет"
         );
+    }
+
+    #[tokio::test]
+    async fn alarm_and_emotion_tools_work() {
+        let c = ctx(&["alarm", "emotion"]);
+        let r = c
+            .execute("alarm", r#"{"time":"07:30","label":"подъём"}"#)
+            .await
+            .unwrap();
+        assert!(r.content.contains("07:30"), "{}", r.content);
+        assert_eq!(c.alarms().await, 1);
+        let l = c.execute("alarm", r#"{"action":"list"}"#).await.unwrap();
+        assert!(l.content.contains("07:30"), "{}", l.content);
+        let x = c
+            .execute("alarm", r#"{"action":"cancel","id":1}"#)
+            .await
+            .unwrap();
+        assert!(x.content.contains("отменён"));
+        assert_eq!(c.alarms().await, 0);
+        let e = c.execute("emotion", r#"{"name":"happy"}"#).await.unwrap();
+        assert!(e.content.contains("happy"));
+        assert!(c.execute("alarm", r#"{"time":"25:00"}"#).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn volume_tool_emits_ui_event() {
+        let (c, mut ui) = ctx_ui(&["volume", "emotion"]);
+        let v = c
+            .execute("volume", r#"{"action":"set","value":55}"#)
+            .await
+            .unwrap();
+        assert!(v.content.contains("55%"));
+        assert!(matches!(ui.recv().await, Some(UiEvent::Volume(55))));
+        c.execute("emotion", r#"{"name":"calm"}"#).await.unwrap();
+        assert!(matches!(
+            ui.recv().await,
+            Some(UiEvent::Emotion(Emotion::Calm))
+        ));
     }
 
     #[tokio::test]
@@ -573,6 +755,9 @@ mod tests {
     impl ToolContext {
         async fn timers(&self) -> usize {
             self.timers.count().await
+        }
+        async fn alarms(&self) -> usize {
+            self.alarms.count().await
         }
     }
 }

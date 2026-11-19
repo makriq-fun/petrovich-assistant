@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use petrovich_core::chat::{ChatMessage, LlmEvent, ToolCall};
+use petrovich_core::config::TtsFormat;
 use petrovich_core::events::UiEvent;
 use petrovich_core::text::SentenceChunker;
 use petrovich_core::wav;
@@ -19,11 +20,14 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use petrovich_audio::frontend::PlaybackHandle;
 
+use crate::tts_cache::{CachedAudio, TtsCache};
+
 #[derive(Clone)]
 pub struct TurnContext {
     pub llm: Arc<OpenAiLlm>,
     pub stt: Arc<dyn Stt>,
     pub tts: Arc<dyn Tts>,
+    pub tts_cache: TtsCache,
     pub tools: ToolContext,
     pub playback: PlaybackHandle,
     pub ui: UnboundedSender<UiEvent>,
@@ -163,6 +167,7 @@ pub async fn run_turn(
         if !left.is_zero() {
             tokio::time::sleep(left).await;
         }
+        let _ = tokio::time::timeout(Duration::from_secs(3), ctx.playback.wait_idle()).await;
         let _ = ctx.ui.send(UiEvent::SpeechFinished);
     }
     Ok(TurnOutcome {
@@ -172,7 +177,8 @@ pub async fn run_turn(
     })
 }
 
-/// Озвучивает готовый текст (например, сработавший таймер).
+/// Озвучивает готовый текст (например, сработавший таймер). Следующая фраза
+/// синтезируется, пока играет текущая; готовые фразы берутся из кэша.
 pub async fn speak_text(ctx: &TurnContext, text: &str) -> Result<()> {
     let mut chunker = SentenceChunker::default();
     let mut sentences = Vec::new();
@@ -180,17 +186,67 @@ pub async fn speak_text(ctx: &TurnContext, text: &str) -> Result<()> {
     if let Some(s) = chunker.flush() {
         sentences.push(s);
     }
+    let mut iter = sentences.into_iter();
+    let mut pending = iter.next().map(|s| (s.clone(), spawn_prepare(ctx, s)));
     let mut total = Duration::ZERO;
     let start = tokio::time::Instant::now();
-    for s in sentences {
-        total += speak_sentence(ctx, &s).await?;
+    while let Some((sentence, task)) = pending {
+        let prepared = task.await.context("TTS: задача")??;
+        pending = iter.next().map(|s| (s.clone(), spawn_prepare(ctx, s)));
+        total += speak_prepared(ctx, &sentence, prepared).await?;
     }
     let left = total.saturating_sub(start.elapsed());
     if !left.is_zero() {
         tokio::time::sleep(left).await;
     }
+    let _ = tokio::time::timeout(Duration::from_secs(3), ctx.playback.wait_idle()).await;
     let _ = ctx.ui.send(UiEvent::SpeechFinished);
     Ok(())
+}
+
+enum Prepared {
+    Cached(CachedAudio),
+    Live(AudioStream),
+}
+
+fn spawn_prepare(ctx: &TurnContext, text: String) -> tokio::task::JoinHandle<Result<Prepared>> {
+    let tts = ctx.tts.clone();
+    let cache = ctx.tts_cache.clone();
+    tokio::spawn(async move {
+        let text = text.trim().to_owned();
+        if let Some(c) = cache.get(&text).await {
+            return Ok(Prepared::Cached(c));
+        }
+        let audio = tts.synthesize(&text).await.context("TTS")?;
+        Ok(Prepared::Live(audio))
+    })
+}
+
+async fn speak_prepared(ctx: &TurnContext, text: &str, prepared: Prepared) -> Result<Duration> {
+    if ctx.ui.send(UiEvent::SpeechStarted).is_err() {
+        return Ok(Duration::ZERO);
+    }
+    match prepared {
+        Prepared::Cached(c) => stream_audio(c.to_stream(), &ctx.playback).await,
+        Prepared::Live(audio) => {
+            let (format, duration, bytes, sample_rate, channels) =
+                stream_audio_capture(audio, &ctx.playback).await?;
+            if !bytes.is_empty() {
+                ctx.tts_cache
+                    .put(
+                        text,
+                        CachedAudio {
+                            format,
+                            sample_rate,
+                            channels,
+                            bytes: Bytes::from(bytes),
+                        },
+                    )
+                    .await;
+            }
+            Ok(duration)
+        }
+    }
 }
 
 async fn speak_sentence(ctx: &TurnContext, text: &str) -> Result<Duration> {
@@ -207,19 +263,29 @@ async fn speak_sentence(ctx: &TurnContext, text: &str) -> Result<Duration> {
 
 /// Поток TTS нельзя клонировать; потребляем его по значению.
 async fn stream_audio(audio: AudioStream, playback: &PlaybackHandle) -> Result<Duration> {
+    Ok(stream_audio_capture(audio, playback).await?.1)
+}
+
+/// Проигрывает поток и заодно запоминает исходные PCM-байты для кэша.
+async fn stream_audio_capture(
+    audio: AudioStream,
+    playback: &PlaybackHandle,
+) -> Result<(TtsFormat, Duration, Vec<u8>, u32, u16)> {
     let AudioStream {
+        format,
         sample_rate,
         channels,
         stream,
-        ..
     } = audio;
     let rate = sample_rate.max(1);
-    let channels = channels.max(1) as usize;
+    let ch = channels.max(1) as usize;
     let mut carry: Option<u8> = None;
+    let mut captured = Vec::new();
     let mut total = Duration::ZERO;
     let mut stream = stream;
     while let Some(chunk) = stream.next().await {
         let bytes: Bytes = chunk?;
+        captured.extend_from_slice(&bytes);
         let mut samples = Vec::with_capacity(bytes.len() / 2 + 1);
         let mut it = bytes.iter().copied();
         while let Some(b0) = carry.take().or_else(|| it.next()) {
@@ -229,12 +295,12 @@ async fn stream_audio(audio: AudioStream, playback: &PlaybackHandle) -> Result<D
             };
             samples.push(i16::from_le_bytes([b0, b1]));
         }
-        if channels > 1 {
+        if ch > 1 {
             let mono: Vec<i16> = samples
-                .chunks_exact(channels)
+                .chunks_exact(ch)
                 .map(|f| {
                     let sum: i32 = f.iter().map(|v| i32::from(*v)).sum();
-                    (sum / channels as i32) as i16
+                    (sum / ch as i32) as i16
                 })
                 .collect();
             total += playback.play_pcm(mono, rate);
@@ -242,7 +308,7 @@ async fn stream_audio(audio: AudioStream, playback: &PlaybackHandle) -> Result<D
             total += playback.play_pcm(samples, rate);
         }
     }
-    Ok(total)
+    Ok((format, total, captured, rate, ch as u16))
 }
 
 /// Убирает обращение «Петрович» в начале распознанной фразы.
@@ -334,10 +400,11 @@ mod integration_tests {
     use petrovich_core::chat::FunctionCall;
     use petrovich_core::chat::ToolDefinition;
     use petrovich_core::config::{LlmConfig, ToolsConfig};
-    use petrovich_core::ports::{VolumeControl, VolumeStatus};
+    use petrovich_core::ports::{Chime, ChimeSound, VolumeControl, VolumeStatus};
     use petrovich_core::Secrets;
     use petrovich_providers::tts::AudioStream;
-    use petrovich_tools::{TimerManager, ToolContext, Web};
+    use petrovich_tools::{AlarmManager, TimerManager, ToolContext, Web};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -367,6 +434,37 @@ mod integration_tests {
         }
         fn sample_rate(&self) -> u32 {
             24_000
+        }
+    }
+
+    struct CountingTts {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tts for CountingTts {
+        async fn synthesize(&self, _text: &str) -> Result<AudioStream> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(AudioStream {
+                format: petrovich_core::config::TtsFormat::Pcm,
+                sample_rate: 24_000,
+                channels: 1,
+                stream: futures_util::stream::once(async { Ok(Bytes::from_static(&[0, 0, 0, 0])) })
+                    .boxed(),
+            })
+        }
+        fn audio_format(&self) -> petrovich_core::config::TtsFormat {
+            petrovich_core::config::TtsFormat::Pcm
+        }
+        fn sample_rate(&self) -> u32 {
+            24_000
+        }
+    }
+
+    struct FakeChime;
+    impl Chime for FakeChime {
+        fn play(&self, _sound: ChimeSound) -> petrovich_core::Result<()> {
+            Ok(())
         }
     }
 
@@ -432,7 +530,9 @@ mod integration_tests {
         let llm = Arc::new(OpenAiLlm::new(&cfg, &Secrets::default()).unwrap());
         let (ui, _ui_rx) = mpsc::unbounded_channel();
         let (ann, _ann_rx) = mpsc::channel(4);
+        let (alarm_ann, _alarm_rx) = mpsc::channel(4);
         let timers = TimerManager::new(ui.clone(), ann);
+        let alarms = AlarmManager::new(ui.clone(), alarm_ann);
         let tools_cfg = ToolsConfig {
             enabled: vec!["time".into()],
             ..ToolsConfig::default()
@@ -441,7 +541,10 @@ mod integration_tests {
             Arc::new(FakeVolume),
             None,
             timers,
+            alarms,
             Web::new(5000, 100_000, true).unwrap(),
+            Arc::new(FakeChime),
+            ui.clone(),
             tools_cfg,
             5,
         );
@@ -449,11 +552,27 @@ mod integration_tests {
             llm,
             stt: Arc::new(FakeStt),
             tts: Arc::new(FakeTts),
+            tts_cache: crate::tts_cache::TtsCache::default(),
             tools,
             playback: PlaybackHandle::detached(),
             ui,
             max_tool_rounds: 2,
         }
+    }
+
+    #[tokio::test]
+    async fn speak_text_caches_phrase() {
+        let mut c = ctx("http://127.0.0.1:1".into());
+        let (ui, _rx) = mpsc::unbounded_channel();
+        c.ui = ui;
+        let calls = Arc::new(AtomicUsize::new(0));
+        c.tts = Arc::new(CountingTts {
+            calls: calls.clone(),
+        });
+        speak_text(&c, "Таймер сработал.").await.unwrap();
+        speak_text(&c, "Таймер сработал.").await.unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(c.tts_cache.len().await, 1);
     }
 
     #[tokio::test]

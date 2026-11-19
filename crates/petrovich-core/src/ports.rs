@@ -2,6 +2,7 @@
 //! `petrovich-audio`/`petrovich-hw`, поэтому `petrovich-tools` тестируется без колонки.
 
 use crate::errors::Result;
+use crate::events::Emotion;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VolumeStatus {
@@ -17,6 +18,11 @@ pub trait VolumeControl: Send + Sync {
 
 pub trait MusicControl: Send + Sync {
     fn play(&self) -> Result<()>;
+    /// Включить конкретный запрос (исполнитель, трек, плейлист). Реализации
+    /// без поиска могут просто продолжить текущее воспроизведение.
+    fn play_query(&self, _query: &str) -> Result<()> {
+        self.play()
+    }
     fn pause(&self) -> Result<()>;
     fn resume(&self) -> Result<()>;
     fn next(&self) -> Result<()>;
@@ -34,6 +40,8 @@ pub trait Chime: Send + Sync {
 pub enum ChimeSound {
     /// Активация: помощник начал слушать.
     Listening,
+    /// Помощник перестал слушать по тайм-ауту.
+    ListeningEnd,
     /// Конец фразы: помощник услышал и думает.
     Heard,
     /// Ответ закончен.
@@ -44,6 +52,10 @@ pub enum ChimeSound {
     Cleared,
     /// Сработал таймер.
     Timer,
+    /// Сработал будильник.
+    Alarm,
+    /// Короткая музыкальная фраза эмоции.
+    Emotion(Emotion),
     /// Ошибка.
     Error,
 }

@@ -316,6 +316,10 @@ pub struct DialogConfig {
     pub history_ttl_s: u64,
     #[serde(default = "default_true")]
     pub barge_in: bool,
+    /// Перебивание голосом поверх ответа. По умолчанию выключено: без
+    /// надёжного эхоподавления TTS принимается за речь.
+    #[serde(default)]
+    pub barge_in_voice: bool,
     #[serde(default = "default_true")]
     pub wake_chime: bool,
     /// Звуковые подтверждения «услышал», «готово», «остановлено»,
@@ -337,6 +341,7 @@ impl Default for DialogConfig {
             history_chars: default_history_chars(),
             history_ttl_s: default_history_ttl(),
             barge_in: true,
+            barge_in_voice: false,
             wake_chime: true,
             state_chimes: true,
             response_timeout_ms: default_response_timeout_ms(),
@@ -615,6 +620,9 @@ pub struct ToolsConfig {
     /// Open-Meteo или совместимый endpoint. Пусто — инструмент погоды выключен.
     #[serde(default = "default_weather_url")]
     pub weather_url: String,
+    /// Геокодинг для погоды в произвольном месте; пусто — только координаты.
+    #[serde(default = "default_weather_geocoding_url")]
+    pub weather_geocoding_url: String,
     #[serde(default)]
     pub weather_latitude: Option<f64>,
     #[serde(default)]
@@ -642,6 +650,7 @@ impl Default for ToolsConfig {
             search_url: String::new(),
             web_allow_private: false,
             weather_url: default_weather_url(),
+            weather_geocoding_url: default_weather_geocoding_url(),
             weather_latitude: None,
             weather_longitude: None,
             weather_place: String::new(),
@@ -656,8 +665,11 @@ fn default_tools_enabled() -> Vec<String> {
     [
         "time",
         "timer",
+        "alarm",
         "volume",
         "music",
+        "weather",
+        "emotion",
         "web_fetch",
         "reset_dialog",
         "stop",
@@ -674,6 +686,9 @@ fn default_web_timeout_ms() -> u64 {
 }
 fn default_weather_url() -> String {
     "https://api.open-meteo.com/v1/forecast".into()
+}
+fn default_weather_geocoding_url() -> String {
+    "https://geocoding-api.open-meteo.com/v1/search".into()
 }
 fn default_web_max_bytes() -> usize {
     1024 * 1024

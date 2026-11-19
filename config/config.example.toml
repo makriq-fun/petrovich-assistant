@@ -54,6 +54,8 @@ history_turns = 8
 history_chars = 12000
 history_ttl_s = 900
 barge_in = true
+# Перебивание голосом поверх ответа; без надёжного AEC выключено.
+barge_in_voice = false
 wake_chime = true
 # Подтверждения «услышал», «готово», «остановлено», «диалог очищен».
 state_chimes = true
@@ -98,7 +100,7 @@ retries = 2
 max_bytes = 16777216
 
 [tools]
-enabled = ["time", "timer", "volume", "music", "web_fetch", "weather", "reset_dialog", "stop"]
+enabled = ["time", "timer", "alarm", "volume", "music", "emotion", "web_fetch", "weather", "reset_dialog", "stop"]
 timeout_ms = 10000
 web_timeout_ms = 15000
 web_max_bytes = 1048576
@@ -106,8 +108,10 @@ web_max_bytes = 1048576
 search_url = ""
 # Только для отладки: разрешить web_fetch к частным адресам и HTTP.
 web_allow_private = false
-# Погода: Open-Meteo, ключ не нужен. Координаты обязательны для работы инструмента.
+# Погода: Open-Meteo, ключ не нужен. Координаты задают место по умолчанию;
+# без них погода работает только по названному городу через геокодинг.
 weather_url = "https://api.open-meteo.com/v1/forecast"
+weather_geocoding_url = "https://geocoding-api.open-meteo.com/v1/search"
 weather_latitude = 55.7558
 weather_longitude = 37.6173
 weather_place = "Москва"
@@ -115,6 +119,7 @@ weather_place = "Москва"
 sandbox_command = []
 sandbox_timeout_ms = 5000
 # Управление Spotiya; пусто — инструмент music выключен.
+# music_command = ["/data/opt/spotify-connect/spotiya", "--{action}"]
 music_command = []
 
 [hardware]

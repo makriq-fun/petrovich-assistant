@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use petrovich_core::config::{AudioConfig, VqeMode};
 use petrovich_core::profile::HardwareProfile;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::aec::{DelayLine, Nlms};
 use crate::alsa::Pcm;
@@ -41,6 +41,10 @@ pub enum PlaybackMsg {
     },
     Stop {
         generation: u64,
+    },
+    Drain {
+        generation: u64,
+        done: oneshot::Sender<()>,
     },
 }
 
@@ -96,6 +100,20 @@ impl PlaybackHandle {
         self.playing.load(Ordering::Acquire)
     }
 
+    /// Ждёт, пока очередь и ALSA-буфер действительно доиграют.
+    pub async fn wait_idle(&self) {
+        let (done, wait) = oneshot::channel();
+        let generation = self.generation.load(Ordering::Acquire);
+        if self
+            .tx
+            .send(PlaybackMsg::Drain { generation, done })
+            .is_err()
+        {
+            return;
+        }
+        let _ = wait.await;
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
@@ -113,6 +131,7 @@ impl AudioEngine {
         profile: &'static HardwareProfile,
         volume_step: i32,
     ) -> Result<Self> {
+        crate::alsa::cleanup_stale_dmix();
         let capture = Pcm::open(
             Some(&cfg.alsa_lib),
             &cfg.capture_pcm,
@@ -184,6 +203,18 @@ impl AudioEngine {
                             playback_pcm.stop();
                             playing_thread.store(false, Ordering::Release);
                             resampler = None;
+                        }
+                        PlaybackMsg::Drain {
+                            generation: g,
+                            done,
+                        } => {
+                            if g == gen_thread.load(Ordering::Acquire) {
+                                if let Err(e) = playback_pcm.drain() {
+                                    tracing::warn!("вывод ALSA: {e:#}");
+                                }
+                                playing_thread.store(false, Ordering::Release);
+                            }
+                            let _ = done.send(());
                         }
                         PlaybackMsg::Pcm {
                             generation: g,

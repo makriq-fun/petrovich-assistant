@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use petrovich_core::events::{TimerEvent, UiEvent};
+use petrovich_core::events::{AlarmEvent, TimerEvent, UiEvent};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Instant;
 
@@ -118,9 +118,156 @@ impl TimerManager {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct AlarmFired {
+    pub id: u64,
+    pub hour: u32,
+    pub minute: u32,
+    pub label: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AlarmInfo {
+    pub id: u64,
+    pub label: String,
+    pub hour: u32,
+    pub minute: u32,
+    pub remaining_s: u64,
+}
+
+struct AlarmEntry {
+    label: String,
+    hour: u32,
+    minute: u32,
+    deadline: Instant,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
+/// Будильники на конкретное местное время. Хранятся в памяти демона.
+#[derive(Clone)]
+pub struct AlarmManager {
+    inner: Arc<Mutex<HashMap<u64, AlarmEntry>>>,
+    next: Arc<AtomicU64>,
+    ui: mpsc::UnboundedSender<UiEvent>,
+    announce: mpsc::Sender<AlarmFired>,
+}
+
+impl AlarmManager {
+    pub fn new(ui: mpsc::UnboundedSender<UiEvent>, announce: mpsc::Sender<AlarmFired>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            next: Arc::new(AtomicU64::new(1)),
+            ui,
+            announce,
+        }
+    }
+
+    pub async fn add(&self, seconds: u64, hour: u32, minute: u32, label: String) -> u64 {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        let deadline = Instant::now() + Duration::from_secs(seconds.max(1));
+        self.inner.lock().await.insert(
+            id,
+            AlarmEntry {
+                label: label.clone(),
+                hour,
+                minute,
+                deadline,
+                cancel: Some(tx),
+            },
+        );
+        let _ = self.ui.send(UiEvent::Alarm(AlarmEvent::Started {
+            id,
+            hour,
+            minute,
+            label: label.clone(),
+        }));
+        let inner = Arc::clone(&self.inner);
+        let ui = self.ui.clone();
+        let announce = self.announce.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {}
+                _ = rx => { return; }
+            }
+            let removed = inner.lock().await.remove(&id);
+            if removed.is_none() {
+                return;
+            }
+            let _ = ui.send(UiEvent::Alarm(AlarmEvent::Fired {
+                id,
+                label: label.clone(),
+            }));
+            let _ = announce
+                .send(AlarmFired {
+                    id,
+                    hour,
+                    minute,
+                    label,
+                })
+                .await;
+        });
+        id
+    }
+
+    pub async fn cancel(&self, id: u64) -> bool {
+        let mut map = self.inner.lock().await;
+        if let Some(mut e) = map.remove(&id) {
+            if let Some(tx) = e.cancel.take() {
+                let _ = tx.send(());
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn list(&self) -> Vec<AlarmInfo> {
+        let now = Instant::now();
+        let map = self.inner.lock().await;
+        let mut out: Vec<AlarmInfo> = map
+            .iter()
+            .map(|(id, e)| AlarmInfo {
+                id: *id,
+                label: e.label.clone(),
+                hour: e.hour,
+                minute: e.minute,
+                remaining_s: e.deadline.saturating_duration_since(now).as_secs(),
+            })
+            .collect();
+        out.sort_by_key(|a| a.remaining_s);
+        out
+    }
+
+    pub async fn count(&self) -> usize {
+        self.inner.lock().await.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn alarm_fires_and_notifies() {
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        let (ann_tx, mut ann_rx) = mpsc::channel(4);
+        let m = AlarmManager::new(ui_tx, ann_tx);
+        let id = m.add(1, 7, 30, "подъём".into()).await;
+        let fired = tokio::time::timeout(Duration::from_secs(3), ann_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fired.id, id);
+        assert_eq!(fired.hour, 7);
+        assert_eq!(fired.minute, 30);
+        let _ = ui_rx.recv().await;
+        assert!(matches!(
+            ui_rx.recv().await,
+            Some(UiEvent::Alarm(AlarmEvent::Fired { .. }))
+        ));
+        assert_eq!(m.count().await, 0);
+    }
 
     #[tokio::test]
     async fn fires_and_notifies() {

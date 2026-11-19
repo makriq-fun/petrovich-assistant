@@ -46,7 +46,8 @@ $EDITOR config.toml secrets.env
 Минимум:
 
 - `[stt]`, `[llm]`, `[tts]` — провайдеры и ключи;
-- `[tools] weather_latitude/longitude` — погода;
+- `[tools] weather_url` — погода; координаты задают место по умолчанию,
+  без них работает поиск по названному городу;
 - `[tools] search_url` — SearXNG, если нужен поиск;
 - `[tools] sandbox_command` — только если действительно нужен `run_code`;
 - `[hardware] model = "auto"`.
