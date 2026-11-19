@@ -71,10 +71,23 @@ pub async fn run_turn(
     let mut final_text: Option<String> = None;
     let mut audio_total = Duration::ZERO;
     let mut audio_started: Option<tokio::time::Instant> = None;
-    for round in 0..=ctx.max_tool_rounds {
+    let final_round = ctx.max_tool_rounds.saturating_add(1);
+    for round in 0..=final_round {
+        // После лимита ходов всё равно просим итог, но уже без схем
+        // инструментов: иначе модель повторяет вызовы, а пользователь
+        // остаётся без ответа.
+        let force_final = round == final_round;
+        if force_final {
+            tracing::warn!("лимит вызовов инструментов; финальный ответ без инструментов");
+        }
+        let round_tools = if force_final {
+            Vec::new()
+        } else {
+            tools.clone()
+        };
         let mut rx = ctx
             .llm
-            .chat_stream(messages.clone(), tools.clone())
+            .chat_stream(messages.clone(), round_tools)
             .await
             .context("LLM")?;
         let mut chunker = SentenceChunker::default();
@@ -163,7 +176,7 @@ pub async fn run_turn(
                 if control.is_some() {
                     break;
                 }
-                if round == ctx.max_tool_rounds {
+                if force_final {
                     bail!("слишком много вызовов инструментов");
                 }
             }
@@ -626,5 +639,21 @@ mod integration_tests {
             arguments: "{}".into(),
         };
         let _ = ToolDefinition::new("x", "x", serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn tool_limit_still_answers() {
+        let call = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"time\",\"arguments\":\"{}\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+        let url = serve(vec![
+            call,
+            call,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Уже поздно.\"}}]}\n\ndata: [DONE]\n\n",
+        ])
+        .await;
+        let c = ctx(url);
+        let out = run_turn(&c, vec![ChatMessage::system("s")], vec![0; 1600])
+            .await
+            .unwrap();
+        assert!(out.spoken.contains("поздно"));
     }
 }
