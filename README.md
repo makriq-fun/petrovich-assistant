@@ -1,32 +1,33 @@
-# Джарвис — независимый голосовой помощник для Яндекс Станций
+# Скаенет — независимый голосовой помощник для Яндекс Станций
 
-`jarvisd` — демон на Rust, который заменяет голосовой стек Яндекса на самой
-колонке. Активация «Джарвис» происходит локально, речь распознаётся внешним
+`skynetd` — демон на Rust, который заменяет голосовой стек Яндекса на самой
+колонке. Активация «Скаенет» происходит локально, речь распознаётся внешним
 STT, ответ строит LLM с инструментами, озвучка приходит из TTS и играет через
 динамик колонки. Серверного посредника, Home Assistant и облака Яндекса нет.
 
 Поддерживается **Станция Мини 2** (`station-mini2`). Остальные модели
 добавляются записью в таблицу профилей, без переписывания логики.
 
-> Статус: код и автоматические тесты готовы; на физической колонке этот
-> репозиторий ещё не запускался. Что именно проверено, а что требует
-> оборудования, — в [docs/testing.md](docs/testing.md). Не считайте
-> непроверенное работающим.
+> Статус: код и автоматические тесты готовы; установка на `station-mini2`
+> выполнялась, но полный сценарий на конкретной ревизии прошивки нужно
+> проверять на устройстве. Что именно проверено, а что требует оборудования, —
+> в [docs/testing.md](docs/testing.md). Не считайте непроверенное работающим.
 
 | Проверка | Состояние |
 |---|---|
-| 112 тестов workspace, clippy `-D warnings` | проходят на хосте |
-| Совместимость активации с эталоном | 4 реальные записи, те же срабатывания и score |
-| Кросс-сборка ARMv7 glibc | собрана ARMv7-сборка glibc 2.23, запущена под qemu |
-| ALSA/VQE/LED/часы/кнопки на колонке | не проверялись здесь |
-| Живые STT/LLM/TTS и установка на устройство | не проверялись здесь |
+| 122 теста workspace, clippy `-D warnings` | проходят на хосте |
+| Python-тесты установщика | 5 проходят |
+| Модель активации | microWakeWord «Скайнет», валидация 99.77% по данным автора |
+| Кросс-сборка ARMv7 glibc | собрана ARMv7-сборка glibc 2.23 |
+| ALSA/VQE/LED/часы/кнопки/датчик света на колонке | требуют проверки на устройстве |
+| Живые STT/LLM/TTS | в тестах mock; реальные API требуют проверки |
 
 ## Возможности
 
-- локальная активация по слову «Джарвис» (модель станции, без облака);
+- локальная активация по слову «Скаенет» (microWakeWord, без облака);
 - непрерывный диалог: после ответа можно задать уточняющий вопрос без
   повторной активации;
-- прерывание ответа новым «Джарвис», голосом поверх озвучки или кнопкой;
+- прерывание ответа новым «Скаенет», голосом поверх озвучки или кнопкой;
 - остановка словами «стоп», «хватит», «замолчи» обрабатывается локально,
   без обращения к LLM; после остановки помощник возвращается в ожидание;
 - потоковый LLM (SSE) и потоковый PCM-TTS;
@@ -34,8 +35,12 @@ STT, ответ строит LLM с инструментами, озвучка �
   HTTPS-страниц, сброс диалога, остановка;
 - вызов инструментов LLM с белым списком и тайм-аутами;
 - изолированный запуск кода только при явно настроенной песочнице;
-- светодиоды, часы, кнопки и аппаратный мут микрофонов;
+- мягкие служебные звуки и визуальные подтверждения: слушаю, услышал,
+  думаю, ответ закончен, остановлено, диалог очищен;
+- светодиоды, часы, кнопки и аппаратный мут микрофонов; плавные анимации;
+- автояркость кольца и часов по датчику `ltr308als01`;
 - установка через ADB/SSH, backup, атомарные релизы, health-check, откат;
+- миграция прежней установки `/data/jarvis` в `/data/skynet`;
 - отключение Quasar: при падении помощника Алиса автоматически не
   запускается;
 - независимые DNS/NTP и проверка отсутствия обращений к Яндексу.
@@ -46,7 +51,7 @@ STT, ответ строит LLM с инструментами, озвучка �
 flowchart LR
     Mic[4 микрофона + 2 референса] --> ALSA[ALSA default 48 кГц]
     ALSA --> VQE[VQE прошивки или AEC/ресемплер]
-    VQE --> WW[Локальный детектор «Джарвис»]
+    VQE --> WW[Локальный детектор «Скаенет»]
     VQE --> VAD[VAD и запись фразы]
     VAD --> STT[STT HTTP]
     STT --> LLM[LLM + инструменты]
@@ -55,7 +60,7 @@ flowchart LR
     Play --> Speaker[Динамик]
     Play -. референс .-> VQE
     LLM --> Tools[Таймеры, громкость, музыка, погода, веб]
-    Daemon[jarvisd] --> HW[LED, часы, кнопки, мут]
+    Daemon[skynetd] --> HW[LED, часы, кнопки, мут, датчик света]
 ```
 
 Подробно: [docs/architecture.md](docs/architecture.md), [железо Мини 2](docs/hardware-mini2.md).
@@ -63,57 +68,60 @@ flowchart LR
 ## Быстрый старт
 
 Требуется взломанная колонка с root, SSH или ADB, и совместимая модель.
-Сборка — Rust 1.85+; для ARMv7 используется `cross` или готовый выпуск.
-
-```bash
-# На ПК: собрать релиз под ARMv7
-cargo install cross --git https://github.com/cross-rs/cross
-scripts/build.sh
-# dist/jarvisd, dist/jarvisctl, dist/jarvis-station-0.1.0-armv7.tar.gz
-
-# Установка по SSH (ключ root уже настроен)
-python3 installer/jarvis_install.py --ssh-host station upgrade
-
-# Или по ADB
-python3 installer/jarvis_install.py --transport adb install
-```
-
 Перед первой установкой подготовьте:
 
 1. `config.toml` на основе [config/config.example.toml](config/config.example.toml):
    провайдеры, координаты погоды, инструменты.
 2. `secrets.env` на основе [config/secrets.example.env](config/secrets.example.env),
    права `0600`.
-3. Модель активации `wakeword.json` — см.
-   [docs/wakeword-model.md](docs/wakeword-model.md). Модель, обученная на голосе
-   владельца, в репозиторий не входит; установщик умеет импортировать её из
-   прежней установки `/data/opt/wakeword/model.json`.
+
+Сборка — Rust 1.85+; для ARMv7 используется `cross` или готовый выпуск.
 
 ```bash
-python3 installer/jarvis_install.py --ssh-host station install \
-  --config ./config.toml --secrets ./secrets.env \
-  --wakeword-model ./wakeword.json
+# На ПК: собрать релиз под ARMv7
+cargo install cross --git https://github.com/cross-rs/cross
+scripts/build.sh
+# dist/skynetd, dist/skynetctl, dist/skynet-station-0.2.0-armv7.tar.gz
+
+# Установка по SSH (ключ root уже настроен)
+python3 installer/skynet_install.py --ssh-host station install \
+  --config ./config.toml --secrets ./secrets.env
 ```
+
+Модель активации «Скаенет» входит в релиз
+(`assets/wakeword/skynet_mww.json`). Установщик сам кладёт её в
+`/data/skynet/models/`. Свою модель можно передать явно:
+
+```bash
+python3 installer/skynet_install.py --ssh-host station install \
+  --config ./config.toml --secrets ./secrets.env \
+  --wakeword-model ./my_wakeword.json
+```
+
+Для microWakeWord нужен `libtflite.so` из прошивки
+(`/system/vendor/quasar/libs/libtflite.so`). Если библиотеки нет, используйте
+openWakeWord-модель и `assets/oww.bin`.
 
 После установки проверьте на колонке:
 
 ```bash
-/data/jarvis/current/jarvisctl --config /data/jarvis/config.toml doctor
-/data/jarvis/current/jarvisctl --config /data/jarvis/config.toml status
-tail -f /data/jarvis/log/jarvisd.log
+/data/skynet/current/skynetctl --config /data/skynet/config.toml doctor
+/data/skynet/current/skynetctl --config /data/skynet/config.toml status
+tail -f /data/skynet/log/skynetd.log
 ```
 
-Скажите «Джарвис», дождитесь сигнала и задайте вопрос.
+Скажите «Скаенет», дождитесь мягкого сигнала и задайте вопрос.
 
 ## Управление
 
 | Команда | Назначение |
 |---|---|
-| `jarvisctl status` | процесс, память, релиз, модель |
-| `jarvisctl doctor` | ALSA, VQE, кнопки, часы, Quasar, DNS, место |
-| `jarvisctl logs -n 100` | журнал демона |
-| `jarvisctl wake-test file.wav` | прогон модели активации по записи |
-| `jarvisctl audio-test 5` | запись с микрофонов и уровни каналов |
+| `skynetctl status` | процесс, память, релиз, модель |
+| `skynetctl doctor` | ALSA, VQE, кнопки, часы, датчик света, Quasar, DNS, место |
+| `skynetctl logs -n 100` | журнал демона |
+| `skynetctl wake-test file.wav` | прогон модели активации по записи |
+| `skynetctl audio-test 5` | запись с микрофонов и уровни каналов |
+| `skynetctl light-test` | пять отсчётов датчика освещённости |
 | `installer ... rollback` | предыдущий релиз и проверка |
 | `installer ... restore` | снять помощника и вернуть init-скрипты Quasar |
 
@@ -123,7 +131,7 @@ tail -f /data/jarvis/log/jarvisd.log
 ## Конфигурация и провайдеры
 
 Все параметры — в TOML; секреты — отдельно, с правами `0600`.
-Провайдеры STT/LLM/TTS заменяемы: OpenAI-совместимый HTTP или локальная
+Провайдеры STT/LLM/TTS заменяемы: OpenAI-совместимый HTTP, Fish или локальная
 команда. HTTPS обязателен, кроме loopback; сертификаты проверяются.
 Подробности: [docs/configuration.md](docs/configuration.md),
 [docs/providers.md](docs/providers.md).
@@ -131,10 +139,20 @@ tail -f /data/jarvis/log/jarvisd.log
 Инструменты и их ограничения: [docs/security.md](docs/security.md).
 Погода — Open-Meteo, координаты задаются в `[tools]`.
 
+## Индикация
+
+- Кольцо: синее «дыхание» при слушании, бегущая точка при размышлении,
+  зелёный пульс при ответе, красный при ошибке и муте.
+- Часы: плавно мигающее двоеточие; спиннер во время размышления; «8888» после
+  ответа, «----» при остановке, «0000» после очистки, «EEEE» при ошибке.
+- Звуки: мягкие колокольные сигналы на активацию, конец фразы, ответ,
+  остановку, очистку, ошибку и таймер. Громкость и включение —
+  `[dialog] wake_chime` и `state_chimes`.
+
 ## Независимость от Яндекса
 
 Установщик отключает автозапуск Quasar шимом init-скрипта. Демон никогда не
-запускает Quasar как запасной вариант. `jarvisctl doctor` проверяет, что
+запускает Quasar как запасной вариант. `skynetctl doctor` проверяет, что
 `maind`/`quasar_launcher2` не работают, а домены Яндекса не разрешаются.
 DNS/NTP задаются отдельно; см. [docs/security.md](docs/security.md).
 Полностью исключить сетевые обращения можно только при корректно
@@ -144,7 +162,7 @@ DNS/NTP задаются отдельно; см. [docs/security.md](docs/securit
 ## Разработка
 
 ```bash
-cargo test --workspace          # 112 тестов
+cargo test --workspace          # 122 теста
 cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```

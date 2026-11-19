@@ -6,13 +6,15 @@
 - SSH по ключу или ADB с root;
 - свободное место на `/data` (бинарники занимают несколько МиБ; рекомендуется
   не меньше 25 МиБ);
-- модель активации `wakeword.json` (см. [wakeword-model.md](wakeword-model.md));
 - доступ к выбранным STT/LLM/TTS (OpenAI-совместимый API или локальные
   сервисы).
 
+Модель активации «Скаенет» входит в релиз (microWakeWord); отдельный файл
+нужен только для своей модели (см. [wakeword-model.md](wakeword-model.md)).
+
 Установщик проверяет модель и прошивку до записи. Для другой модели нужен
 `--allow-unknown-model`, но профиль железа всё равно должен существовать в
-`jarvis-core::profile`.
+`skynet-core::profile`.
 
 ## Сборка
 
@@ -23,9 +25,9 @@ scripts/build.sh
 
 Результат:
 
-- `dist/jarvisd` — демон ARMv7, динамический glibc 2.23 (совместим с 2.30 на Мини 2);
-- `dist/jarvisctl` — диагностика;
-- `dist/jarvis-station-<версия>-armv7.tar.gz` — выпуск;
+- `dist/skynetd` — демон ARMv7, динамический glibc 2.23 (совместим с 2.30 на Мини 2);
+- `dist/skynetctl` — диагностика;
+- `dist/skynet-station-<версия>-armv7.tar.gz` — выпуск;
 - `dist/SHA256SUMS`.
 
 Для проверки на ПК: `TARGET=host scripts/build.sh`.
@@ -55,47 +57,57 @@ $EDITOR config.toml secrets.env
 SSH (ключ root уже настроен):
 
 ```bash
-python3 installer/jarvis_install.py --ssh-host station install \
-  --config config.toml --secrets secrets.env \
-  --wakeword-model wakeword.json
+python3 installer/skynet_install.py --ssh-host station install \
+  --config config.toml --secrets secrets.env
 ```
 
 ADB:
 
 ```bash
-python3 installer/jarvis_install.py --transport adb --serial <серийный> install \
+python3 installer/skynet_install.py --transport adb --serial <серийный> install \
+  --config config.toml --secrets secrets.env
+```
+
+Своя модель (необязательно):
+
+```bash
+python3 installer/skynet_install.py --ssh-host station install \
   --config config.toml --secrets secrets.env \
-  --wakeword-model wakeword.json
+  --wakeword-model ./my_wakeword.json
 ```
 
 Сначала полезен план:
 
 ```bash
-python3 installer/jarvis_install.py --ssh-host station --dry-run install
+python3 installer/skynet_install.py --ssh-host station --dry-run install
 ```
 
 Порядок действий установщика:
 
 1. проверяет root, модель, прошивку и свободное место;
-2. сохраняет `/data/jarvis` и init-скрипты в
+2. сохраняет `/data/skynet`, прежнюю `/data/jarvis` и init-скрипты в
    `backups/install-<UTC>.tar.gz`, скачивает копию на ПК, сверяет SHA256;
-3. загружает релиз в `releases/<версия>` и проверяет файлы;
-4. атомарно переключает `current`;
-5. устанавливает `S99jarvis` и шим Quasar: пока существует
-   `/data/jarvis/enabled`, штатный стек не запускается;
-6. запускает супервизор и ждёт `--check-config` и живой pid;
-7. при неудаче переключается на предыдущий релиз; если его нет — снимает
+3. если найдена старая установка, переносит конфигурацию, секреты, модели,
+   assets и релизы в `/data/skynet` (старая папка не удаляется);
+4. загружает релиз в `releases/<версия>` и проверяет файлы;
+5. атомарно переключает `current`;
+6. устанавливает `S99skynet` и шим Quasar: пока существует
+   `/data/skynet/enabled`, штатный стек не запускается;
+7. запускает супервизор и ждёт `--check-config` и живой pid;
+8. при неудаче переключается на предыдущий релиз; если его нет — снимает
    `enabled` и оставляет Алису выключенной.
 
-Если нет `--wakeword-model`, установщик попробует импортировать
-`/data/opt/wakeword/model.json` из прежней лабораторной установки. Если модели
-нет, установка не пройдёт health-check.
+Если `--wakeword-model` не задан, ставится встроенная модель «Скаенет» из
+`assets/wakeword/`. Старая `wakeword.json` в `/data/skynet/models/` тоже
+обновляется копией встроенной модели; конфигурация переписывается на
+`skynet_mww.json`. Если встроенной модели нет, установщик попробует
+импортировать `/data/opt/wakeword/model.json`.
 
 ## Обновление
 
 ```bash
 scripts/build.sh
-python3 installer/jarvis_install.py --ssh-host station upgrade
+python3 installer/skynet_install.py --ssh-host station upgrade
 ```
 
 Конфигурация и секреты без явных `--config/--secrets` не перезаписываются.
@@ -104,24 +116,24 @@ python3 installer/jarvis_install.py --ssh-host station upgrade
 ## Независимые DNS и NTP
 
 ```bash
-python3 installer/jarvis_install.py --ssh-host station privacy \
+python3 installer/skynet_install.py --ssh-host station privacy \
   --dns 1.1.1.1 --dns 9.9.9.9 --ntp time.cloudflare.com
 # откат:
-python3 installer/jarvis_install.py --ssh-host station privacy --revert
+python3 installer/skynet_install.py --ssh-host station privacy --revert
 ```
 
 Команда сохраняет прежние `/etc/resolv.conf` и конфигурацию NTP в
-`/data/jarvis/backups/privacy-*`, перемонтирует rootfs на запись и обратно.
+`/data/skynet/backups/privacy-*`, перемонтирует rootfs на запись и обратно.
 DHCP/NetworkManager может перезаписать `resolv.conf` после перезагрузки —
-проверьте через `jarvisctl doctor`.
+проверьте через `skynetctl doctor`.
 
 ## Проверка
 
 ```bash
-/data/jarvis/current/jarvisctl --config /data/jarvis/config.toml status
-/data/jarvis/current/jarvisctl --config /data/jarvis/config.toml doctor
-/data/jarvis/current/jarvisctl --config /data/jarvis/config.toml audio-test 5
-tail -n 100 /data/jarvis/log/jarvisd.log
+/data/skynet/current/skynetctl --config /data/skynet/config.toml status
+/data/skynet/current/skynetctl --config /data/skynet/config.toml doctor
+/data/skynet/current/skynetctl --config /data/skynet/config.toml audio-test 5
+tail -n 100 /data/skynet/log/skynetd.log
 ```
 
 `doctor` проверяет: профиль, модель, backbone, VQE, `amixer`, кнопки, часы,
@@ -133,10 +145,10 @@ GPIO мута, отсутствие `maind`/`quasar_launcher2`, разрешен
 
 На колонке:
 
-1. «Джарвис» → сигнал активации;
+1. «Скаенет» → сигнал активации;
 2. вопрос → ответ;
 3. уточняющий вопрос без повторной активации;
-4. «Джарвис» во время ответа → ответ прерывается;
+4. «Скаенет» во время ответа → ответ прерывается;
 5. кнопки громкости, действие, аппаратный мут;
 6. светодиоды и часы;
 7. таймер;
@@ -148,11 +160,11 @@ GPIO мута, отсутствие `maind`/`quasar_launcher2`, разрешен
 
 | Симптом | Что смотреть |
 |---|---|
-| `jarvisd не запустился` | `/data/jarvis/log/jarvisd.log`, `jarvisctl doctor` |
+| `skynetd не запустился` | `/data/skynet/log/skynetd.log`, `skynetctl doctor` |
 | нет активации | модель/backbone, `wake-test`, порог, усиление, мут |
 | нет звука | `amixer`, `aplay`/`speaker-test`, `[audio] playback_pcm` |
 | нет ответа LLM | ключ, URL, сертификат, журнал провайдера |
-| Quasar всё ещё работает | шим init-скрипта, `ps`, `jarvisctl doctor` |
+| Quasar всё ещё работает | шим init-скрипта, `ps`, `skynetctl doctor` |
 | мало места | удалить старые `releases/` после успешной проверки |
 
 Точные ограничения: [testing.md](testing.md), [recovery.md](recovery.md).

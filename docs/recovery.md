@@ -3,12 +3,12 @@
 ## Что сохраняется
 
 Установщик перед изменениями создаёт на колонке
-`/data/jarvis/backups/install-<UTC>.tar.gz` и скачивает копию на ПК в
+`/data/skynet/backups/install-<UTC>.tar.gz` и скачивает копию на ПК в
 `backups/`. В архив входят:
 
 - `config.toml`, `secrets.env` (если есть), `models/`, `assets/`;
 - `enabled`, `supervise.sh`, `install.json`;
-- `/etc/init.d/S99jarvis` и оригиналы init-скриптов Quasar.
+- `/etc/init.d/S99skynet` и оригиналы init-скриптов Quasar.
 
 Релизы (`releases/`) в архив не входят, чтобы не занимать дефицитное место;
 их можно собрать заново. SHA256 архива записывается в `backups/*.json` и
@@ -17,9 +17,9 @@
 ## Откат релиза
 
 ```bash
-python3 installer/jarvis_install.py --ssh-host station rollback
+python3 installer/skynet_install.py --ssh-host station rollback
 # или конкретный:
-python3 installer/jarvis_install.py --ssh-host station rollback --release 0.1.0
+python3 installer/skynet_install.py --ssh-host station rollback --release <версия>
 ```
 
 Установщик останавливает супервизор и демон, переключает `current` на выбранный
@@ -29,40 +29,40 @@ python3 installer/jarvis_install.py --ssh-host station rollback --release 0.1.0
 Ручной вариант:
 
 ```bash
-kill "$(cat /data/jarvis/supervise.pid)" 2>/dev/null || true
-kill "$(cat /run/jarvisd.pid)" 2>/dev/null || true
-ln -sfn releases/0.1.0 /data/jarvis/current
-/etc/init.d/S99jarvis
+kill "$(cat /data/skynet/supervise.pid)" 2>/dev/null || true
+kill "$(cat /run/skynetd.pid)" 2>/dev/null || true
+ln -sfn releases/<версия> /data/skynet/current
+/etc/init.d/S99skynet
 ```
 
 ## Вернуть штатный стек
 
 ```bash
-python3 installer/jarvis_install.py --ssh-host station restore
+python3 installer/skynet_install.py --ssh-host station restore
 ```
 
 Что делает `restore`:
 
-1. останавливает супервизор и jarvisd;
-2. удаляет `/data/jarvis/enabled`;
+1. останавливает супервизор и skynetd;
+2. удаляет `/data/skynet/enabled`;
 3. восстанавливает оригиналы init-скриптов Quasar из
-   `/data/jarvis/backups/quasar-init/*.orig`;
-4. удаляет `/etc/init.d/S99jarvis`;
+   `/data/skynet/backups/quasar-init/*.orig`;
+4. удаляет `/etc/init.d/S99skynet`;
 5. возвращает rootfs в ro.
 
 После этого **вручную перезагрузите** колонку. Установщик не запускает Алису
 сам: это осознанное решение, чтобы не включать облако Яндекса неожиданно.
-Данные `/data/jarvis` (конфигурация, модель) остаются; удалите их вручную,
+Данные `/data/skynet` (конфигурация, модель) остаются; удалите их вручную,
 если они не нужны.
 
 ## Если демон не запускается
 
-1. `/data/jarvis/log/jarvisd.log` — последние строки;
-2. `jarvisctl doctor` — модель, ALSA, VQE, место;
-3. `jarvisctl --check-config` — конфигурация и файлы;
+1. `/data/skynet/log/skynetd.log` — последние строки;
+2. `skynetctl doctor` — модель, ALSA, VQE, место;
+3. `skynetctl --check-config` — конфигурация и файлы;
 4. `ps` — не остался ли `maind`/`quasar_launcher2`;
 5. `df -k /data` — место;
-6. `cat /run/jarvisd.pid`, `/proc/<pid>`.
+6. `cat /run/skynetd.pid`, `/proc/<pid>`.
 
 Супервизор после 5 падений останавливается и **не** запускает Quasar. Это
 защита от нежелательного подключения к Яндексу, но требует ручного
@@ -74,7 +74,7 @@ python3 installer/jarvis_install.py --ssh-host station restore
   консольный доступ к плате; инструкции зависят от прошивки.
 - Повреждение `/data`: помощник не запустится; штатный стек тоже может быть
   отключён шимом. Верните оригиналы из
-  `/data/jarvis/backups/quasar-init/` или переустановите прошивку.
+  `/data/skynet/backups/quasar-init/` или переустановите прошивку.
 - Повреждение rootfs: требуется восстановление NAND/прошивки. В этом
   репозитории нет автоматического восстановления NAND; используйте
   проверенную процедуру для вашей ревизии и **сначала сохраните дамп**.

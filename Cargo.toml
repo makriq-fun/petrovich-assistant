@@ -1,23 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/jarvis-core",
-    "crates/jarvis-audio",
-    "crates/jarvis-wakeword",
-    "crates/jarvis-providers",
-    "crates/jarvis-tools",
-    "crates/jarvis-hw",
-    "crates/jarvisd",
-    "crates/jarvisctl",
+    "crates/skynet-core",
+    "crates/skynet-audio",
+    "crates/skynet-wakeword",
+    "crates/skynet-providers",
+    "crates/skynet-tools",
+    "crates/skynet-hw",
+    "crates/skynetd",
+    "crates/skynetctl",
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 license = "AGPL-3.0-only"
-repository = "https://github.com/makriq/jarvis-station"
-authors = ["Jarvis Station contributors"]
+repository = "https://github.com/makriq/skynet-station"
+authors = ["Skynet Station contributors"]
 
 [workspace.dependencies]
 anyhow = "1"
@@ -37,12 +37,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"
 
-jarvis-core = { path = "crates/jarvis-core" }
-jarvis-audio = { path = "crates/jarvis-audio" }
-jarvis-wakeword = { path = "crates/jarvis-wakeword" }
-jarvis-providers = { path = "crates/jarvis-providers" }
-jarvis-tools = { path = "crates/jarvis-tools" }
-jarvis-hw = { path = "crates/jarvis-hw" }
+skynet-core = { path = "crates/skynet-core" }
+skynet-audio = { path = "crates/skynet-audio" }
+skynet-wakeword = { path = "crates/skynet-wakeword" }
+skynet-providers = { path = "crates/skynet-providers" }
+skynet-tools = { path = "crates/skynet-tools" }
+skynet-hw = { path = "crates/skynet-hw" }
 
 [profile.release]
 opt-level = 3

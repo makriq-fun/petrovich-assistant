@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import jarvis_install as ji
+import skynet_install as ji
 
 
 class Tests(unittest.TestCase):
@@ -20,8 +20,8 @@ class Tests(unittest.TestCase):
     def test_shim_keeps_original_and_marker(self):
         text = ji.shim_for("S97quasar")
         self.assertIn(ji.MARKER, text)
-        self.assertIn("/data/jarvis/backups/quasar-init/S97quasar.orig", text)
-        self.assertIn("/data/jarvis/enabled", text)
+        self.assertIn("/data/skynet/backups/quasar-init/S97quasar.orig", text)
+        self.assertIn("/data/skynet/enabled", text)
 
     def test_version_validation(self):
         self.assertEqual(ji.validate_version("0.1.0"), "0.1.0")

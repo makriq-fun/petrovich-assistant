@@ -636,140 +636,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
-name = "jarvis-audio"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "jarvis-core",
- "libc",
- "libloading",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "jarvis-core"
-version = "0.1.2"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "toml",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "jarvis-hw"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "chrono",
- "jarvis-core",
- "libc",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "jarvis-providers"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "futures-util",
- "jarvis-core",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "jarvis-tools"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "futures-util",
- "jarvis-core",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "jarvis-wakeword"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "cc",
- "libloading",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "jarvisctl"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "futures-util",
- "jarvis-audio",
- "jarvis-core",
- "jarvis-hw",
- "jarvis-providers",
- "jarvis-tools",
- "jarvis-wakeword",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "jarvisd"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "clap",
- "futures-util",
- "jarvis-audio",
- "jarvis-core",
- "jarvis-hw",
- "jarvis-providers",
- "jarvis-tools",
- "jarvis-wakeword",
- "libc",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "js-sys"
 version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1251,6 +1117,140 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "skynet-audio"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "libloading",
+ "skynet-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skynet-core"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "skynet-hw"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "libc",
+ "skynet-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skynet-providers"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "skynet-core",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "skynet-tools"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "skynet-core",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "skynet-wakeword"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "cc",
+ "libloading",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "skynetctl"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "futures-util",
+ "serde_json",
+ "skynet-audio",
+ "skynet-core",
+ "skynet-hw",
+ "skynet-providers",
+ "skynet-tools",
+ "skynet-wakeword",
+ "tokio",
+]
+
+[[package]]
+name = "skynetd"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "clap",
+ "futures-util",
+ "libc",
+ "serde_json",
+ "skynet-audio",
+ "skynet-core",
+ "skynet-hw",
+ "skynet-providers",
+ "skynet-tools",
+ "skynet-wakeword",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

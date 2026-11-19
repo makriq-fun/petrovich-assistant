@@ -1,7 +1,7 @@
 # Конфигурация
 
-Файл по умолчанию — `/data/jarvis/config.toml`, секреты —
-`/data/jarvis/secrets.env` (права `0600`). Неизвестные ключи запрещены:
+Файл по умолчанию — `/data/skynet/config.toml`, секреты —
+`/data/skynet/secrets.env` (права `0600`). Неизвестные ключи запрещены:
 опечатка останавливает загрузку, а не оставляет небезопасное значение.
 
 Пример: [config/config.example.toml](../config/config.example.toml).
@@ -11,9 +11,9 @@
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
 | `log_level` | `info` | фильтр `tracing`, можно переопределить `RUST_LOG` |
-| `state_dir` | `/data/jarvis/state` | состояние/журналы |
-| `pid_file` | `/run/jarvisd.pid` | pid демона |
-| `secrets_file` | `/data/jarvis/secrets.env` | секреты, `0600` |
+| `state_dir` | `/data/skynet/state` | состояние/журналы |
+| `pid_file` | `/run/skynetd.pid` | pid демона |
+| `secrets_file` | `/data/skynet/secrets.env` | секреты, `0600` |
 | `run_gid` | нет | дополнительный GID, например группа прокси |
 | `timezone` | системный | `Europe/Moscow` или `MSK-3`, если zoneinfo нет |
 
@@ -47,21 +47,23 @@
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
 | `enabled` | `true` | локальная активация |
-| `model` | `/data/jarvis/models/wakeword.json` | голова модели |
-| `assets` | `/data/jarvis/assets/oww.bin` | мел + эмбеддинги |
+| `model` | `/data/skynet/models/skynet_mww.json` | microWakeWord «Скаенет» |
+| `assets` | `/data/skynet/assets/oww.bin` | мел + эмбеддинги для openWakeWord |
 | `threshold` | из модели | переопределение порога |
 | `sensitivity` | `0.0` | смещение порога; отрицательное — чувствительнее |
 | `refractory_ms` | `2000` | пауза между срабатываниями |
 | `gain` | `32` | усиление PCM до детектора (0..64) |
 
-Порог ограничивается `0.05..0.999`. Модель проверяется по размерам тензоров;
-повреждённый JSON не роняет демон.
+Порог ограничивается `0.05..0.999`. Для microWakeWord манифест ссылается на
+`.tflite` рядом с собой; для openWakeWord проверяются размеры тензоров.
+Повреждённый JSON не роняет демон, а даёт понятную ошибку при старте.
+Модель «Скаенет» входит в релиз; `assets` нужен только для openWakeWord.
 
 ## `[vad]`
 
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `min_speech_ms` | `200` | короче — не отправлять в STT |
+| `min_speech_ms` | `300` | короче — не отправлять в STT |
 | `silence_ms` | `700` | тишина для конца фразы |
 | `max_utterance_ms` | `12000` | принудительный конец |
 | `energy_margin_db` | `9.0` | порог над шумовой полкой |
@@ -77,8 +79,9 @@
 | `history_turns` | `8` | ходов в истории |
 | `history_chars` | `12000` | символов в истории |
 | `history_ttl_s` | `900` | простой до очистки |
-| `barge_in` | `true` | голос или «Джарвис» прерывает ответ |
+| `barge_in` | `true` | голос или «Скаенет» прерывает ответ |
 | `wake_chime` | `true` | звук активации |
+| `state_chimes` | `true` | звуки «услышал», «готово», «остановлено», «очищено» |
 | `response_timeout_ms` | `60000` | предел одного хода |
 | `max_tool_rounds` | `2` | раундов вызова инструментов (0..5) |
 
@@ -124,8 +127,11 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 | `input_device` | из профиля | имя evdev |
 | `action_key` | `582` | код кнопки действия |
 | `volume_step` | `5` | шаг кнопок и инструмента |
-| `led_brightness` | `0.8` | 0..1 |
-| `clock_brightness` | `0.35` | 0..1 |
+| `led_brightness` | `0.8` | максимум 0..1 |
+| `clock_brightness` | `0.35` | максимум 0..1 |
+| `auto_brightness` | `true` | подстраивать по датчику света |
+| `light_sensor` | `""` | каталог IIO или файл; пусто — автопоиск `ltr308` |
+| `night_brightness` | `0.15` | минимальная доля яркости ночью |
 
 ## `[privacy]`
 
@@ -136,12 +142,12 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 
 ## Переопределения
 
-- `JARVIS_CONFIG` — путь к конфигурации;
+- `SKYNET_CONFIG` — путь к конфигурации;
 - `RUST_LOG` — уровень журнала;
-- `JARVIS_HARDWARE_MODEL` — подмена профиля для тестов/диагностики.
+- `SKYNET_HARDWARE_MODEL` — подмена профиля для тестов/диагностики.
 
 Проверка без запуска:
 
 ```bash
-jarvisd --config config.toml --check-config
+skynetd --config config.toml --check-config
 ```

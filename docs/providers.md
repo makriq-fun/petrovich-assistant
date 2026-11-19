@@ -8,9 +8,9 @@ whisper.cpp/SearXNG. Сертификаты проверяются rustls; от�
 ## Секреты
 
 ```env
-JARVIS_STT_API_KEY=...
-JARVIS_LLM_API_KEY=...
-JARVIS_TTS_API_KEY=...
+SKYNET_STT_API_KEY=...
+SKYNET_LLM_API_KEY=...
+SKYNET_TTS_API_KEY=...
 ```
 
 Файл `secrets.env` должен иметь права `0600` (или `0400`). Значения не
@@ -25,7 +25,7 @@ JARVIS_TTS_API_KEY=...
 provider = "openai"
 base_url = "https://api.openai.com/v1"
 model = "whisper-1"
-api_key_env = "JARVIS_STT_API_KEY"
+api_key_env = "SKYNET_STT_API_KEY"
 language = "ru"
 timeout_ms = 30000
 retries = 2
@@ -46,7 +46,7 @@ api_key_env = "FISH_API_KEY"
 language = "ru"
 timeout_ms = 120000
 # для self-hosted HTTPS с собственным CA:
-# tls_ca_file = "/data/jarvis/certs/local-ca.crt"
+# tls_ca_file = "/data/skynet/certs/local-ca.crt"
 ```
 
 Запрос: `POST /asr`, multipart `audio`, `language`, `diarize=false`,
@@ -59,7 +59,7 @@ timeout_ms = 120000
 [stt]
 provider = "command"
 timeout_ms = 60000
-command = ["whisper-cli", "-m", "/data/jarvis/models/ggml-base.bin",
+command = ["whisper-cli", "-m", "/data/skynet/models/ggml-base.bin",
            "-f", "{file}", "-l", "ru", "-nt"]
 ```
 
@@ -73,7 +73,7 @@ command = ["whisper-cli", "-m", "/data/jarvis/models/ggml-base.bin",
 [llm]
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
-api_key_env = "JARVIS_LLM_API_KEY"
+api_key_env = "SKYNET_LLM_API_KEY"
 temperature = 0.4
 max_tokens = 800
 stream = true
@@ -103,7 +103,7 @@ provider = "openai"
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini-tts"
 voice = "alloy"
-api_key_env = "JARVIS_TTS_API_KEY"
+api_key_env = "SKYNET_TTS_API_KEY"
 format = "pcm"
 sample_rate = 24000
 timeout_ms = 30000
@@ -141,7 +141,7 @@ timeout_ms = 60000
 [tools]
 music_command = ["spotiya"]
 # альтернатива с явным шаблоном:
-# music_command = ["/data/jarvis/music.sh", "{action}"]
+# music_command = ["/data/skynet/music.sh", "{action}"]
 ```
 
 Spotiya должна быть установлена и настроена отдельно; проект управляет
@@ -186,7 +186,7 @@ Endpoint можно заменить совместимым. Если коорд
 ## Проверка
 
 ```bash
-jarvisd --config config.toml --check-config
+skynetd --config config.toml --check-config
 ```
 
 Показывает провайдеров, наличие каждого секрета (только имя), VQE и файлы
