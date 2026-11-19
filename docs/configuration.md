@@ -146,9 +146,9 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `enabled` | `time,timer,alarm,volume,music,youtube,web_search,emotion,web_fetch,weather,remember,forget,reset_dialog,stop` | белый список |
+| `enabled` | `time,timer,alarm,volume,music,youtube,web_search,emotion,web_fetch,weather,sugar,remember,forget,reset_dialog,stop` | белый список |
 | `timeout_ms` | `10000` | обычные инструменты |
-| `web_timeout_ms` | `15000` | веб и погода |
+| `web_timeout_ms` | `15000` | веб, погода и сахар |
 | `web_max_bytes` | `1048576` | предел ответа |
 | `search_url` | `""` | SearXNG JSON или DuckDuckGo HTML (`https://html.duckduckgo.com/html/`); пусто — поиска нет |
 | `search_proxy` | `""` | прокси только для поиска, например `socks5h://127.0.0.1:1080` |
@@ -159,6 +159,8 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 | `weather_latitude` | нет | широта |
 | `weather_longitude` | нет | долгота |
 | `weather_place` | `""` | название в ответе |
+| `nightscout_url` | `""` | базовый URL Nightscout (`https://ns.example`); пусто — `sugar` выключен |
+| `nightscout_token_env` | `""` | переменная secrets.env с access token Nightscout; пусто — без токена |
 | `sandbox_command` | `[]` | argv песочницы; пусто — `run_code` выключен |
 | `sandbox_timeout_ms` | `5000` | предел кода |
 | `music_command` | `[]` | команда Spotiya, например `["/data/opt/spotify-connect/spotiya", "--{action}"]`; `{action}` подставляется в argv, иначе действие добавляется последним |
@@ -170,7 +172,12 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 `search_proxy` — отдельный прокси для него; `search_api_key_env` — ключ Tavily
 (при наличии ключа `search_url` не используется);
 `run_code` — `sandbox_command`; `music` — `music_command`;
-`remember`/`forget` — `memory.enabled`.
+`remember`/`forget` — `memory.enabled`; `sugar` — `nightscout_url`.
+`sugar` читает `/api/v1/entries/sgv.json` (только чтение), переводит mg/dL в
+ммоль/л и отдаёт значение, тренд, изменение за ~15 минут и диапазон за
+последние часы; `hours` в вызове задаёт глубину 1..24, по умолчанию 3.
+`nightscout_token_env` — имя переменной из `secrets.env` с access token
+Nightscout; для публичного чтения токен не нужен.
 `youtube` не требует отдельной программы: звук извлекается и декодируется
 самим демоном; `youtube_proxy` лишь направляет его трафик через byedpi.
 Таймеры и будильники живут в памяти демона: перезапуск их сбрасывает.

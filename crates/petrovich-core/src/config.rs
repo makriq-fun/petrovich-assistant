@@ -722,6 +722,12 @@ pub struct ToolsConfig {
     /// Название места для ответа, например «Москва».
     #[serde(default)]
     pub weather_place: String,
+    /// Базовый URL Nightscout. Пусто — инструмент sugar выключен.
+    #[serde(default)]
+    pub nightscout_url: String,
+    /// Переменная secrets.env с access token Nightscout; пусто — без токена.
+    #[serde(default)]
+    pub nightscout_token_env: String,
     /// Песочница для run_code; пусто — инструмент отключён независимо от enabled.
     #[serde(default)]
     pub sandbox_command: Vec<String>,
@@ -752,6 +758,8 @@ impl Default for ToolsConfig {
             weather_latitude: None,
             weather_longitude: None,
             weather_place: String::new(),
+            nightscout_url: String::new(),
+            nightscout_token_env: String::new(),
             sandbox_command: Vec::new(),
             sandbox_timeout_ms: default_sandbox_timeout_ms(),
             music_command: Vec::new(),
@@ -770,6 +778,7 @@ fn default_tools_enabled() -> Vec<String> {
         "youtube",
         "web_search",
         "weather",
+        "sugar",
         "emotion",
         "web_fetch",
         "remember",
@@ -1200,6 +1209,9 @@ impl Config {
                 );
             }
         }
+        if !self.tools.nightscout_url.is_empty() {
+            validate_http_url("tools.nightscout_url", &self.tools.nightscout_url)?;
+        }
         if !self.tools.weather_url.is_empty() {
             validate_http_url("tools.weather_url", &self.tools.weather_url)?;
             match (self.tools.weather_latitude, self.tools.weather_longitude) {
@@ -1277,6 +1289,15 @@ mod tests {
     fn unknown_key_is_rejected() {
         let text = "[audio]\ncapure_pcm = \"default\"\n";
         assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    #[test]
+    fn nightscout_requires_https() {
+        let mut cfg = example();
+        cfg.tools.nightscout_url = "http://example.com".into();
+        assert!(cfg.validate().is_err());
+        cfg.tools.nightscout_url = "https://example.com".into();
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

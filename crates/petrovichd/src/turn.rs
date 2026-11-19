@@ -167,7 +167,7 @@ pub async fn run_turn(
                     // аргументами; дедуплицируем только сетевые запросы.
                     let dedup = matches!(
                         call.function.name.as_str(),
-                        "youtube" | "web_search" | "web_fetch" | "weather"
+                        "youtube" | "web_search" | "web_fetch" | "weather" | "sugar"
                     );
                     let first = !dedup
                         || seen_calls

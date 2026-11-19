@@ -42,7 +42,8 @@
 - инструменты: время, таймеры и будильники, громкость, музыка через Spotya
   (отдельный инструмент, без Spotya просто не публикуется), звук YouTube без
   картинки (подкасты; через byedpi, без yt-dlp/mpv), эмоции, погода
-  в любом городе, поиск, чтение HTTPS-страниц, сброс диалога, остановка;
+  в любом городе, сахар из Nightscout, поиск, чтение HTTPS-страниц, сброс
+  диалога, остановка;
 - вызов инструментов LLM с белым списком и тайм-аутами;
 - изолированный запуск кода только при явно настроенной песочнице;
 - мягкие служебные звуки и визуальные подтверждения: слушаю, услышал,
@@ -79,7 +80,7 @@ flowchart LR
     TTS --> Play[ALSA default 48 кГц]
     Play --> Speaker[Динамик]
     Play -. референс .-> VQE
-    LLM --> Tools[Таймеры, будильники, эмоции, громкость, музыка, погода, веб]
+    LLM --> Tools[Таймеры, будильники, эмоции, громкость, музыка, погода, сахар, веб]
     Daemon[petrovichd] --> HW[LED, часы, кнопки, мут, датчик света]
 ```
 
@@ -102,7 +103,7 @@ flowchart LR
 # На ПК: собрать релиз под ARMv7
 cargo install cross --git https://github.com/cross-rs/cross
 scripts/build.sh
-# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.3-armv7.tar.gz
+# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.4-armv7.tar.gz
 
 # Установка по SSH (ключ root уже настроен)
 python3 installer/petrovich_install.py --ssh-host station install \
@@ -144,6 +145,7 @@ tail -f /data/petrovich/log/petrovichd.log
 | `petrovichctl audio-test 5` | запись с микрофонов и уровни каналов |
 | `petrovichctl light-test` | пять отсчётов датчика освещённости |
 | `petrovichctl search-test "запрос"` | проверка веб-поиска |
+| `petrovichctl sugar-test 3` | сахар из Nightscout за 3 часа |
 | `installer ... rollback` | предыдущий релиз и проверка |
 | `installer ... restore` | снять помощника и вернуть init-скрипты Quasar |
 
@@ -160,6 +162,8 @@ tail -f /data/petrovich/log/petrovichd.log
 
 Инструменты и их ограничения: [docs/security.md](docs/security.md).
 Погода — Open-Meteo; координаты по умолчанию и геокодинг задаются в `[tools]`.
+Сахар — Nightscout v1: `nightscout_url` и, при необходимости,
+`nightscout_token_env`.
 
 ## Индикация
 

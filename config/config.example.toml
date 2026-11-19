@@ -130,7 +130,7 @@ retries = 2
 max_bytes = 16777216
 
 [tools]
-enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search", "emotion", "web_fetch", "weather", "remember", "forget", "reset_dialog", "stop"]
+enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search", "emotion", "web_fetch", "weather", "sugar", "remember", "forget", "reset_dialog", "stop"]
 timeout_ms = 10000
 web_timeout_ms = 15000
 web_max_bytes = 1048576
@@ -151,6 +151,10 @@ weather_geocoding_url = "https://geocoding-api.open-meteo.com/v1/search"
 weather_latitude = 55.7558
 weather_longitude = 37.6173
 weather_place = "Москва"
+# Сахар: базовый URL Nightscout и переменная secrets.env с access token.
+# Пусто — инструмент sugar выключен; пустой token_env — запросы без токена.
+nightscout_url = ""
+nightscout_token_env = ""
 # Песочница для run_code: пусто — инструмент выключен.
 sandbox_command = []
 sandbox_timeout_ms = 5000

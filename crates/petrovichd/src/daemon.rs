@@ -17,7 +17,9 @@ use petrovich_core::profile::HardwareProfile;
 use petrovich_hw::ButtonEvent;
 use petrovich_providers::llm::OpenAiLlm;
 use petrovich_providers::{stt_from_config, tts_from_config};
-use petrovich_tools::{AlarmManager, ControlAction, TimerManager, ToolContext, Weather, Web};
+use petrovich_tools::{
+    AlarmManager, ControlAction, Nightscout, TimerManager, ToolContext, Weather, Web,
+};
 use petrovich_wakeword::WakeWord;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
@@ -224,6 +226,24 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
             )?,
         };
         tools = tools.with_weather(weather.with_geocoding(cfg.tools.weather_geocoding_url.clone()));
+    }
+    if !cfg.tools.nightscout_url.is_empty() {
+        let token = loaded
+            .secrets
+            .get(&cfg.tools.nightscout_token_env)
+            .unwrap_or_default();
+        if !cfg.tools.nightscout_token_env.is_empty() && token.is_empty() {
+            tracing::warn!(
+                "Nightscout: {} не задан в secrets.env; запросы без токена",
+                cfg.tools.nightscout_token_env
+            );
+        }
+        tools = tools.with_nightscout(Nightscout::new(
+            cfg.tools.nightscout_url.clone(),
+            token,
+            cfg.tools.web_timeout_ms,
+            cfg.tools.web_allow_private,
+        )?);
     }
     if let Some(memory) = &memory {
         tools = tools.with_memory(memory.clone());

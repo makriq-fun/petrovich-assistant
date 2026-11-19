@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use crate::nightscout::Nightscout;
 use crate::timers::{AlarmManager, TimerManager};
 use crate::weather::Weather;
 use crate::web::Web;
@@ -49,6 +50,7 @@ pub struct ToolContext {
     alarms: AlarmManager,
     web: Web,
     weather: Option<Weather>,
+    nightscout: Option<Nightscout>,
     memory: Option<SharedMemory>,
     chime: Arc<dyn Chime>,
     ui: mpsc::UnboundedSender<UiEvent>,
@@ -77,6 +79,7 @@ impl ToolContext {
             alarms,
             web,
             weather: None,
+            nightscout: None,
             memory: None,
             chime,
             ui,
@@ -87,6 +90,11 @@ impl ToolContext {
 
     pub fn with_weather(mut self, weather: Weather) -> Self {
         self.weather = Some(weather);
+        self
+    }
+
+    pub fn with_nightscout(mut self, nightscout: Nightscout) -> Self {
+        self.nightscout = Some(nightscout);
         self
     }
 
@@ -119,6 +127,7 @@ impl ToolContext {
             "web_search",
             "web_fetch",
             "weather",
+            "sugar",
             "remember",
             "forget",
             "run_code",
@@ -137,6 +146,7 @@ impl ToolContext {
             "youtube" => self.youtube.is_some(),
             "web_search" => !self.cfg.search_url.is_empty() || self.web.has_search_api(),
             "weather" => self.weather.is_some(),
+            "sugar" => self.nightscout.is_some(),
             "remember" | "forget" => self.memory.is_some(),
             "run_code" => !self.cfg.sandbox_command.is_empty(),
             _ => true,
@@ -243,6 +253,14 @@ impl ToolContext {
                     json!([]),
                 ),
             ),
+            "sugar" => ToolDefinition::new(
+                "sugar",
+                "Сахар (глюкоза) из Nightscout: текущее значение, тренд, изменение и диапазон за последние часы. hours — глубина истории, 1..24, по умолчанию 3",
+                obj(
+                    json!({"hours":{"type":"integer","minimum":1,"maximum":24}}),
+                    json!([]),
+                ),
+            ),
             "remember" => ToolDefinition::new(
                 "remember",
                 "Запомнить факт о пользователе надолго: имя, город, предпочтения, договорённости. Не сохраняй пароли, ключи и другие секреты",
@@ -294,7 +312,7 @@ impl ToolContext {
             serde_json::from_str(args).with_context(|| format!("{name}: аргументы не JSON"))?
         };
         let timeout = match name {
-            "web_fetch" | "web_search" | "weather" => {
+            "web_fetch" | "web_search" | "weather" | "sugar" => {
                 Duration::from_millis(self.cfg.web_timeout_ms)
             }
             "run_code" => Duration::from_millis(self.cfg.sandbox_timeout_ms),
@@ -568,6 +586,14 @@ impl ToolContext {
                     .ok_or_else(|| anyhow::anyhow!("погода не настроена"))?;
                 let location = args.get("location").and_then(Value::as_str);
                 Ok(ToolResult::text(w.current_at(location).await?))
+            }
+            "sugar" => {
+                let ns = self
+                    .nightscout
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Nightscout не настроен"))?;
+                let hours = args.get("hours").and_then(Value::as_u64);
+                Ok(ToolResult::text(ns.sugar(hours).await?))
             }
             "remember" => {
                 let memory = self
@@ -940,6 +966,31 @@ mod tests {
         assert!(r.content.contains("Москва"));
         assert!(r.content.contains("ясно"));
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sugar_tool_is_available_when_configured() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let body = format!(
+            r#"[{{"type":"sgv","sgv":136,"date":{},"direction":"Flat"}},
+                {{"type":"sgv","sgv":135,"date":{},"direction":"Flat"}}]"#,
+            now - 20 * 60_000,
+            now - 5 * 60_000
+        );
+        let (url, handle) = crate::testutil::serve_once(200, "application/json", &body).await;
+        let ns = crate::nightscout::Nightscout::new(url, "", 5000, true).unwrap();
+        let c = ctx(&["sugar"]).with_nightscout(ns);
+        let r = c.execute("sugar", "{}").await.unwrap();
+        assert!(r.content.contains("7.5 ммоль/л"), "{}", r.content);
+        assert!(r.content.contains("стабильный"), "{}", r.content);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sugar_requires_nightscout() {
+        let c = ctx(&["sugar"]);
+        assert!(c.definitions().iter().all(|d| d.function.name != "sugar"));
+        assert!(c.execute("sugar", "{}").await.is_err());
     }
 
     #[tokio::test]

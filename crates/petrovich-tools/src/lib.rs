@@ -1,6 +1,7 @@
 //! Инструменты ассистента и проверка разрешений.
 
 pub mod html;
+pub mod nightscout;
 pub mod registry;
 pub mod timers;
 pub mod weather;
@@ -9,6 +10,7 @@ pub mod web;
 #[cfg(test)]
 mod testutil;
 
+pub use nightscout::Nightscout;
 pub use registry::{ControlAction, ToolContext, ToolResult};
 pub use timers::{AlarmFired, AlarmInfo, AlarmManager, TimerFired, TimerInfo, TimerManager};
 pub use weather::Weather;

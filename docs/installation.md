@@ -50,6 +50,8 @@ $EDITOR config.toml secrets.env
   без них работает поиск по названному городу;
 - `[tools] search_url` — SearXNG JSON или DuckDuckGo HTML, если нужен поиск;
   `search_api_key_env` — ключ Tavily, если поиск идёт через Tavily;
+- `[tools] nightscout_url` — Nightscout для вопроса о сахаре; при закрытом
+  чтении `nightscout_token_env` — имя токена в `secrets.env`;
 - `[tools] sandbox_command` — только если действительно нужен `run_code`;
 - `[hardware] model = "auto"`.
 

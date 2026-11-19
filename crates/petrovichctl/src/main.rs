@@ -51,6 +51,11 @@ enum Cmd {
     LlmTest { text: String },
     /// Проверить инструмент погоды
     WeatherTest,
+    /// Проверить сахар из Nightscout за N часов
+    SugarTest {
+        #[arg(default_value_t = 3)]
+        hours: u64,
+    },
     /// Проверить веб-поиск
     SearchTest { query: String },
     /// Прочитать датчик освещённости (5 отсчётов)
@@ -66,6 +71,7 @@ fn main() -> Result<()> {
             | Cmd::SttTest { .. }
             | Cmd::TtsTest { .. }
             | Cmd::WeatherTest
+            | Cmd::SugarTest { .. }
             | Cmd::SearchTest { .. }
     ) {
         enter_network_gid(&loaded.config);
@@ -81,6 +87,7 @@ fn main() -> Result<()> {
         Cmd::SttTest { wav } => stt_test(&loaded, &wav),
         Cmd::LlmTest { text } => llm_test(&loaded, &text),
         Cmd::WeatherTest => weather_test(&loaded),
+        Cmd::SugarTest { hours } => sugar_test(&loaded, hours),
         Cmd::SearchTest { query } => search_test(&loaded, &query),
         Cmd::LightTest => light_test(&loaded),
     }
@@ -503,6 +510,26 @@ fn weather_test(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
     )?;
     let rt = tokio::runtime::Runtime::new()?;
     println!("{}", rt.block_on(w.current())?);
+    Ok(())
+}
+
+fn sugar_test(loaded: &petrovich_core::LoadedConfig, hours: u64) -> Result<()> {
+    let t = &loaded.config.tools;
+    if t.nightscout_url.is_empty() {
+        bail!("Nightscout не настроен: tools.nightscout_url пуст");
+    }
+    let token = loaded
+        .secrets
+        .get(&t.nightscout_token_env)
+        .unwrap_or_default();
+    let ns = petrovich_tools::Nightscout::new(
+        t.nightscout_url.clone(),
+        token,
+        t.web_timeout_ms,
+        t.web_allow_private,
+    )?;
+    let rt = tokio::runtime::Runtime::new()?;
+    println!("{}", rt.block_on(ns.sugar(Some(hours)))?);
     Ok(())
 }
 
