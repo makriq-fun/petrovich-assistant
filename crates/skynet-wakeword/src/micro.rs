@@ -4,7 +4,7 @@
 //! TFLM компилируется из Apache-2.0 исходников; TFLite C API загружается из
 //! прошивки через dlopen.
 
-use std::ffi::{c_char, c_int, c_void, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -34,6 +34,7 @@ type TfTensor = c_void;
 struct Tflite {
     _lib: Library,
     model_create_file: unsafe extern "C" fn(*const c_char) -> *mut TfModel,
+    version: unsafe extern "C" fn() -> *const c_char,
     model_delete: unsafe extern "C" fn(*mut TfModel),
     options_create: unsafe extern "C" fn() -> *mut c_void,
     options_delete: unsafe extern "C" fn(*mut c_void),
@@ -47,7 +48,56 @@ struct Tflite {
     invoke: unsafe extern "C" fn(*mut TfInterpreter) -> c_int,
 }
 
+fn parse_major_minor(text: &str) -> Option<(u32, u32)> {
+    let text = text.trim_start_matches(|c: char| !c.is_ascii_digit());
+    let mut parts = text.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts
+        .next()?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>();
+    Some((major, minor.parse().ok()?))
+}
+
+/// Ищет `min_runtime_version` в flatbuffer модели. Формат TFLite хранит его
+/// в metadata; для защиты от падения старого `libtflite.so` достаточно
+/// выделить semver из хвоста после имени ключа.
+fn model_min_runtime(bytes: &[u8]) -> Option<(u32, u32)> {
+    let key = b"min_runtime_version";
+    let pos = bytes.windows(key.len()).position(|w| w == key)?;
+    let tail = &bytes[pos + key.len()..];
+    let mut i = 0;
+    while i < tail.len() {
+        if !tail[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < tail.len() && (tail[i].is_ascii_digit() || tail[i] == b'.') {
+            i += 1;
+        }
+        let text = std::str::from_utf8(&tail[start..i]).ok()?;
+        if let Some(v) = parse_major_minor(text) {
+            if v.0 < 100 && v.1 < 100 {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
 impl Tflite {
+    fn runtime_version(&self) -> Option<(u32, u32)> {
+        // SAFETY: TfLiteVersion возвращает статическую строку.
+        let ptr = unsafe { (self.version)() };
+        if ptr.is_null() {
+            return None;
+        }
+        let text = unsafe { CStr::from_ptr(ptr) }.to_str().ok()?;
+        parse_major_minor(text)
+    }
+
     fn load() -> Result<Self> {
         // SAFETY: библиотека прошивки, символы проверяются ниже.
         let lib = unsafe { Library::new(TFLITE) }.with_context(|| format!("dlopen {TFLITE}"))?;
@@ -61,6 +111,7 @@ impl Tflite {
         unsafe {
             Ok(Self {
                 model_create_file: sym(&lib, b"TfLiteModelCreateFromFile\0")?,
+                version: sym(&lib, b"TfLiteVersion\0")?,
                 model_delete: sym(&lib, b"TfLiteModelDelete\0")?,
                 options_create: sym(&lib, b"TfLiteInterpreterOptionsCreate\0")?,
                 options_delete: sym(&lib, b"TfLiteInterpreterOptionsDelete\0")?,
@@ -156,6 +207,22 @@ impl MicroWakeWord {
             bail!("нет TFLite-модели: {}", model_path.display());
         }
         let tflite = Tflite::load()?;
+        let model_bytes =
+            std::fs::read(&model_path).with_context(|| model_path.display().to_string())?;
+        if let (Some(need), Some(have)) =
+            (model_min_runtime(&model_bytes), tflite.runtime_version())
+        {
+            if need > have {
+                bail!(
+                    "модель требует TFLite {}.{}, прошивка {}.{}; \
+                     используйте openWakeWord-модель",
+                    need.0,
+                    need.1,
+                    have.0,
+                    have.1
+                );
+            }
+        }
         // SAFETY: валидный путь; модель живёт, пока жив MicroWakeWord.
         let (model, interp) = unsafe {
             let cpath = CString::new(model_path.to_string_lossy().as_bytes())

@@ -476,6 +476,9 @@ if [ -d "$L" ] && [ ! -f "$D/.migrated-from-jarvis" ]; then
       cp -a "$L/$p/." "$D/$p/" || true
     fi
   done
+  if [ -s "$L/models/wakeword.json" ] && [ ! -e "$D/models/wakeword.old.json" ]; then
+    cp -p "$L/models/wakeword.json" "$D/models/wakeword.old.json" || true
+  fi
   if [ -d "$L/releases" ] && [ -z "$(ls -A "$D/releases" 2>/dev/null)" ]; then
     mkdir -p "$D/releases"
     cp -a "$L/releases/." "$D/releases/" || true
@@ -490,8 +493,8 @@ fi
     )
 
 
-def rewrite_config(t: Transport, dry: bool):
-    """Обновляет пути прежней установки и имя модели в config.toml."""
+def rewrite_config(t: Transport, dry: bool, rewrite_model: bool = True):
+    """Обновляет пути прежней установки и (опционально) имя модели."""
     if dry:
         return
     local = Path(tempfile.mkdtemp()) / "config.toml"
@@ -503,15 +506,28 @@ def rewrite_config(t: Transport, dry: bool):
         text = local.read_text()
     except OSError:
         return
-    updated = (
-        text.replace("/data/jarvis", "/data/skynet")
-        .replace("/run/jarvisd.pid", "/run/skynetd.pid")
-        .replace("models/wakeword.json", "models/skynet_mww.json")
+    updated = text.replace("/data/jarvis", "/data/skynet").replace(
+        "/run/jarvisd.pid", "/run/skynetd.pid"
     )
+    if rewrite_model:
+        updated = updated.replace("models/wakeword.json", "models/skynet_mww.json")
+    else:
+        updated = updated.replace(
+            "models/wakeword.json", "models/wakeword.old.json"
+        )
     if updated != text:
         local.write_text(updated)
         upload_file(t, local, f"{DEVICE_ROOT}/config.toml", "644")
-        print("конфигурация: пути и модель активации обновлены")
+        suffix = " и модель активации" if rewrite_model else ""
+        print(f"конфигурация: пути{suffix} обновлены")
+
+
+def device_has_legacy_model(t: Transport) -> bool:
+    out = t.script(
+        "test -s /data/jarvis/models/wakeword.json && echo yes || true",
+        check=False,
+    )
+    return out.stdout.strip() == b"yes"
 
 
 def health(t: Transport, version: str, timeout: int = 15) -> bool:
@@ -632,10 +648,23 @@ cp -f "$D/current/supervise.sh" "$D/supervise.sh" 2>/dev/null || true
             upload_secret(t, Path(args.secrets), f"{DEVICE_ROOT}/secrets.env")
         elif not info.installed:
             print("ВНИМАНИЕ: secrets.env не загружен; создайте его на колонке (chmod 600)")
-        # Модель активации: явный файл или встроенная microWakeWord «Скаенет».
+        # Модель активации: явный файл, старая openWakeWord-модель или
+        # встроенная microWakeWord «Скаенет».
         bundled = ROOT / "assets/wakeword/skynet_mww.json"
-        local_model = Path(args.wakeword_model) if args.wakeword_model else bundled
-        if local_model.is_file():
+        legacy_model = (
+            not args.wakeword_model and info.legacy and device_has_legacy_model(t)
+        )
+        local_model = (
+            Path(args.wakeword_model)
+            if args.wakeword_model
+            else None if legacy_model else bundled
+        )
+        if legacy_model:
+            print(
+                "модель активации: openWakeWord из прежней установки "
+                "(microWakeWord не ставится)"
+            )
+        elif local_model is not None and local_model.is_file():
             for src, dst in model_uploads(local_model):
                 upload_file(t, src, dst, "644")
             print(f"модель активации: {local_model.name}")
@@ -650,7 +679,7 @@ if [ ! -s "$D/models/skynet_mww.json" ] && [ -s /data/opt/wakeword/model.json ];
 fi
 """
             )
-        rewrite_config(t, args.dry_run)
+        rewrite_config(t, args.dry_run, rewrite_model=not legacy_model)
         deploy_release(t, artifact, ctl, version, args.dry_run)
         t.script(f"set -eu\ntouch {DEVICE_ROOT}/enabled\n")
         try:
