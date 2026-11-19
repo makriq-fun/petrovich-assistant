@@ -13,6 +13,7 @@ clap = { version = "4", features = ["derive", "env"] }
 petrovich-audio = { workspace = true }
 petrovich-core = { workspace = true }
 petrovich-hw = { workspace = true }
+libc = { workspace = true }
 petrovich-providers = { workspace = true }
 petrovich-tools = { workspace = true }
 petrovich-wakeword = { workspace = true }

@@ -870,6 +870,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "libc",
  "petrovich-audio",
  "petrovich-core",
  "petrovich-hw",

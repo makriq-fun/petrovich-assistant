@@ -55,6 +55,12 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let loaded = Config::load(&cli.config).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if matches!(
+        &cli.cmd,
+        Cmd::LlmTest { .. } | Cmd::SttTest { .. } | Cmd::TtsTest { .. } | Cmd::WeatherTest
+    ) {
+        enter_network_gid(&loaded.config);
+    }
     match cli.cmd {
         Cmd::Status => status(&loaded),
         Cmd::Doctor => doctor(&loaded),
@@ -67,6 +73,23 @@ fn main() -> Result<()> {
         Cmd::WeatherTest => weather_test(&loaded),
         Cmd::LightTest => light_test(&loaded),
     }
+}
+
+/// Демон работает с `run_gid` (например, 2200), чтобы его трафик попал в
+/// прозрачный прокси. Диагностика должна ходить так же, иначе прямой запрос
+/// с root-gid получает 403 от шлюза, хотя сам помощник работает.
+fn enter_network_gid(cfg: &petrovich_core::config::Config) {
+    let Some(gid) = cfg.daemon.run_gid else {
+        return;
+    };
+    // SAFETY: setgid вызывается до сетевых запросов; UID остаётся root.
+    if unsafe { libc::getegid() } == gid || unsafe { libc::setgid(gid) } == 0 {
+        return;
+    }
+    eprintln!(
+        "предупреждение: setgid({gid}) не удался: {}",
+        std::io::Error::last_os_error()
+    );
 }
 
 fn status(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
