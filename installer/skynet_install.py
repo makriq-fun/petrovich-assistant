@@ -667,6 +667,8 @@ fi
         return 0
     if health(t, version, args.timeout):
         save_state(t, info, version, backup_digest)
+        if info.legacy:
+            retire_legacy(t)
         print(f"установлен skynetd {version}")
         return 0
     print("проверка не прошла; откат", file=sys.stderr)
@@ -711,6 +713,18 @@ for dir in "$D" "$L"; do
 done
 rm -f /etc/init.d/S99skynet /etc/init.d/S99jarvis
 mount -o remount,ro / >/dev/null 2>&1 || true
+""",
+        check=False,
+    )
+
+
+def retire_legacy(t: Transport):
+    """После успешной установки старый автозапуск не должен конкурировать."""
+    t.script(
+        r"""
+set -u
+rm -f /data/jarvis/enabled /etc/init.d/S99jarvis
+echo "legacy: автозапуск /data/jarvis отключён"
 """,
         check=False,
     )
