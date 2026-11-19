@@ -304,6 +304,26 @@ def upload_file(
     )
 
 
+def model_uploads(local_model: Path) -> list[tuple[Path, str]]:
+    """Файлы модели и их цели на устройстве; манифест нужен под двумя именами."""
+    try:
+        manifest = json.loads(local_model.read_text())
+    except Exception as e:
+        raise InstallError(f"манифест модели {local_model}: {e}") from e
+    uploads: list[tuple[Path, str]] = []
+    tflite_name = manifest.get("model")
+    if tflite_name:
+        sibling = local_model.parent / tflite_name
+        if not sibling.is_file():
+            raise InstallError(f"нет TFLite рядом с манифестом: {sibling}")
+        uploads.append((sibling, f"{DEVICE_ROOT}/models/{Path(tflite_name).name}"))
+    # skynet_mww.json — текущий путь; wakeword.json — совместимость со старой
+    # конфигурацией, которую rewrite_config ещё не успел обновить.
+    uploads.append((local_model, f"{DEVICE_ROOT}/models/skynet_mww.json"))
+    uploads.append((local_model, f"{DEVICE_ROOT}/models/wakeword.json"))
+    return uploads
+
+
 # ---------------------------------------------------------------------------
 # Операции
 
@@ -616,25 +636,8 @@ cp -f "$D/current/supervise.sh" "$D/supervise.sh" 2>/dev/null || true
         bundled = ROOT / "assets/wakeword/skynet_mww.json"
         local_model = Path(args.wakeword_model) if args.wakeword_model else bundled
         if local_model.is_file():
-            try:
-                manifest = json.loads(local_model.read_text())
-            except Exception as e:
-                raise InstallError(f"манифест модели {local_model}: {e}") from e
-            tflite_name = manifest.get("model")
-            if tflite_name:
-                sibling = local_model.parent / tflite_name
-                if not sibling.is_file():
-                    raise InstallError(f"нет TFLite рядом с манифестом: {sibling}")
-                upload_file(
-                    t,
-                    sibling,
-                    f"{DEVICE_ROOT}/models/{Path(tflite_name).name}",
-                    "644",
-                )
-            # Совместимость с конфигурацией прежней установки.
-            upload_file(
-                t, local_model, f"{DEVICE_ROOT}/models/wakeword.json", "644"
-            )
+            for src, dst in model_uploads(local_model):
+                upload_file(t, src, dst, "644")
             print(f"модель активации: {local_model.name}")
         else:
             t.script(

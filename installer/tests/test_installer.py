@@ -32,6 +32,13 @@ class Tests(unittest.TestCase):
     def test_supported_models(self):
         self.assertIn("station-mini2", ji.SUPPORTED)
 
+    def test_model_uploads_include_manifest_and_tflite(self):
+        uploads = ji.model_uploads(ji.ROOT / "assets/wakeword/skynet_mww.json")
+        targets = {remote for _, remote in uploads}
+        self.assertIn("/data/skynet/models/skynet_mww.json", targets)
+        self.assertIn("/data/skynet/models/wakeword.json", targets)
+        self.assertIn("/data/skynet/models/skynet_mww.tflite", targets)
+
 
 if __name__ == "__main__":
     unittest.main()
