@@ -6,6 +6,8 @@ pub struct SentenceChunker {
     buf: String,
     min_chars: usize,
     max_chars: usize,
+    in_code: bool,
+    code_seen: bool,
 }
 
 impl Default for SentenceChunker {
@@ -20,7 +22,14 @@ impl SentenceChunker {
             buf: String::new(),
             min_chars,
             max_chars,
+            in_code: false,
+            code_seen: false,
         }
+    }
+
+    /// Был ли в потоке код, который не попал в озвучку.
+    pub fn code_seen(&self) -> bool {
+        self.code_seen
     }
 
     /// Добавляет текст; завершённые фразы складывает в `out`.
@@ -28,24 +37,27 @@ impl SentenceChunker {
         self.buf.push_str(delta);
         while let Some(cut) = self.find_boundary() {
             let sentence: String = self.buf.drain(..cut).collect();
-            let cleaned = clean(&sentence);
-            if !cleaned.is_empty() {
-                out.push(cleaned);
-            }
+            self.emit(&sentence, out);
         }
         if self.buf.chars().count() >= self.max_chars {
             let sentence = std::mem::take(&mut self.buf);
-            let cleaned = clean(&sentence);
-            if !cleaned.is_empty() {
-                out.push(cleaned);
-            }
+            self.emit(&sentence, out);
         }
     }
 
     pub fn flush(&mut self) -> Option<String> {
         let sentence = std::mem::take(&mut self.buf);
-        let cleaned = clean(&sentence);
-        (!cleaned.is_empty()).then_some(cleaned)
+        let mut out = Vec::new();
+        self.emit(&sentence, &mut out);
+        out.into_iter().next()
+    }
+
+    fn emit(&mut self, sentence: &str, out: &mut Vec<String>) {
+        let filtered = strip_code(sentence, &mut self.in_code, &mut self.code_seen);
+        let cleaned = clean(&filtered);
+        if !cleaned.is_empty() {
+            out.push(cleaned);
+        }
     }
 
     pub fn pending(&self) -> &str {
@@ -76,6 +88,75 @@ impl SentenceChunker {
         }
         None
     }
+}
+
+/// Убирает fenced-блоки и строки, похожие на код. Модель может нарушить
+/// инструкцию, но пользователь не должен слышать код в озвучке.
+fn strip_code(text: &str, in_code: &mut bool, seen: &mut bool) -> String {
+    let mut outside = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("```") {
+        if !*in_code {
+            outside.push_str(&rest[..pos]);
+        }
+        *seen = true;
+        *in_code = !*in_code;
+        rest = &rest[pos + 3..];
+    }
+    if !*in_code {
+        outside.push_str(rest);
+    }
+
+    let mut out = String::with_capacity(outside.len());
+    for line in outside.split_inclusive('\n') {
+        if is_code_line(line) {
+            *seen = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+fn is_code_line(line: &str) -> bool {
+    let t = line.trim_start();
+    const PREFIXES: &[&str] = &[
+        "def ",
+        "class ",
+        "import ",
+        "from ",
+        "async def ",
+        "function ",
+        "func ",
+        "fn ",
+        "const ",
+        "let ",
+        "var ",
+        "#include",
+        "package ",
+        "public class",
+        "private ",
+        "protected ",
+        "return ",
+        "print(",
+        "printf(",
+        "console.log",
+        "SELECT ",
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
+        "CREATE TABLE",
+        "<?",
+        "#!/",
+        "curl ",
+        "sudo ",
+        "apt ",
+        "pip install",
+        "npm install",
+        "docker ",
+    ];
+    PREFIXES.iter().any(|p| t.starts_with(p))
+        || matches!(t.trim_end(), "}" | "};" | "{" | "} else {")
 }
 
 fn is_abbreviation(prefix: &str) -> bool {
@@ -160,6 +241,66 @@ mod tests {
     fn cleans_markdown_and_links() {
         assert_eq!(clean("**Жирный** [текст](https://x)"), "Жирный текст");
         assert_eq!(clean("a\n\n b"), "a b");
+    }
+
+    #[test]
+    fn drops_fenced_code_from_speech() {
+        let mut c = SentenceChunker::new(1, 400);
+        let mut out = Vec::new();
+        c.push(
+            "Вот пример:\n```python\ndef add(a, b):\n    return a + b\n```\nГотово.",
+            &mut out,
+        );
+        if let Some(s) = c.flush() {
+            out.push(s);
+        }
+        let all = out.join(" ");
+        assert!(c.code_seen());
+        assert!(all.contains("Вот пример"), "{all}");
+        assert!(all.contains("Готово"), "{all}");
+        assert!(!all.contains("def"), "{all}");
+        assert!(!all.contains("return"), "{all}");
+        assert!(!all.contains("python"), "{all}");
+    }
+
+    #[test]
+    fn code_only_leaves_no_speech() {
+        let mut c = SentenceChunker::new(1, 400);
+        let mut out = Vec::new();
+        c.push("```python\nprint(1)\n```\n", &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(c.flush().is_none());
+        assert!(c.code_seen());
+    }
+
+    #[test]
+    fn unclosed_fence_is_still_code() {
+        let mut c = SentenceChunker::new(1, 400);
+        let mut out = Vec::new();
+        c.push("```python\ndef add(a, b):\n", &mut out);
+        if let Some(s) = c.flush() {
+            out.push(s);
+        }
+        assert!(out.is_empty(), "{out:?}");
+        assert!(c.code_seen());
+    }
+
+    #[test]
+    fn drops_unfenced_code_lines() {
+        let mut c = SentenceChunker::new(1, 400);
+        let mut out = Vec::new();
+        c.push(
+            "Вот:\ndef add(a, b):\n    return a + b\n\nГотово.",
+            &mut out,
+        );
+        if let Some(s) = c.flush() {
+            out.push(s);
+        }
+        let all = out.join(" ");
+        assert!(all.contains("Вот"), "{all}");
+        assert!(all.contains("Готово"), "{all}");
+        assert!(!all.contains("def"), "{all}");
+        assert!(!all.contains("return"), "{all}");
     }
 
     #[test]

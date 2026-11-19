@@ -15,6 +15,10 @@ pub const KEY_VOLUMEUP: u16 = 115;
 pub const KEY_MUTE: u16 = 113;
 pub const KEY_VOICECOMMAND: u16 = 582;
 
+/// Дребезг и залипшая кнопка не должны превращаться в поток активаций:
+/// быстрые повторные нажатия Action игнорируются.
+const ACTION_DEBOUNCE: Duration = Duration::from_millis(600);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonEvent {
     Action,
@@ -100,6 +104,7 @@ pub fn start_buttons(device: Option<&str>, action_key: u16, tx: UnboundedSender<
             };
             let mut file = file;
             let mut buf = [0u8; 64];
+            let mut last_action = None;
             loop {
                 match file.read(&mut buf) {
                     Ok(0) => break,
@@ -123,6 +128,11 @@ pub fn start_buttons(device: Option<&str>, action_key: u16, tx: UnboundedSender<
                                 None
                             };
                             if let Some(ev) = ev {
+                                if ev == ButtonEvent::Action
+                                    && !accept_action(&mut last_action, std::time::Instant::now())
+                                {
+                                    continue;
+                                }
                                 if tx.send(ev).is_err() {
                                     return;
                                 }
@@ -169,6 +179,14 @@ pub fn start_mute(gpio: Option<u32>, tx: UnboundedSender<ButtonEvent>) {
         .ok();
 }
 
+fn accept_action(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    if last.is_some_and(|t| now.saturating_duration_since(t) < ACTION_DEBOUNCE) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
 /// Проверка, что путь — символьное устройство (диагностика).
 pub fn is_char_device(path: &std::path::Path) -> bool {
     std::fs::metadata(path)
@@ -196,6 +214,16 @@ H: Handlers=event3
             PathBuf::from("/dev/input/event2")
         );
         assert!(find_event_node("missing", text).is_none());
+    }
+
+    #[test]
+    fn rapid_action_presses_are_ignored() {
+        let t0 = std::time::Instant::now();
+        let mut last = None;
+        assert!(accept_action(&mut last, t0));
+        assert!(!accept_action(&mut last, t0 + Duration::from_millis(100)));
+        assert!(!accept_action(&mut last, t0 + Duration::from_millis(500)));
+        assert!(accept_action(&mut last, t0 + Duration::from_millis(700)));
     }
 
     #[test]

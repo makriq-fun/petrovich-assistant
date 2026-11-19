@@ -78,12 +78,11 @@ pub async fn run_turn(
             .await
             .context("LLM")?;
         let mut chunker = SentenceChunker::default();
-        let mut round_text = String::new();
+        let mut round_spoken = String::new();
         let mut calls: Option<Vec<ToolCall>> = None;
         while let Some(ev) = rx.recv().await {
             match ev {
                 LlmEvent::TextDelta(t) => {
-                    round_text.push_str(&t);
                     let mut sentences = Vec::new();
                     chunker.push(&t, &mut sentences);
                     for s in sentences {
@@ -94,6 +93,8 @@ pub async fn run_turn(
                         }
                         spoken.push_str(&s);
                         spoken.push(' ');
+                        round_spoken.push_str(&s);
+                        round_spoken.push(' ');
                     }
                 }
                 LlmEvent::ToolCalls(c) => {
@@ -111,12 +112,27 @@ pub async fn run_turn(
             }
             spoken.push_str(&s);
             spoken.push(' ');
+            round_spoken.push_str(&s);
+            round_spoken.push(' ');
+        }
+        if chunker.code_seen() && !round_spoken.contains("Код не пишу.") {
+            let refusal = "Код не пишу.";
+            let d = speak_sentence(ctx, refusal).await?;
+            audio_total += d;
+            if !d.is_zero() {
+                audio_started.get_or_insert_with(tokio::time::Instant::now);
+            }
+            spoken.push_str(refusal);
+            spoken.push(' ');
+            round_spoken.push_str(refusal);
+            round_spoken.push(' ');
         }
         match calls {
             Some(calls) if !calls.is_empty() => {
                 let assistant = ChatMessage {
                     role: petrovich_core::chat::Role::Assistant,
-                    content: (!round_text.trim().is_empty()).then(|| round_text.clone()),
+                    content: (!round_spoken.trim().is_empty())
+                        .then(|| round_spoken.trim().to_owned()),
                     tool_calls: Some(calls.clone()),
                     tool_call_id: None,
                     name: None,
@@ -152,8 +168,8 @@ pub async fn run_turn(
                 }
             }
             _ => {
-                if !round_text.trim().is_empty() {
-                    final_text = Some(round_text.clone());
+                if !round_spoken.trim().is_empty() {
+                    final_text = Some(round_spoken.trim().to_owned());
                 }
                 break;
             }

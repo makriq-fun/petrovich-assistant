@@ -937,7 +937,7 @@ def main(argv=None) -> int:
         s = sub.add_parser(name)
         s.add_argument("--artifact")
         s.add_argument("--petrovichctl")
-        s.add_argument("--version", default="0.2.1")
+        s.add_argument("--version", default="0.2.2")
         s.add_argument("--config")
         s.add_argument("--secrets")
         s.add_argument("--wakeword-model")
