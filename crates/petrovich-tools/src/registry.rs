@@ -9,7 +9,7 @@ use chrono::{Datelike, Local, NaiveTime, Timelike};
 use petrovich_core::chat::ToolDefinition;
 use petrovich_core::config::ToolsConfig;
 use petrovich_core::events::{Emotion, UiEvent};
-use petrovich_core::ports::{Chime, ChimeSound, MusicControl, VolumeControl};
+use petrovich_core::ports::{Chime, ChimeSound, MusicControl, VolumeControl, YouTubeControl};
 use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -43,6 +43,7 @@ impl ToolResult {
 pub struct ToolContext {
     volume: Arc<dyn VolumeControl>,
     music: Option<Arc<dyn MusicControl>>,
+    youtube: Option<Arc<dyn YouTubeControl>>,
     timers: TimerManager,
     alarms: AlarmManager,
     web: Web,
@@ -69,6 +70,7 @@ impl ToolContext {
         Self {
             volume,
             music,
+            youtube: None,
             timers,
             alarms,
             web,
@@ -82,6 +84,11 @@ impl ToolContext {
 
     pub fn with_weather(mut self, weather: Weather) -> Self {
         self.weather = Some(weather);
+        self
+    }
+
+    pub fn with_youtube(mut self, youtube: Arc<dyn YouTubeControl>) -> Self {
+        self.youtube = Some(youtube);
         self
     }
 
@@ -99,6 +106,7 @@ impl ToolContext {
             "alarm",
             "volume",
             "music",
+            "youtube",
             "emotion",
             "web_search",
             "web_fetch",
@@ -116,7 +124,8 @@ impl ToolContext {
     fn available(&self, name: &str) -> bool {
         match name {
             "music" => self.music.is_some(),
-            "web_search" => !self.cfg.search_url.is_empty(),
+            "youtube" => self.youtube.is_some(),
+            "web_search" => !self.cfg.search_url.is_empty() || self.web.has_search_api(),
             "weather" => self.weather.is_some(),
             "run_code" => !self.cfg.sandbox_command.is_empty(),
             _ => true,
@@ -188,6 +197,17 @@ impl ToolContext {
                     json!(["action"]),
                 ),
             ),
+            "youtube" => ToolDefinition::new(
+                "youtube",
+                "Звук с YouTube: подкасты и видео без картинки. play по ссылке, id или названию; pause, resume, stop, status",
+                obj(
+                    json!({
+                        "action":{"type":"string","enum":["play","pause","resume","stop","status"]},
+                        "query":{"type":"string","minLength":1,"maxLength":500}
+                    }),
+                    json!(["action"]),
+                ),
+            ),
             "web_search" => ToolDefinition::new(
                 "web_search",
                 "Поиск в интернете",
@@ -251,6 +271,9 @@ impl ToolContext {
                 Duration::from_millis(self.cfg.web_timeout_ms)
             }
             "run_code" => Duration::from_millis(self.cfg.sandbox_timeout_ms),
+            // Разрешение ссылки и проверка первого сегмента ходят в сеть;
+            // при заблокированном googlevideo это занимает несколько секунд.
+            "youtube" => Duration::from_millis(self.cfg.timeout_ms.max(20_000)),
             _ => Duration::from_millis(self.cfg.timeout_ms),
         };
         let fut = self.dispatch(name, &args);
@@ -442,6 +465,41 @@ impl ToolContext {
                 }
                 Ok(ToolResult::text("Готово."))
             }
+            "youtube" => {
+                let yt = self
+                    .youtube
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("youtube не настроен"))?;
+                let action = args
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or("status");
+                match action {
+                    "play" => {
+                        let query = args
+                            .get("query")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|q| !q.is_empty())
+                            .ok_or_else(|| anyhow::anyhow!("youtube: для play нужен query"))?;
+                        Ok(ToolResult::text(yt.play(query).await?))
+                    }
+                    "pause" => {
+                        yt.pause()?;
+                        Ok(ToolResult::text("Пауза."))
+                    }
+                    "resume" => {
+                        yt.resume()?;
+                        Ok(ToolResult::text("Продолжаю."))
+                    }
+                    "stop" => {
+                        yt.stop()?;
+                        Ok(ToolResult::text("Остановлено."))
+                    }
+                    "status" => Ok(ToolResult::text(yt.status()?)),
+                    _ => bail!("youtube: неизвестное действие {action}"),
+                }
+            }
             "web_fetch" => {
                 let url = args
                     .get("url")
@@ -590,6 +648,26 @@ mod tests {
         }
     }
 
+    struct FakeYouTube;
+    #[async_trait::async_trait]
+    impl YouTubeControl for FakeYouTube {
+        async fn play(&self, query: &str) -> petrovich_core::Result<String> {
+            Ok(format!("Включаю: {query}"))
+        }
+        fn pause(&self) -> petrovich_core::Result<()> {
+            Ok(())
+        }
+        fn resume(&self) -> petrovich_core::Result<()> {
+            Ok(())
+        }
+        fn stop(&self) -> petrovich_core::Result<()> {
+            Ok(())
+        }
+        fn status(&self) -> petrovich_core::Result<String> {
+            Ok("Играет: тест".into())
+        }
+    }
+
     fn ctx_ui(enabled: &[&str]) -> (ToolContext, mpsc::UnboundedReceiver<UiEvent>) {
         let (ui, ui_rx) = mpsc::unbounded_channel();
         let (ann, _) = mpsc::channel(4);
@@ -608,7 +686,8 @@ mod tests {
             ui,
             cfg,
             5,
-        );
+        )
+        .with_youtube(Arc::new(FakeYouTube));
         (ctx, ui_rx)
     }
 
@@ -653,6 +732,31 @@ mod tests {
                 .content,
             "играет"
         );
+    }
+
+    #[tokio::test]
+    async fn youtube_tool_controls_player() {
+        let c = ctx(&["youtube"]);
+        let r = c
+            .execute("youtube", r#"{"action":"play","query":"подкаст"}"#)
+            .await
+            .unwrap();
+        assert!(r.content.contains("подкаст"), "{}", r.content);
+        assert_eq!(
+            c.execute("youtube", r#"{"action":"status"}"#)
+                .await
+                .unwrap()
+                .content,
+            "Играет: тест"
+        );
+        assert_eq!(
+            c.execute("youtube", r#"{"action":"stop"}"#)
+                .await
+                .unwrap()
+                .content,
+            "Остановлено."
+        );
+        assert!(c.execute("youtube", r#"{"action":"play"}"#).await.is_err());
     }
 
     #[tokio::test]

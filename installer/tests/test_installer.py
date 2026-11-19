@@ -40,6 +40,22 @@ class Tests(unittest.TestCase):
             [(model, "/data/petrovich/models/petrovich.tflite")],
         )
 
+    def test_byedpi_assets_cover_device_arches(self):
+        self.assertEqual(ji.byedpi_asset("aarch64")[1], "ciadpi-aarch64")
+        self.assertEqual(ji.byedpi_asset("armv7l")[1], "ciadpi-armv7l")
+        self.assertEqual(ji.byedpi_asset("armv8l")[1], "ciadpi-armv7l")
+        self.assertEqual(ji.byedpi_asset("armv6l")[1], "ciadpi-armv6")
+        with self.assertRaises(ji.InstallError):
+            ji.byedpi_asset("x86_64")
+
+    def test_byedpi_init_script_has_pidfile_and_proxy_port(self):
+        text = ji.byedpi_init_script(1080, "--disorder 1")
+        self.assertIn(ji.MARKER, text)
+        self.assertIn("PORT=1080", text)
+        self.assertIn("-i 127.0.0.1", text)
+        self.assertIn("/run/ciadpi.pid", text)
+        self.assertIn("ARGS='--disorder 1'", text)
+
     def test_set_wakeword_model_only_in_section(self):
         text = (
             '[stt]\nmodel = "whisper"\n\n'

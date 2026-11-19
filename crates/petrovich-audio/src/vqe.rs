@@ -12,9 +12,9 @@ use std::sync::LazyLock;
 use anyhow::{anyhow, bail, Context, Result};
 use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
 
-const EVIL: &str = "/system/vendor/quasar/libs/libyandex_evil.so";
-const TFLITE: &str = "/system/vendor/quasar/libs/libtflite.so";
-const ICONV: &str = "/system/vendor/quasar/libs/libiconv.so";
+pub(crate) const EVIL: &str = "/system/vendor/quasar/libs/libyandex_evil.so";
+pub(crate) const TFLITE: &str = "/system/vendor/quasar/libs/libtflite.so";
+pub(crate) const ICONV: &str = "/system/vendor/quasar/libs/libiconv.so";
 
 /// Выход VQE «omni» — основной канал распознавания.
 pub const VQE_OMNI: i32 = 6;
@@ -52,7 +52,7 @@ fn dl_error(e: libloading::Error) -> String {
         .unwrap_or_else(|| e.to_string())
 }
 
-fn open_global(path: &str) -> std::result::Result<(), String> {
+pub(crate) fn open_global(path: &str) -> std::result::Result<(), String> {
     // SAFETY: инициализаторы библиотек прошивки не требуют предусловий; они не выгружаются.
     let lib = unsafe { Library::open(Some(path), RTLD_NOW | RTLD_GLOBAL) }.map_err(dl_error)?;
     let _ = lib.into_raw();

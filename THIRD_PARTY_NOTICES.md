@@ -16,6 +16,8 @@
     символов (`crates/petrovich-audio/src/alsa.rs`);
   - восстановленные сигнатуры C API VQE и порядок загрузки зависимостей
     прошивки (`crates/petrovich-audio/src/vqe.rs`);
+  - сигнатуры C API command spotter (`spotter_*`) и порядок загрузки
+    зависимостей прошивки (`crates/petrovich-audio/src/spotter.rs`);
   - таблица аппаратных параметров Мини 2, имена sysfs-светодиодов и часов,
     GPIO мута, evdev-кнопки (`crates/petrovich-core/src/profile.rs`,
     `crates/petrovich-hw/**`);
@@ -100,6 +102,7 @@ microWakeWord-бэкенда и не содержат моделей. Текст
 | toml | MIT/Apache-2.0 |
 | tracing, tracing-subscriber | MIT |
 | url | MIT/Apache-2.0 |
+| symphonia, symphonia-format-isomp4 | MPL-2.0 |
 | libc | MIT/Apache-2.0 |
 
 Полные тексты лицензий — в пакетах crates.io и `Cargo.lock`; при

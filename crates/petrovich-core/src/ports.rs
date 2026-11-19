@@ -28,6 +28,24 @@ pub trait MusicControl: Send + Sync {
     fn next(&self) -> Result<()>;
     fn previous(&self) -> Result<()>;
     fn status(&self) -> Result<String>;
+    /// Играет ли музыка прямо сейчас (не пауза). Нужно глобальной «паузе»,
+    /// чтобы не останавливать ассистента, когда на переднем плане музыка.
+    fn is_playing(&self) -> Result<bool> {
+        Ok(false)
+    }
+}
+
+/// Звук YouTube: только аудиодорожка. Реализация живёт в демоне, потому что
+/// ей нужны сеть и ALSA; инструменты проверяются без колонки.
+#[async_trait::async_trait]
+pub trait YouTubeControl: Send + Sync {
+    /// Найти и включить видео по ссылке, id или поисковому запросу.
+    /// Возвращает короткое описание того, что включено.
+    async fn play(&self, query: &str) -> Result<String>;
+    fn pause(&self) -> Result<()>;
+    fn resume(&self) -> Result<()>;
+    fn stop(&self) -> Result<()>;
+    fn status(&self) -> Result<String>;
 }
 
 /// Устройство вывода для коротких служебных звуков (сигнал активации,

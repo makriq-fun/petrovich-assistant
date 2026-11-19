@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use petrovich_audio::frontend::{AudioEngine, CaptureBlock, PlaybackHandle};
+use petrovich_audio::spotter::{Command, CommandSpotter};
 use petrovich_audio::{AudioFrontend, LocalChime};
 use petrovich_core::config::{Config, DialogConfig, LoadedConfig};
 use petrovich_core::events::{UiEvent, UiNotice, VoiceState};
@@ -23,12 +24,34 @@ use tokio::task::JoinHandle;
 
 use crate::music::CommandMusic;
 use crate::turn::{run_turn, speak_text, TurnContext, TurnOutcome};
+use crate::youtube::YouTubePlayer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Idle,
     Listening,
     Thinking,
+}
+
+/// Что именно останавливает глобальная «пауза». Только одно, самое
+/// «переднее»: активный ход ассистента (`Thinking`) важнее музыки/видео;
+/// звучащая музыка или видео важнее пассивного `Listening`; если медиа нет,
+/// останавливается и пассивное ожидание.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopTarget {
+    Assistant,
+    Media,
+    None,
+}
+
+fn stop_target(mode: Mode, media_playing: bool) -> StopTarget {
+    match mode {
+        Mode::Thinking => StopTarget::Assistant,
+        Mode::Listening if media_playing => StopTarget::Media,
+        Mode::Listening => StopTarget::Assistant,
+        Mode::Idle if media_playing => StopTarget::Media,
+        Mode::Idle => StopTarget::None,
+    }
 }
 
 struct TurnEvent {
@@ -50,8 +73,11 @@ struct App {
     task: Option<JoinHandle<()>>,
     ui: mpsc::UnboundedSender<UiEvent>,
     playback: PlaybackHandle,
+    youtube: Arc<YouTubePlayer>,
     volume: Arc<dyn VolumeControl>,
+    music: Option<Arc<dyn MusicControl>>,
     chime: Arc<LocalChime>,
+    commands: Option<CommandSpotter>,
     wake: Option<WakeWord>,
     vad: petrovich_audio::vad::Vad,
     frontend: AudioFrontend,
@@ -135,6 +161,25 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     .with_search_api(search_key);
     let music: Option<Arc<dyn MusicControl>> = CommandMusic::new(cfg.tools.music_command.clone())
         .map(|m| Arc::new(m) as Arc<dyn MusicControl>);
+    let app_music = music.clone();
+    let commands = if cfg.commands.enabled {
+        match CommandSpotter::open(&cfg.commands.model) {
+            Ok(spotter) => {
+                tracing::info!("быстрые команды: {}", cfg.commands.model.display());
+                Some(spotter)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "быстрые команды недоступны ({}): {e:#}",
+                    cfg.commands.model.display()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let youtube = YouTubePlayer::new(&cfg.tools, cfg.audio.playback_pcm.clone())?;
     let mut tools = ToolContext::new(
         volume.clone(),
         music,
@@ -145,7 +190,8 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         ui_tx.clone(),
         cfg.tools.clone(),
         cfg.hardware.volume_step,
-    );
+    )
+    .with_youtube(youtube.clone());
     if !cfg.tools.weather_url.is_empty() {
         let weather = match (cfg.tools.weather_latitude, cfg.tools.weather_longitude) {
             (Some(lat), Some(lon)) => Weather::new(
@@ -205,8 +251,11 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         task: None,
         ui: ui_tx,
         playback,
+        youtube,
         volume,
+        music: app_music,
         chime,
+        commands,
         wake,
         vad,
         frontend,
@@ -271,12 +320,15 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
                 if let Some(f) = fired {
                     let _ = app.chime.play(ChimeSound::Timer);
                     let ctx = app.turn.clone();
+                    let yt = app.youtube.clone();
                     let text = format!("Таймер {} сработал.", f.label);
                     tokio::spawn(async move {
+                        yt.duck();
                         tokio::time::sleep(Duration::from_millis(1100)).await;
                         if let Err(e) = speak_text(&ctx, &text).await {
                             tracing::warn!("таймер: озвучка: {e:#}");
                         }
+                        yt.unduck();
                     });
                 }
             }
@@ -284,16 +336,19 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
                 if let Some(a) = alarm {
                     let _ = app.chime.play(ChimeSound::Alarm);
                     let ctx = app.turn.clone();
+                    let yt = app.youtube.clone();
                     let text = if a.label.is_empty() || a.label == "будильник" {
                         format!("Будильник на {:02}:{:02}.", a.hour, a.minute)
                     } else {
                         format!("Будильник «{}» сработал.", a.label)
                     };
                     tokio::spawn(async move {
+                        yt.duck();
                         tokio::time::sleep(Duration::from_millis(1100)).await;
                         if let Err(e) = speak_text(&ctx, &text).await {
                             tracing::warn!("будильник: озвучка: {e:#}");
                         }
+                        yt.unduck();
                     });
                 }
             }
@@ -306,6 +361,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     }
     app.abort_turn();
     app.playback.stop();
+    app.youtube.stop_playback();
     let _ = std::fs::remove_file(&pid);
     Ok(())
 }
@@ -313,6 +369,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
 impl App {
     fn enter_idle(&mut self) {
         self.mode = Mode::Idle;
+        self.youtube.unduck();
         self.follow_deadline = None;
         self.hard_deadline = None;
         self.vad.reset_utterance();
@@ -357,6 +414,7 @@ impl App {
             return;
         }
         tracing::info!("активация: начинаю слушать");
+        self.youtube.duck();
         let _ = self.ui.send(UiEvent::Notice(UiNotice::Listening));
         if self.dialog.wake_chime {
             let _ = self.chime.play(ChimeSound::Listening);
@@ -371,6 +429,20 @@ impl App {
         for frame in frames {
             if self.muted || tokio::time::Instant::now() < self.ignore_until {
                 continue;
+            }
+            let commands = match self.commands.as_mut() {
+                Some(spotter) => spotter.feed(&frame.samples),
+                None => Vec::new(),
+            };
+            for command in commands {
+                // Во время TTS/сигналов не даём озвучке самой переключать
+                // трек или громкость. «Стоп» остаётся доступен — им и
+                // останавливают ассистента.
+                if self.playback.is_playing() && !matches!(command, Command::Stop) {
+                    tracing::debug!("быстрая команда {command:?}: пропускаю во время речи");
+                    continue;
+                }
+                self.on_command(command);
             }
             match self.mode {
                 Mode::Idle => {
@@ -456,6 +528,7 @@ impl App {
         self.history.expire_if_idle();
         let snapshot = self.history.snapshot();
         tracing::info!("ход диалога: STT → LLM → TTS");
+        self.youtube.duck();
         self.mode = Mode::Thinking;
         self.follow_deadline = None;
         self.hard_deadline = None;
@@ -511,12 +584,14 @@ impl App {
                     Some(ControlAction::StopSpeaking) => {
                         self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
                         self.playback.stop();
+                        self.youtube.stop_playback();
                         self.enter_idle();
                     }
                     None => {
                         if !outcome.spoken.is_empty() {
                             self.feedback(ChimeSound::Done, UiNotice::Done);
                         }
+                        self.youtube.unduck();
                         self.enter_listening(true);
                     }
                 }
@@ -526,6 +601,7 @@ impl App {
                 let _ = self.ui.send(UiEvent::Error(e.clone()));
                 let _ = self.ui.send(UiEvent::Notice(UiNotice::Error));
                 let _ = self.chime.play(ChimeSound::Error);
+                self.youtube.unduck();
                 self.enter_listening(true);
             }
         }
@@ -533,11 +609,14 @@ impl App {
 
     fn announce(&self, text: &str) {
         let ctx = self.turn.clone();
+        let yt = self.youtube.clone();
         let text = text.to_owned();
         tokio::spawn(async move {
+            yt.duck();
             if let Err(e) = speak_text(&ctx, &text).await {
                 tracing::warn!("озвучка: {e:#}");
             }
+            yt.unduck();
         });
     }
 
@@ -545,6 +624,82 @@ impl App {
         self.generation = self.generation.wrapping_add(1);
         if let Some(t) = self.task.take() {
             t.abort();
+        }
+    }
+
+    fn change_volume(&mut self, delta: i32) {
+        match self.volume.step(delta) {
+            Ok(s) => {
+                let _ = self.ui.send(UiEvent::Volume(s.percent));
+            }
+            Err(e) => tracing::warn!("громкость: {e}"),
+        }
+    }
+
+    fn on_command(&mut self, command: Command) {
+        tracing::info!("быстрая команда: {command:?}");
+        match command {
+            Command::Next => self.music_call(|m| m.next()),
+            Command::Previous => self.music_call(|m| m.previous()),
+            Command::Play => self.music_call(|m| m.resume()),
+            Command::Stop => self.global_stop(),
+            Command::VolumeUp => self.change_volume(self.volume_step),
+            Command::VolumeDown => self.change_volume(-self.volume_step),
+        }
+    }
+
+    fn music_call<F>(&self, f: F)
+    where
+        F: FnOnce(&dyn MusicControl) -> petrovich_core::Result<()>,
+    {
+        let Some(music) = self.music.as_ref() else {
+            tracing::debug!("быстрая команда: музыка не настроена");
+            return;
+        };
+        if let Err(e) = f(music.as_ref()) {
+            tracing::warn!("быстрая команда: музыка: {e}");
+        }
+    }
+
+    /// Глобальная «пауза»/«стоп»/«хватит»: останавливает только то, что
+    /// сейчас на переднем плане, а не всё сразу.
+    fn global_stop(&mut self) {
+        let youtube_playing = self.youtube.is_playing();
+        let music_playing = self
+            .music
+            .as_ref()
+            .map(|m| m.is_playing().unwrap_or(false))
+            .unwrap_or(false);
+        match stop_target(self.mode, youtube_playing || music_playing) {
+            StopTarget::Assistant => {
+                tracing::info!("глобальная пауза: ассистент");
+                self.abort_turn();
+                self.playback.stop();
+                self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
+                self.enter_idle();
+            }
+            StopTarget::Media => {
+                tracing::info!("глобальная пауза: музыка/видео");
+                let mut failed = false;
+                if music_playing {
+                    if let Some(music) = self.music.as_ref() {
+                        if let Err(e) = music.pause() {
+                            tracing::warn!("глобальная пауза: музыка: {e}");
+                            failed = true;
+                        }
+                    }
+                }
+                if youtube_playing {
+                    if let Err(e) = self.youtube.pause_playback() {
+                        tracing::warn!("глобальная пауза: видео: {e:#}");
+                        failed = true;
+                    }
+                }
+                if !failed {
+                    self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
+                }
+            }
+            StopTarget::None => tracing::debug!("глобальная пауза: нечего останавливать"),
         }
     }
 
@@ -569,18 +724,14 @@ impl App {
                 } else {
                     -self.volume_step
                 };
-                match self.volume.step(delta) {
-                    Ok(s) => {
-                        let _ = self.ui.send(UiEvent::Volume(s.percent));
-                    }
-                    Err(e) => tracing::warn!("громкость: {e}"),
-                }
+                self.change_volume(delta);
             }
             ButtonEvent::Mute(m) => {
                 self.muted = m;
                 let _ = self.ui.send(UiEvent::Muted(m));
                 self.abort_turn();
                 self.playback.stop();
+                self.youtube.stop_playback();
                 if m {
                     tracing::info!("микрофоны выключены аппаратно");
                 } else {
@@ -693,6 +844,12 @@ pub fn check(loaded: &LoadedConfig) -> Result<()> {
             Err(e) => println!("VQE прошивки: недоступен ({e}); будет собственный DSP"),
         }
     }
+    if cfg.commands.enabled {
+        check_file(&cfg.commands.model, "модель быстрых команд")?;
+        CommandSpotter::open(&cfg.commands.model)
+            .map_err(|e| anyhow::anyhow!("быстрые команды: {e:#}"))?;
+        println!("быстрые команды: {}", cfg.commands.model.display());
+    }
     println!("инструменты: {:?}", cfg.tools.enabled);
     if cfg.tools.weather_latitude.is_some() && cfg.tools.weather_longitude.is_some() {
         println!("погода: включена");
@@ -760,5 +917,16 @@ mod deadline_tests {
     fn no_speech_keeps_existing_deadline() {
         let now = tokio::time::Instant::now();
         assert!(listen_deadline(now, false, false, None, 12_000, 5_000).is_none());
+    }
+
+    #[test]
+    fn global_stop_targets_only_the_foreground() {
+        use StopTarget::{Assistant, Media, None as Nothing};
+        assert_eq!(stop_target(Mode::Thinking, true), Assistant);
+        assert_eq!(stop_target(Mode::Thinking, false), Assistant);
+        assert_eq!(stop_target(Mode::Listening, true), Media);
+        assert_eq!(stop_target(Mode::Listening, false), Assistant);
+        assert_eq!(stop_target(Mode::Idle, true), Media);
+        assert_eq!(stop_target(Mode::Idle, false), Nothing);
     }
 }

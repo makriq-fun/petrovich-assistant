@@ -32,6 +32,8 @@ enum Cmd {
     },
     /// Прогнать модель активации по WAV (16 кГц моно)
     WakeTest { wav: PathBuf },
+    /// Прогнать штатный command spotter по WAV
+    CommandsTest { wav: PathBuf },
     /// Записать несколько секунд с микрофонов и показать уровни каналов
     AudioTest {
         #[arg(default_value_t = 5)]
@@ -73,6 +75,7 @@ fn main() -> Result<()> {
         Cmd::Doctor => doctor(&loaded),
         Cmd::Logs { lines } => logs(&loaded, lines),
         Cmd::WakeTest { wav } => wake_test(&loaded, &wav),
+        Cmd::CommandsTest { wav } => commands_test(&loaded, &wav),
         Cmd::AudioTest { seconds } => audio_test(&loaded, seconds),
         Cmd::TtsTest { text, out } => tts_test(&loaded, &text, &out),
         Cmd::SttTest { wav } => stt_test(&loaded, &wav),
@@ -338,6 +341,36 @@ fn wake_test(loaded: &petrovich_core::LoadedConfig, path: &Path) -> Result<()> {
         w.name(),
         w.threshold(),
         peak,
+        pcm.len() * 1000 / 16_000
+    );
+    Ok(())
+}
+
+fn commands_test(loaded: &petrovich_core::LoadedConfig, path: &Path) -> Result<()> {
+    let cfg = &loaded.config;
+    if !cfg.commands.enabled {
+        bail!("[commands] выключен в конфигурации");
+    }
+    let mut spotter = petrovich_audio::spotter::CommandSpotter::open(&cfg.commands.model)
+        .map_err(|e| anyhow::anyhow!("command spotter: {e:#}"))?;
+    let bytes = std::fs::read(path).with_context(|| path.display().to_string())?;
+    let wav = petrovich_core::wav::parse(&bytes)?;
+    let mono = wav.to_mono();
+    let pcm = if wav.sample_rate != 16_000 {
+        petrovich_audio::resample::resample(&mono, wav.sample_rate, 16_000)
+    } else {
+        mono
+    };
+    let mut found = 0;
+    for chunk in pcm.chunks(320) {
+        for command in spotter.feed(chunk) {
+            found += 1;
+            println!("команда: {command:?}");
+        }
+    }
+    println!(
+        "command spotter: {}, команд {found}, длительность {} мс",
+        cfg.commands.model.display(),
         pcm.len() * 1000 / 16_000
     );
     Ok(())

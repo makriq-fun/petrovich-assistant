@@ -67,6 +67,32 @@ impl MusicControl for CommandMusic {
         let s = self.run("status").map_err(err)?;
         Ok(format_status(&s))
     }
+    fn is_playing(&self) -> petrovich_core::Result<bool> {
+        let s = self.run("status").map_err(err)?;
+        Ok(parse_playing(&s))
+    }
+}
+
+/// Spotya: `active`/`paused`/`title`. Пустой title или пауза — не «играет».
+fn parse_playing(raw: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
+        return false;
+    };
+    if !v
+        .get("error")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .is_empty()
+    {
+        return false;
+    }
+    let paused = v.get("paused").and_then(|x| x.as_bool()) == Some(true);
+    let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").trim();
+    let active = v
+        .get("active")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(!title.is_empty());
+    active && !paused && !title.is_empty()
 }
 
 /// Spotya отдаёт большой JSON. В LLM отправляем только название, исполнителя
@@ -142,6 +168,19 @@ mod tests {
             "Ничего не играет."
         );
         assert_eq!(format_status(r#"{"error":"нет сети"}"#), "Spotya: нет сети");
+    }
+
+    #[test]
+    fn detects_only_audible_music() {
+        assert!(parse_playing(
+            r#"{"active":true,"paused":false,"title":"Армавир","error":""}"#
+        ));
+        assert!(!parse_playing(
+            r#"{"active":true,"paused":true,"title":"Армавир"}"#
+        ));
+        assert!(!parse_playing(r#"{"active":false,"title":""}"#));
+        assert!(!parse_playing(r#"{"error":"нет сети"}"#));
+        assert!(!parse_playing("not json"));
     }
 
     #[test]

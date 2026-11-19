@@ -6,6 +6,7 @@ pub mod chime;
 pub mod denoise;
 pub mod frontend;
 pub mod resample;
+pub mod spotter;
 pub mod vad;
 pub mod volume;
 pub mod vqe;

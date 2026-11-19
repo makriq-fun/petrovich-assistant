@@ -8,7 +8,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```
 
-На момент написания: **150 тестов** в workspace и 7 Python-тестов установщика.
+На момент написания: **170 тестов** в workspace (4 сетевых YouTube-теста
+игнорируются) и 7 Python-тестов установщика.
 Что покрыто:
 
 - конфигурация: значения по умолчанию, неизвестные ключи, каналы, URL,
@@ -34,6 +35,8 @@ python3 -m unittest discover -s installer/tests -v
   поиск evdev, разбор `input_event`, дребезг Action, GPIO-мут, датчик `ltr308`
   на временном sysfs-дереве, логарифмическая автояркость;
 - звуки: длина, нулевые края, отсутствие клиппинга и резких фронтов;
+- быстрые команды: разбор фраз и ID модели, приоритет глобального стопа
+  (`Thinking` → ассистент, музыка → музыка, пассивный `Listening` → ассистент);
 - демон: полный ход STT→LLM→TTS на mock-сервере, включая tool call;
 - установщик: определение модели, выбор отката, шим Quasar, валидация версии;
 - диагностика: разбор IPv4/IPv6 из `/proc/net/tcp{,6}`.
@@ -66,6 +69,8 @@ python3 -m unittest discover -s installer/tests -v
 - полный сценарий установки через ADB/SSH и поведение при обрыве питания;
 - перезагрузки, длительная работа, утечки памяти;
 - реальные STT/LLM/TTS API (тесты используют mock);
+- загрузка command spotter и его срабатывания на живой речи: ложные
+  срабатывания под TTS/музыку, порог и задержка;
 - отсутствие трафика Яндекса (диагностика только косвенная);
 - восстановление штатной прошивки.
 
@@ -77,6 +82,7 @@ python3 -m unittest discover -s installer/tests -v
 /data/petrovich/current/petrovichctl --config /data/petrovich/config.toml doctor
 /data/petrovich/current/petrovichctl --config /data/petrovich/config.toml status
 /data/petrovich/current/petrovichctl --config /data/petrovich/config.toml wake-test take.wav
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml commands-test command.wav
 /data/petrovich/current/petrovichctl --config /data/petrovich/config.toml light-test
 tail -f /data/petrovich/log/petrovichd.log
 ```
@@ -84,6 +90,10 @@ tail -f /data/petrovich/log/petrovichd.log
 `wake-test` принимает WAV PCM16, приводит к 16 кГц/моно и печатает score по
 шагам. Для калибровки используйте записи из той же комнаты и тот же тракт
 (`vqe_0`/микрофоны), иначе порог будет неверным.
+Загрузку command spotter видно по строке `быстрые команды:` в журнале; если
+модели нет, там будет предупреждение `быстрые команды недоступны`.
+`commands-test` принимает WAV любой частоты/каналов, приводит к 16 кГц/моно и
+печатает `команда: Next` и т.п.; это проверка модели и ABI без демона.
 
 Сценарий приёмки:
 
@@ -105,6 +115,8 @@ tail -f /data/petrovich/log/petrovichd.log
 | эмоция | «HAPPY»/«SAD» и т.п. на часах, цвет кольца, мягкий звук |
 | громкость голосом | часы показывают 0..100 без двоеточия |
 | музыка | «включи музыку» продолжает трек, «включи джаз» ищет через Spotya |
+| быстрые команды | без активации: «дальше», «назад», «громче», «тише»; в журнале `быстрая команда` |
+| «пауза» без активации | останавливает ассистента в `Thinking`, а при звучащей музыке — музыку |
 | тишина после активации | тихий звук окончания прослушивания |
 | погода в городе | «погода в Казани» без координат в конфиге |
 | перезагрузка | petrovichd поднялся, Алиса не отвечает |

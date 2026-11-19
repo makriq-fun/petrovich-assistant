@@ -71,6 +71,9 @@ pub async fn run_turn(
     let mut final_text: Option<String> = None;
     let mut audio_total = Duration::ZERO;
     let mut audio_started: Option<tokio::time::Instant> = None;
+    // Одинаковые вызовы в одном ходе не выполняем повторно: модель этим
+    // забивает лимит раундов и обрывает ответ.
+    let mut seen_calls = std::collections::HashSet::new();
     let final_round = ctx.max_tool_rounds.saturating_add(1);
     for round in 0..=final_round {
         // После лимита ходов всё равно просим итог, но уже без схем
@@ -142,6 +145,13 @@ pub async fn run_turn(
         }
         match calls {
             Some(calls) if !calls.is_empty() => {
+                if force_final {
+                    tracing::warn!("лимит вызовов инструментов; отвечаю тем, что уже сказано");
+                    if !round_spoken.trim().is_empty() {
+                        final_text = Some(round_spoken.trim().to_owned());
+                    }
+                    break;
+                }
                 let assistant = ChatMessage {
                     role: petrovich_core::chat::Role::Assistant,
                     content: (!round_spoken.trim().is_empty())
@@ -153,13 +163,29 @@ pub async fn run_turn(
                 messages.push(assistant.clone());
                 new_messages.push(assistant);
                 for call in &calls {
-                    let result = ctx
-                        .tools
-                        .execute(&call.function.name, &call.function.arguments)
-                        .await;
-                    let (content, ctrl) = match result {
-                        Ok(r) => (r.content, r.control),
-                        Err(e) => (format!("Ошибка инструмента: {e:#}"), None),
+                    // Громкость/таймер можно вызвать повторно с теми же
+                    // аргументами; дедуплицируем только сетевые запросы.
+                    let dedup = matches!(
+                        call.function.name.as_str(),
+                        "youtube" | "web_search" | "web_fetch" | "weather"
+                    );
+                    let first = !dedup
+                        || seen_calls
+                            .insert((call.function.name.clone(), call.function.arguments.clone()));
+                    let (content, ctrl) = if !first {
+                        (
+                            "Повторный вызов с теми же аргументами проигнорирован.".to_owned(),
+                            None,
+                        )
+                    } else {
+                        match ctx
+                            .tools
+                            .execute(&call.function.name, &call.function.arguments)
+                            .await
+                        {
+                            Ok(r) => (r.content, r.control),
+                            Err(e) => (format!("Ошибка инструмента: {e:#}"), None),
+                        }
                     };
                     tracing::info!(
                         "инструмент {}: {}",
@@ -175,9 +201,6 @@ pub async fn run_turn(
                 }
                 if control.is_some() {
                     break;
-                }
-                if force_final {
-                    bail!("слишком много вызовов инструментов");
                 }
             }
             _ => {

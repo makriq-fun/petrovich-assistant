@@ -24,6 +24,8 @@ pub struct Config {
     #[serde(default)]
     pub wakeword: WakewordConfig,
     #[serde(default)]
+    pub commands: CommandsConfig,
+    #[serde(default)]
     pub vad: VadConfig,
     #[serde(default)]
     pub dialog: DialogConfig,
@@ -248,6 +250,29 @@ fn default_refractory_ms() -> u64 {
 }
 fn default_wake_gain() -> u32 {
     1
+}
+
+/// Быстрые команды без слова активации: штатная command-модель прошивки.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_command_model")]
+    pub model: PathBuf,
+}
+
+impl Default for CommandsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: default_command_model(),
+        }
+    }
+}
+
+fn default_command_model() -> PathBuf {
+    PathBuf::from("/system/vendor/quasar/spotter_models/command")
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -659,6 +684,10 @@ pub struct ToolsConfig {
     /// Команда управления музыкой, например ["spotiya"].
     #[serde(default)]
     pub music_command: Vec<String>,
+    /// Прокси для YouTube, обычно byedpi: socks5h://127.0.0.1:1080.
+    /// Пусто — прямое подключение. Поддерживаются socks5(h) и http(s).
+    #[serde(default)]
+    pub youtube_proxy: String,
 }
 
 impl Default for ToolsConfig {
@@ -680,6 +709,7 @@ impl Default for ToolsConfig {
             sandbox_command: Vec::new(),
             sandbox_timeout_ms: default_sandbox_timeout_ms(),
             music_command: Vec::new(),
+            youtube_proxy: String::new(),
         }
     }
 }
@@ -691,6 +721,7 @@ fn default_tools_enabled() -> Vec<String> {
         "alarm",
         "volume",
         "music",
+        "youtube",
         "web_search",
         "weather",
         "emotion",
@@ -991,6 +1022,14 @@ impl Config {
         if self.wakeword.enabled && self.wakeword.gain > 64 {
             return invalid("wakeword.gain не должен превышать 64 (клиппинг)".into());
         }
+        if self.commands.enabled {
+            if self.commands.model.as_os_str().is_empty() {
+                return invalid("commands.model пуст".into());
+            }
+            if !self.commands.model.is_absolute() {
+                return invalid("commands.model должен быть абсолютным путём".into());
+            }
+        }
         if self.vad.min_speech_ms == 0 || self.vad.silence_ms == 0 {
             return invalid("vad.min_speech_ms и vad.silence_ms должны быть > 0".into());
         }
@@ -1008,6 +1047,19 @@ impl Config {
         }
         if self.tools.enabled.iter().any(|t| t.trim().is_empty()) {
             return invalid("tools.enabled содержит пустое имя".into());
+        }
+        if !self.tools.youtube_proxy.trim().is_empty() {
+            let p = self.tools.youtube_proxy.trim();
+            if !(p.starts_with("socks5h://")
+                || p.starts_with("socks5://")
+                || p.starts_with("http://")
+                || p.starts_with("https://"))
+            {
+                return invalid(
+                    "tools.youtube_proxy должен начинаться с socks5h://, socks5://, http:// или https://"
+                        .into(),
+                );
+            }
         }
         if !(0.0..=1.0).contains(&self.hardware.led_brightness) {
             return invalid("hardware.led_brightness должен быть 0..1".into());
@@ -1146,6 +1198,14 @@ mod tests {
         let again: Config = toml::from_str(&text).expect("roundtrip");
         assert_eq!(again.audio.sample_rate, cfg.audio.sample_rate);
         assert_eq!(again.tools.enabled, cfg.tools.enabled);
+    }
+
+    #[test]
+    fn commands_model_must_be_absolute() {
+        let mut cfg = example();
+        cfg.commands.enabled = true;
+        cfg.commands.model = "spotter_models/command".into();
+        assert!(matches!(cfg.validate(), Err(ConfigError::Invalid(_))));
     }
 
     #[test]

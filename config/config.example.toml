@@ -39,6 +39,14 @@ sensitivity = 0.0
 refractory_ms = 2000
 gain = 1
 
+[commands]
+# Штатный command spotter прошивки: быстрые команды без слова активации.
+# Модель уже есть на Станции Мини 2; в репозиторий не входит.
+# «дальше/назад/играй/продолжи» управляют музыкой, «громче/тише» — звуком,
+# «пауза/стоп/хватит» останавливают только то, что сейчас на переднем плане.
+enabled = true
+model = "/system/vendor/quasar/spotter_models/command"
+
 [vad]
 min_speech_ms = 300
 silence_ms = 700
@@ -107,7 +115,7 @@ retries = 2
 max_bytes = 16777216
 
 [tools]
-enabled = ["time", "timer", "alarm", "volume", "music", "emotion", "web_fetch", "weather", "reset_dialog", "stop"]
+enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search", "emotion", "web_fetch", "weather", "reset_dialog", "stop"]
 timeout_ms = 10000
 web_timeout_ms = 15000
 web_max_bytes = 1048576
@@ -134,6 +142,9 @@ sandbox_timeout_ms = 5000
 # Управление Spotiya; пусто — инструмент music выключен.
 # music_command = ["/data/opt/spotify-connect/spotiya", "--{action}"]
 music_command = []
+# YouTube только звуком. Прямое подключение часто блокируется; укажите
+# socks5h://127.0.0.1:1080 от byedpi/ciadpi. Пусто — без прокси.
+youtube_proxy = ""
 
 [hardware]
 model = "auto"

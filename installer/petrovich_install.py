@@ -19,6 +19,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,28 @@ ROOT = Path(__file__).resolve().parent.parent
 DEVICE_ROOT = "/data/petrovich"
 SUPPORTED = {"station-mini2"}
 MARKER = "petrovich-assistant"
+
+# byedpi: один C-процесс и SOCKS5, без NFQUEUE/iptables. На 238 МБ RAM это
+# заметно дешевле zapret; трафик направляется через tools.youtube_proxy.
+BYEDPI_VERSION = "0.17.3"
+BYEDPI_ASSETS = {
+    "aarch64": (
+        "byedpi-17.3-aarch64.tar.gz",
+        "ciadpi-aarch64",
+        "d5806504e159e8119ede5af1164a609251b0520cd4483a7db611b6d238b9404b",
+    ),
+    "armv7l": (
+        "byedpi-17.3-armv7l.tar.gz",
+        "ciadpi-armv7l",
+        "d231b95fc130a40994ef593ac87498ad8614e003b263e3a453bd62af096abb0c",
+    ),
+    "armv6l": (
+        "byedpi-17.3-armv6.tar.gz",
+        "ciadpi-armv6",
+        "5424225b3e12a95add0c807e6615ba346ea3d8f9f2f91e68ac707915e37f80a9",
+    ),
+}
+BYEDPI_DEFAULT_ARGS = "-d1 -s1+s -d1+s -s3+s -d6+s -s12+s -d14+s -s20+s -d24+s -s30+s -a1"
 
 
 class InstallError(RuntimeError):
@@ -923,6 +946,129 @@ def make_backup(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# byedpi
+
+
+def byedpi_asset(arch: str):
+    key = "armv7l" if arch == "armv8l" else arch
+    asset = BYEDPI_ASSETS.get(key)
+    if asset is None:
+        raise InstallError(f"нет byedpi для архитектуры {arch}")
+    return asset
+
+
+def download_byedpi(arch: str) -> Path:
+    name, _member, digest = byedpi_asset(arch)
+    url = (
+        f"https://github.com/hufrea/byedpi/releases/download/v{BYEDPI_VERSION}/{name}"
+    )
+    tmp = Path(tempfile.mkdtemp()) / name
+    print(f"скачиваю {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r, tmp.open("wb") as f:
+            while True:
+                chunk = r.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except Exception as e:
+        raise InstallError(f"скачивание byedpi: {e}") from e
+    if sha256(tmp) != digest:
+        raise InstallError(f"SHA256 byedpi не совпал: {name}")
+    return tmp
+
+
+def byedpi_init_script(port: int, extra: str) -> str:
+    return f"""#!/bin/sh
+# {MARKER}: byedpi для YouTube (SOCKS5 127.0.0.1:{port}).
+D=/data/petrovich
+BIN="$D/opt/byedpi/ciadpi"
+PID=/run/ciadpi.pid
+PORT={port}
+ARGS={shlex.quote(extra)}
+case "$1" in
+start)
+  [ -x "$BIN" ] || exit 0
+  if [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; then exit 0; fi
+  "$BIN" -i 127.0.0.1 -I 0.0.0.0 -p "$PORT" $ARGS -D -w "$PID"
+  ;;
+stop)
+  [ -f "$PID" ] && kill "$(cat "$PID")" 2>/dev/null || true
+  rm -f "$PID"
+  ;;
+restart)
+  "$0" stop
+  sleep 1
+  "$0" start
+  ;;
+*)
+  echo "usage: $0 {{start|stop|restart}}" >&2
+  exit 1
+  ;;
+esac
+"""
+
+
+def install_byedpi(args) -> int:
+    t = detect_transport(args)
+    info = require_device(t, allow_unknown=False)
+    if args.remove:
+        if args.dry_run:
+            print("[dry-run] остановка и удаление byedpi")
+            return 0
+        t.script(
+            "set -u\n"
+            "[ -x /etc/init.d/S51byedpi ] && /etc/init.d/S51byedpi stop || true\n"
+            "rm -f /etc/init.d/S51byedpi\n"
+            "rm -rf /data/petrovich/opt/byedpi\n"
+        )
+        print("byedpi удалён")
+        return 0
+    asset_name, member, _digest = byedpi_asset(info.arch)
+    if args.dry_run:
+        print(
+            f"[dry-run] byedpi {BYEDPI_VERSION} {asset_name} -> "
+            f"/data/petrovich/opt/byedpi/ciadpi; прокси socks5h://127.0.0.1:{args.port}"
+        )
+        return 0
+    archive = download_byedpi(info.arch)
+    with tarfile.open(archive, "r:gz") as tar:
+        entry = tar.getmember(member)
+        data = tar.extractfile(entry)
+        if data is None:
+            raise InstallError(f"нет {member} в {asset_name}")
+        binary = archive.with_name("ciadpi")
+        binary.write_bytes(data.read())
+    t.script("mkdir -p /data/petrovich/opt/byedpi")
+    upload_file(t, binary, "/data/petrovich/opt/byedpi/ciadpi", "755", verify=True)
+    init = byedpi_init_script(args.port, args.args)
+    quoted = shlex.quote(init)
+    t.script(
+        "set -eu\n"
+        "rw=0\n"
+        "if [ \"$(awk '$2==\"/\"{print $4}' /proc/mounts | head -1)\" != \"rw\" ]; then\n"
+        "  mount -o remount,rw / >/dev/null 2>&1 && rw=1 || true\n"
+        "fi\n"
+        f"printf '%s' {quoted} > /etc/init.d/S51byedpi\n"
+        "chmod 755 /etc/init.d/S51byedpi\n"
+        "if [ \"$rw\" = 1 ]; then mount -o remount,ro / >/dev/null 2>&1 || true; fi\n"
+    )
+    t.script("/etc/init.d/S51byedpi start || true")
+    t.script(
+        "i=0\n"
+        "while [ \"$i\" -lt 10 ]; do\n"
+        "  [ -f /run/ciadpi.pid ] && kill -0 \"$(cat /run/ciadpi.pid)\" 2>/dev/null && exit 0\n"
+        "  i=$((i+1)); sleep 1\n"
+        "done\n"
+        "exit 1\n"
+    )
+    print(f"byedpi запущен: socks5h://127.0.0.1:{args.port}")
+    print("пропишите в config.toml: [tools] youtube_proxy = \""
+          f"socks5h://127.0.0.1:{args.port}\"")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Установщик petrovichd")
     p.add_argument("--transport", choices=["auto", "adb", "ssh"], default="auto")
@@ -953,6 +1099,11 @@ def main(argv=None) -> int:
     s.set_defaults(func=status)
     s = sub.add_parser("backup")
     s.set_defaults(func=make_backup)
+    s = sub.add_parser("byedpi")
+    s.add_argument("--remove", action="store_true")
+    s.add_argument("--port", type=int, default=1080)
+    s.add_argument("--args", default=BYEDPI_DEFAULT_ARGS)
+    s.set_defaults(func=install_byedpi)
     s = sub.add_parser("privacy")
     s.add_argument("--dns", action="append", help="nameserver, можно несколько")
     s.add_argument("--ntp", action="append", help="NTP-сервер, можно несколько")
