@@ -26,6 +26,8 @@ vqe_preset = "yandexmini_2"
 vqe_models = "/system/vendor/quasar/vqe_models"
 aec = true
 denoise = true
+# Усиление PDM-микрофона на Мини 2; 0 — не трогать.
+mic_gain = 0
 aec_delay_ms = 0
 
 [wakeword]
@@ -53,7 +55,7 @@ silence_ms = 700
 max_utterance_ms = 12000
 energy_margin_db = 6.0
 pre_roll_ms = 300
-absolute_db = -36.0
+absolute_db = -55.0
 
 [dialog]
 follow_up_ms = 5000

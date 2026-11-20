@@ -135,6 +135,13 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     if let Some(w) = &wake {
         tracing::info!("активация: «{}», порог {:.3}", w.name(), w.threshold());
     }
+    if cfg.audio.mic_gain > 0 {
+        if let Err(e) = petrovich_audio::volume::set_mic_gain(0, cfg.audio.mic_gain) {
+            tracing::warn!("усиление микрофона: {e:#}");
+        } else {
+            tracing::info!("микрофон: PDM Gain {}%", cfg.audio.mic_gain);
+        }
+    }
     let audio = AudioEngine::start(&cfg.audio, profile, cfg.hardware.volume_step)?;
     let AudioEngine {
         capture,
@@ -667,6 +674,14 @@ impl App {
             self.command_ignore_until = tokio::time::Instant::now() + Duration::from_millis(700);
         }
         let buffered: Vec<Vec<i16>> = self.pre_roll.drain(..).collect();
+        let pre_db = buffered
+            .iter()
+            .map(|b| petrovich_audio::vad::dbfs(b))
+            .fold(-120.0f32, f32::max);
+        tracing::info!(
+            "активация: пре-ролл {} блоков, максимум {pre_db:.1} dBFS",
+            buffered.len()
+        );
         self.enter_listening(false);
         for samples in buffered {
             let was_in_speech = self.vad.in_speech();

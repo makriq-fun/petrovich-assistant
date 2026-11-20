@@ -53,6 +53,28 @@ impl AmixerVolume {
     }
 }
 
+/// Задаёт усиление PDM-микрофонов. На Мини 2 при холодном старте оно может
+/// остаться нулевым, и тогда Петрович не слышит речь. 0 — не трогать.
+pub fn set_mic_gain(card: u32, percent: u8) -> Result<()> {
+    if percent == 0 {
+        return Ok(());
+    }
+    let value = format!("{}%", percent.min(100));
+    let out = Command::new("amixer")
+        .arg("-c")
+        .arg(card.to_string())
+        .args(["sset", "PDM Gain", &value])
+        .output()
+        .context("запуск amixer для PDM Gain")?;
+    if !out.status.success() {
+        bail!(
+            "amixer PDM Gain: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Разбирает вывод `amixer sget`: `[42%] [on]`.
 pub fn parse_volume(text: &str) -> Option<VolumeStatus> {
     let mut percent = None;

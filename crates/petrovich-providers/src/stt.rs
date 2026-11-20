@@ -24,6 +24,7 @@ pub fn from_config(cfg: &SttConfig, secrets: &Secrets) -> Result<Box<dyn Stt>> {
     match cfg.provider {
         SttProvider::Openai => Ok(Box::new(OpenAiStt::new(cfg, secrets)?)),
         SttProvider::Fish => Ok(Box::new(FishStt::new(cfg, secrets)?)),
+        SttProvider::ChatAudio => Ok(Box::new(ChatAudioStt::new(cfg, secrets)?)),
         SttProvider::Command => Ok(Box::new(CommandStt::new(
             cfg.command.clone(),
             cfg.timeout_ms,
@@ -209,6 +210,110 @@ impl Stt for OpenAiStt {
     }
 }
 
+/// Распознавание через мультимодальную chat-модель. Некоторые провайдеры
+/// не дают отдельный Whisper-эндпоинт, но принимают WAV прямо в сообщении.
+pub struct ChatAudioStt {
+    http: reqwest::Client,
+    url: String,
+    model: String,
+    language: String,
+    key: Option<String>,
+    retries: u8,
+}
+
+impl ChatAudioStt {
+    pub fn new(cfg: &SttConfig, secrets: &Secrets) -> Result<Self> {
+        Ok(Self {
+            http: client_with_ca(cfg.timeout_ms, cfg.tls_ca_file.as_deref())?,
+            url: endpoint(&cfg.base_url, "/chat/completions"),
+            model: cfg.model.clone(),
+            language: cfg.language.clone(),
+            key: secrets
+                .get(&cfg.api_key_env)
+                .filter(|k| !k.is_empty())
+                .map(str::to_owned),
+            retries: cfg.retries,
+        })
+    }
+}
+
+fn transcript_prompt(language: &str) -> String {
+    if language.starts_with("ru") {
+        "Распознай русскую речь дословно. Верни только текст без пояснений, кавычек и разметки."
+            .to_owned()
+    } else {
+        "Transcribe the speech verbatim. Return only the text, without quotes or commentary."
+            .to_owned()
+    }
+}
+
+#[async_trait]
+impl Stt for ChatAudioStt {
+    async fn transcribe(&self, wav: Vec<u8>) -> Result<String> {
+        use base64::Engine as _;
+        let audio = base64::engine::general_purpose::STANDARD.encode(&wav);
+        let body = serde_json::json!({
+            "model": self.model,
+            "temperature": 0,
+            "max_tokens": 256,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": transcript_prompt(&self.language)},
+                    {"type": "input_audio", "input_audio": {"data": audio, "format": "wav"}}
+                ]
+            }]
+        });
+        let mut attempt = 0u8;
+        loop {
+            let mut req = self.http.post(&self.url).json(&body);
+            if let Some(key) = &self.key {
+                req = req.bearer_auth(key);
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let status = resp.status();
+                    let resp = check_status(resp, "STT").await?;
+                    let text = resp.text().await.context("STT: чтение ответа")?;
+                    let value: serde_json::Value =
+                        serde_json::from_str(&text).with_context(|| {
+                            format!("STT HTTP {status}: не JSON: {}", redact(&text))
+                        })?;
+                    let text = value
+                        .pointer("/choices/0/message/content")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("STT: в ответе нет текста"))?;
+                    let text = text
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '«' || c == '»')
+                        .trim()
+                        .to_owned();
+                    if text.is_empty() {
+                        bail!("STT: пустой текст");
+                    }
+                    return Ok(text);
+                }
+                Ok(resp) if retryable(resp.status()) && attempt < self.retries => {
+                    tracing::warn!("STT: HTTP {}; повтор {}", resp.status(), attempt + 1);
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    bail!(
+                        "STT: HTTP {status}: {}",
+                        redact(&text.chars().take(300).collect::<String>())
+                    );
+                }
+                Err(e) if attempt < self.retries => {
+                    tracing::warn!("STT: {e:#}; повтор {}", attempt + 1);
+                }
+                Err(e) => return Err(e).context("STT: попытки исчерпаны"),
+            }
+            attempt += 1;
+            tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(u32::from(attempt)))).await;
+        }
+    }
+}
 /// Локальный распознаватель: WAV через stdin или `{file}` в аргументах.
 pub struct CommandStt {
     argv: Vec<String>,

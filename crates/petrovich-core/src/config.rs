@@ -398,6 +398,9 @@ pub struct AudioConfig {
     /// использует все каналы, поэтому по умолчанию false.
     #[serde(default)]
     pub downmix_before_vqe: bool,
+    /// Усиление PDM-микрофона карты 0 в процентах; 0 — не менять.
+    #[serde(default)]
+    pub mic_gain: u8,
 }
 
 impl Default for AudioConfig {
@@ -420,6 +423,7 @@ impl Default for AudioConfig {
             aec: true,
             denoise: true,
             downmix_before_vqe: false,
+            mic_gain: 0,
         }
     }
 }
@@ -612,7 +616,7 @@ fn default_pre_roll_ms() -> u64 {
 fn default_absolute_db() -> f32 {
     // Нижний предел порога: тихая речь не должна теряться в «абсолютной»
     // отсечке. Шум оценивается отдельно и поднимает порог при необходимости.
-    -36.0
+    -55.0
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -735,6 +739,9 @@ fn default_memory_prompt_chars() -> usize {
 pub enum SttProvider {
     Openai,
     Fish,
+    /// Распознавание через мультимодальную chat-модель (аудио во входе).
+    #[serde(rename = "chat_audio")]
+    ChatAudio,
     Command,
 }
 
@@ -1515,7 +1522,7 @@ impl Config {
             return invalid("hardware.volume_step должен быть 1..50".into());
         }
         match self.stt.provider {
-            SttProvider::Openai | SttProvider::Fish => {
+            SttProvider::Openai | SttProvider::Fish | SttProvider::ChatAudio => {
                 validate_http_url("stt.base_url", &self.stt.base_url)?;
                 if self.stt.model.is_empty() {
                     return invalid("stt.model пуст".into());

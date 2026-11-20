@@ -95,6 +95,12 @@ impl Vad {
         self.noise_db
     }
 
+    /// Фактический порог речи: шумовая полка с запасом, но не ниже
+    /// абсолютного предела (он спасает от срабатывания на цифровой тишине).
+    pub fn threshold_db(&self) -> f32 {
+        (self.noise_db + self.margin_db).max(self.absolute_db)
+    }
+
     /// Сбрасывает текущую фразу, сохраняя оценку шума.
     pub fn reset_utterance(&mut self) {
         self.pending.clear();
