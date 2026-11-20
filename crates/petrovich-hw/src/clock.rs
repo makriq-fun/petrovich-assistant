@@ -19,22 +19,12 @@ const DIGITS: [u8; 10] = [0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 
 const SEGS: usize = 7;
 
 // Буквы на семисегментном индикаторе для эмоций и статусов.
-const L_A: u8 = 0x77;
-const L_C: u8 = 0x39;
-const L_D: u8 = 0x5e;
-const L_G: u8 = 0x3d;
-const L_H: u8 = 0x76;
-const L_I: u8 = 0x06;
-const L_L: u8 = 0x38;
-const L_N: u8 = 0x54;
-const L_O: u8 = 0x3f;
-const L_P: u8 = 0x73;
-const L_R: u8 = 0x50;
-const L_S: u8 = 0x6d;
 
 pub struct Clock {
     segments: Vec<File>,
     colon: Vec<File>,
+    degree: Option<File>,
+    minus: Option<File>,
     last: Vec<u8>,
     level: u8,
     enabled: bool,
@@ -74,18 +64,29 @@ impl Clock {
                 }
             }
         }
-        // Вспомогательные сегменты гасим один раз.
+        // Вспомогательные сегменты: DEGREE и MINUS. Они нужны погоде и
+        // отрицательным значениям, поэтому держим их открытыми.
+        let mut aux = Vec::new();
         for name in profile.clock_aux {
             let p = dir.join(format!("{prefix}{name}")).join("brightness");
-            if let Ok(mut f) = OpenOptions::new().write(true).open(p) {
-                let _ = f.write_all(b"0");
+            match OpenOptions::new().write(true).open(p) {
+                Ok(mut f) => {
+                    let _ = f.write_all(b"0");
+                    aux.push(Some(f));
+                }
+                Err(_) => aux.push(None),
             }
         }
+        let mut aux = aux.into_iter();
+        let degree = aux.next().flatten();
+        let minus = aux.next().flatten();
         let level = (brightness.clamp(0.0, 1.0) * 255.0).round() as u8;
         Self {
             last: vec![0; segments.len() + colon.len()],
             segments,
             colon,
+            degree,
+            minus,
             level: level.max(2),
             enabled: true,
             initialized: false,
@@ -96,11 +97,26 @@ impl Clock {
         Self {
             segments: Vec::new(),
             colon: Vec::new(),
+            degree: None,
+            minus: None,
             last: Vec::new(),
             level: 0,
             enabled: false,
             initialized: false,
         }
+    }
+
+    /// Управляет вспомогательными светодиодами «градус» и «минус».
+    pub fn set_aux(&mut self, degree: bool, minus: bool) -> Result<()> {
+        let level = if degree { self.level } else { 0 };
+        if let Some(f) = self.degree.as_mut() {
+            store(f, level.to_string().as_bytes())?;
+        }
+        let level = if minus { self.level } else { 0 };
+        if let Some(f) = self.minus.as_mut() {
+            store(f, level.to_string().as_bytes())?;
+        }
+        Ok(())
     }
 
     pub fn enabled(&self) -> bool {
@@ -209,7 +225,53 @@ impl Clock {
     }
 
     pub fn all_off(&mut self) -> Result<()> {
+        self.set_aux(false, false)?;
         self.set_levels(&[0; 4], 0, 0)
+    }
+
+    /// Температура: знак, две цифры и символ градуса. Для значений вне
+    /// -99..99 показывает крайние значения.
+    pub fn show_temperature(&mut self, celsius: f32) -> Result<()> {
+        let t = celsius.round().clamp(-99.0, 99.0) as i32;
+        let abs = t.unsigned_abs().min(99) as u8;
+        let bytes = [0, (abs / 10) % 10, abs % 10, 0];
+        self.set_aux(true, t < 0)?;
+        self.set_digits(&bytes, 0, self.level)
+    }
+
+    /// Сахар: ммоль/л с одним знаком. Двоеточие играет роль запятой;
+    /// при значении ≥ 10 показываются три цифры без разделителя.
+    pub fn show_glucose(&mut self, mmol: f32) -> Result<()> {
+        let v = (mmol.clamp(0.0, 99.9) * 10.0).round() as u32;
+        if v < 100 {
+            let bytes = [0, (v / 10) as u8 % 10, (v % 10) as u8, 0];
+            self.set_aux(false, false)?;
+            self.set_digits(&bytes, self.level, self.level)
+        } else {
+            let bytes = [(v / 100 % 10) as u8, (v / 10 % 10) as u8, (v % 10) as u8, 0];
+            self.set_aux(false, false)?;
+            self.set_digits(&bytes, 0, self.level)
+        }
+    }
+
+    /// Позиция воспроизведения MM:SS; для длинных записей — часы и минуты.
+    pub fn show_position(&mut self, position_s: u64) -> Result<()> {
+        let secs = position_s % 86_400;
+        let a = if secs >= 3_600 {
+            secs / 3_600
+        } else {
+            secs / 60
+        };
+        let b = if secs >= 3_600 {
+            (secs % 3_600) / 60
+        } else {
+            secs % 60
+        };
+        let a = a.min(99) as u8;
+        let b = b.min(99) as u8;
+        let bytes = [(a / 10) % 10, a % 10, (b / 10) % 10, b % 10];
+        self.set_aux(false, false)?;
+        self.set_digits(&bytes, self.level, self.level)
     }
 }
 
@@ -239,30 +301,68 @@ pub fn spinner_masks(t: f32) -> [u8; 4] {
     out
 }
 
-/// Маски для коротких статусов на экране часов.
-pub fn notice_masks(notice: petrovich_core::events::UiNotice) -> [u8; 4] {
+/// Маски для коротких статусов на экране часов. `t` — секунды с начала
+/// события: будильник и эмоции анимируются, остальные статусы статичны.
+pub fn notice_masks(notice: petrovich_core::events::UiNotice, t: f32) -> [u8; 4] {
     use petrovich_core::events::UiNotice;
     match notice {
         UiNotice::Done => [DIGITS[8]; 4],
         UiNotice::Stopped => [0x40; 4], // «----»
         UiNotice::Cleared => [DIGITS[0]; 4],
-        UiNotice::Error => [0x79; 4],            // «EEEE»
-        UiNotice::Alarm => [L_A, L_L, L_A, L_R], // «ALAr»
-        UiNotice::Emotion(e) => emotion_masks(e),
+        UiNotice::Error => [0x79; 4], // «EEEE»
+        UiNotice::Alarm => {
+            let on = if (t % 0.6) < 0.35 { 0x3f } else { 0x24 };
+            [on; 4]
+        }
+        UiNotice::Emotion(e) => emotion_frame(e, t),
         _ => [0; 4],
     }
 }
 
-/// «Мимика» часов для эмоций. Нулевая маска означает «вернуться к времени».
-pub fn emotion_masks(emotion: Emotion) -> [u8; 4] {
+/// Выразительная анимация эмоции на четырёхразрядном индикаторе.
+/// Буквы не используются: «глаза» и «рот» собраны из сегментов, поэтому
+/// рисунок читается на расстоянии и одинаково на всех ревизиях.
+pub fn emotion_frame(emotion: Emotion, t: f32) -> [u8; 4] {
+    let blink = if (t % 2.4) < 1.9 { 0x01 } else { 0x00 };
+    let smile = 0x08;
     match emotion {
-        Emotion::Happy => [L_H, L_A, L_P, L_P],
-        Emotion::Sad => [L_S, L_A, L_D, 0],
-        Emotion::Surprised => [L_O, L_H, 0, 0],
-        Emotion::Angry => [L_A, L_N, L_G, L_R],
-        Emotion::Calm => [L_C, L_A, L_L, 0],
-        Emotion::Greeting => [L_H, L_I, 0, 0],
-        Emotion::Neutral => [0; 4],
+        // Радость: глаза-чёрточки, улыбка пульсирует.
+        Emotion::Happy => {
+            let mouth = 0x41 | smile;
+            [blink, blink, mouth, mouth | 0x02]
+        }
+        // Грусть: внешние уголки рта вниз.
+        Emotion::Sad => [0x01, 0x01, 0x20 | 0x01, 0x10 | 0x01],
+        // Удивление: «O» раскрывается и сужается.
+        Emotion::Surprised => {
+            let open = if (t % 0.9) < 0.45 { 0x3f } else { 0x09 };
+            [open, 0x40, 0x40, open]
+        }
+        // Злость: косые брови вспыхивают.
+        Emotion::Angry => {
+            let on = if (t % 0.5) < 0.3 { 0xff } else { 0x24 };
+            [0x20 | 0x02, on, on, 0x10 | 0x04]
+        }
+        // Спокойствие: медленная волна по средней линии.
+        Emotion::Calm => {
+            let phase = (t * 1.2) as i32 % 4;
+            let mut out = [0x40; 4];
+            out[phase as usize] = 0x40 | 0x01;
+            out
+        }
+        // Приветствие: бегущая волна сверху вниз.
+        Emotion::Greeting => {
+            let phase = (t * 2.0) as usize % 4;
+            let mut out = [0x00; 4];
+            out[phase] = 0x3f;
+            out[(phase + 1) % 4] = 0x06;
+            out
+        }
+        // Нейтрально: ровное дыхание.
+        Emotion::Neutral => {
+            let level = if (t % 2.0) < 1.0 { 0x40 } else { 0x00 };
+            [level; 4]
+        }
     }
 }
 
@@ -361,13 +461,18 @@ mod tests {
     }
 
     #[test]
-    fn emotion_and_alarm_have_clock_masks() {
-        assert_eq!(emotion_masks(Emotion::Happy), [L_H, L_A, L_P, L_P]);
-        assert_eq!(
-            notice_masks(petrovich_core::events::UiNotice::Alarm),
-            [L_A, L_L, L_A, L_R]
+    fn emotion_and_alarm_are_animated() {
+        let happy = emotion_frame(Emotion::Happy, 0.0);
+        assert_ne!(happy, [0; 4]);
+        assert_ne!(happy, emotion_frame(Emotion::Happy, 2.2));
+        assert_ne!(
+            notice_masks(petrovich_core::events::UiNotice::Alarm, 0.0),
+            notice_masks(petrovich_core::events::UiNotice::Alarm, 0.5)
         );
-        assert_eq!(emotion_masks(Emotion::Neutral), [0; 4]);
+        assert_eq!(
+            notice_masks(petrovich_core::events::UiNotice::Done, 0.0),
+            [DIGITS[8]; 4]
+        );
     }
 
     #[test]
@@ -388,7 +493,7 @@ mod tests {
         assert_eq!(spinner_masks(0.0)[0].count_ones(), 1);
         assert_eq!(spinner_masks(0.84)[1].count_ones(), 1);
         assert_eq!(
-            notice_masks(petrovich_core::events::UiNotice::Stopped),
+            notice_masks(petrovich_core::events::UiNotice::Stopped, 0.0),
             [0x40; 4]
         );
     }

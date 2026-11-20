@@ -1,7 +1,9 @@
 //! petrovichd — независимый голосовой помощник для Яндекс Станций.
 
+mod byedpi;
 mod daemon;
 mod music;
+mod spotify;
 mod tts_cache;
 mod turn;
 mod youtube;

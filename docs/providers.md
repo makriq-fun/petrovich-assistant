@@ -142,7 +142,35 @@ timeout_ms = 60000
 
 Локальный TTS:
 
-Пример управления Spotiya:
+## Spotify
+
+Стандартный путь — встроенный Spotify Connect на librespot в `petrovichd`:
+
+```toml
+[modules]
+spotify = true
+
+[spotify]
+device_name = "Петрович"
+username = "user@example.com"
+# Для входа достаточно пароля или access token; после первого входа
+# librespot хранит credentials.json в cache_dir.
+
+# secrets.env, права 0600:
+# PETROVICH_SPOTIFY_PASSWORD=...
+# PETROVICH_SPOTIFY_TOKEN=...
+```
+
+Устройство видно в Spotify Connect сразу после старта, в том числе на паузе.
+Поиск идёт через Spotify Web API токеном Connect-сессии, звук — через librespot
+в тот же ALSA `default`, без отдельного приложения. Поддерживаются треки,
+альбомы, плейлисты, подкасты и выпуски, seek, очередь, таймер сна и
+сохранение позиции. Поиск использует токен уже авторизованной Connect-сессии,
+поэтому `client_id`/секрет не обязательны; они остаются резервом для сессий,
+авторизованных только access token.
+
+Устаревший внешний backend остаётся только как совместимость; при включённом
+Spotify он не используется:
 
 ```toml
 [tools]
@@ -151,12 +179,10 @@ music_command = ["/data/opt/spotify-connect/spotiya", "--{action}"]
 # music_command = ["/data/petrovich/music.sh", "{action}"]
 ```
 
-Spotiya должна быть установлена и настроена отдельно. Если `music_command`
-пуст, инструмент `music` не публикуется для LLM. `play` без названия
-продолжает текущий трек (`--resume`), `play` с `query` запускает поиск
-(`--play QUERY`); также доступны pause/resume/next/previous/status.
-Статус разбирается из JSON Spotya в короткую строку «исполнитель — трек»,
-чтобы не раздувать контекст LLM.
+Если Spotify выключен и `music_command` пуст, инструмент `music` не
+публикуется для LLM. `play` без названия продолжает текущий трек, `play` с
+`query` запускает поиск; также доступны pause/resume/next/previous/status,
+seek, seek_to, queue и sleep.
 Те же действия без слова активации делает штатный command spotter из
 прошивки (`[commands]`, раздел `[commands]` в configuration.md): «дальше»,
 «назад», «играй», «продолжи» вызывают `next/previous/resume`, «громче/тише» —
@@ -229,53 +255,41 @@ DASH-аудио MP4: демон читает его range-запросами, н
 [tools]
 enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "emotion",
            "web_fetch", "weather", "reset_dialog", "stop"]
-youtube_proxy = "socks5h://127.0.0.1:1080"
+# Пусто — встроенный ByeDPI. Заданный внешний прокси имеет приоритет.
+youtube_proxy = ""
 ```
 
 Действия: `play` (ссылка, id или поисковый запрос), `pause`, `resume`,
 `stop`, `status`. На время ответа и объявлений звук приглушается, затем
 продолжается; явная пауза голосом не снимается автоматически.
 
-### byedpi, а не zapret
+### ByeDPI в процессе
 
-| | byedpi (`ciadpi`) | zapret (`nfqws`) |
-|---|---|---|
-| процесс | один C-бинарник ~146 КБ | демон + правила iptables/nftables |
-| RSS в простое | ~150 КБ | единицы-десятки МБ |
-| путь пакетов | только трафик приложений, использующих SOCKS5 | весь трафик через NFQUEUE |
-| цена на 4×Cortex-A53 | почти нулевая | очередь netfilter и копирование пакетов в userspace |
-| риск | приложение должно уметь прокси | ошибка в правилах режет сеть целиком |
+ByeDPI-подобный обход встроен в `petrovichd`; отдельный `ciadpi`/zapret не
+запускается и iptables/nftables не меняются. Локальный SOCKS5 слушает только
+`127.0.0.1` на свободном порту, а `petrovichd` направляет в него только
+запросы YouTube. Остальной трафик идёт напрямую.
 
-На Мини 2 выбран byedpi: он не трогает firewall и не добавляет работу
-каждому пакету. Демон ходит в YouTube через `youtube_proxy`, остальной
-трафик идёт напрямую.
+```toml
+[modules]
+byedpi = true
 
-Если на станции уже работает Hysteria-клиент (например, для Spotiya), можно
-не ставить второй прокси: добавьте в его конфиг SOCKS5-вход и укажите этот
-порт в `youtube_proxy`:
-
-```json
-"socks5": { "listen": "127.0.0.1:1081" }
+[byedpi]
+listen_port = 0          # 0 — свободный
+refresh_s = 300
+probe_timeout_ms = 4000
+probe_video = "jNQXAC9IVRw"
 ```
 
-Hysteria и byedpi можно держать одновременно: `youtube_proxy` выбирает один.
+Стратегии задаются пресетами ByeByeDPI (`-d`, `-f`, `-o`, `-s`) или
+символическими именами. При старте демон проверяет их реальным декодированием
+первого аудиопакета выбранного ролика, запоминает рабочую в
+`state/byedpi.json` и периодически перепроверяет, когда YouTube не играет.
+При сбое перебирает заново, не меняя системные настройки сети.
 
-Установка и автозапуск (делается с ПК установщиком):
-
-```bash
-python3 installer/petrovich_install.py --transport ssh --ssh-host station byedpi
-# затем в config.toml:
-# [tools] youtube_proxy = "socks5h://127.0.0.1:1080"
-```
-
-Стратегия по умолчанию — `-d1 -s1+s -d1+s -s3+s -d6+s -s12+s -d14+s -s20+s -d24+s -s30+s -a1`. Если
-провайдер её ломает, подберите другую (`--split 1+s --disorder 3+s`,
-`--fake -1 --ttl 8`) и переустановите:
-
-```bash
-python3 installer/petrovich_install.py --ssh-host station byedpi \
-  --args '--split 1+s --disorder 3+s'
-```
+Если `tools.youtube_proxy` задан явно, он имеет приоритет: встроенный
+ByeDPI не запускается. Это оставляет возможность использовать внешний
+SOCKS5/HTTP-прокси или Hysteria.
 
 Проверка без звука (разрешение, HLS/DASH, декодирование первого пакета):
 
@@ -287,12 +301,12 @@ python3 installer/petrovich_install.py --ssh-host station byedpi \
   --youtube-play 'ссылка или запрос'
 ```
 
-Если byedpi не запущен или стратегия не подходит, команда вернёт ошибку
-YouTube/HTTP, а не тишину. `--youtube-test` полезен и для проверки прокси:
-он печатает, используется ли `tools.youtube_proxy`.
+Если встроенный ByeDPI не подобрал стратегию или заданный внешний прокси не
+работает, команда вернёт ошибку YouTube/HTTP, а не тишину. `--youtube-test`
+печатает, какой прокси используется.
 
 Перед ответом «включаю» демон скачивает и декодирует первый сегмент (HLS)
 или первый пакет (DASH). Если медиахост `googlevideo.com` недоступен,
-инструмент вернёт ошибку, а не включит тишину. Некоторым провайдерам недостаточно byedpi: они режут сам
-`googlevideo.com` по SNI. В этом случае укажите в `youtube_proxy` рабочий
-SOCKS5/HTTP-прокси (подойдёт и локальный VPN-туннель).
+инструмент вернёт ошибку, а не включит тишину. Если провайдер режет сам
+`googlevideo.com` по SNI и встроенные стратегии не помогают, укажите в
+`youtube_proxy` рабочий SOCKS5/HTTP-прокси (подойдёт локальный VPN-туннель).

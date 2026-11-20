@@ -7,6 +7,15 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use url::Url;
 
+/// Текущие показатели для экрана и голосового ответа.
+#[derive(Clone, Debug)]
+pub struct WeatherNow {
+    pub temp_c: f32,
+    pub feels_like: Option<f32>,
+    pub code: i64,
+    pub summary: String,
+}
+
 #[derive(Clone)]
 pub struct Weather {
     client: reqwest::Client,
@@ -74,12 +83,25 @@ impl Weather {
         self
     }
 
+    pub fn has_default_location(&self) -> bool {
+        self.latitude.is_some() && self.longitude.is_some()
+    }
+
+    pub fn default_place(&self) -> &str {
+        &self.place
+    }
+
     pub async fn current(&self) -> Result<String> {
         self.current_at(None).await
     }
 
     /// Погода в указанном месте; без места — координаты из конфигурации.
     pub async fn current_at(&self, location: Option<&str>) -> Result<String> {
+        Ok(self.current_data_at(location).await?.summary)
+    }
+
+    /// То же, но с числами для индикатора.
+    pub async fn current_data_at(&self, location: Option<&str>) -> Result<WeatherNow> {
         let (lat, lon, place) = self.resolve(location).await?;
         self.fetch(lat, lon, &place).await
     }
@@ -137,7 +159,7 @@ impl Weather {
         Ok((lat, lon, place))
     }
 
-    async fn fetch(&self, latitude: f64, longitude: f64, place: &str) -> Result<String> {
+    async fn fetch(&self, latitude: f64, longitude: f64, place: &str) -> Result<WeatherNow> {
         let mut url = Url::parse(&self.url).context("weather_url")?;
         if !self.allow_private && url.scheme() != "https" {
             bail!("погода: нужен HTTPS");
@@ -169,7 +191,7 @@ impl Weather {
         Self::format(&v, place)
     }
 
-    fn format(v: &Value, place: &str) -> Result<String> {
+    fn format(v: &Value, place: &str) -> Result<WeatherNow> {
         let cur = v.get("current").context("погода: нет current")?;
         let num = |obj: &Value, key: &str| obj.get(key).and_then(Value::as_f64);
         let temp = num(cur, "temperature_2m").context("погода: нет температуры")?;
@@ -220,13 +242,18 @@ impl Weather {
             }
         }
         out.push('.');
-        Ok(out)
+        Ok(WeatherNow {
+            temp_c: temp as f32,
+            feels_like: feels.map(|f| f as f32),
+            code,
+            summary: out,
+        })
     }
 }
 
 /// «На улице», «сейчас», «здесь» — это не название места: берём координаты
 /// из конфигурации.
-fn is_generic_place(text: &str) -> bool {
+pub fn is_generic_place(text: &str) -> bool {
     matches!(
         text.trim().to_lowercase().as_str(),
         "" | "на улице"

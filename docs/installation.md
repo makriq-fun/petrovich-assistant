@@ -48,10 +48,12 @@ $EDITOR config.toml secrets.env
 - `[stt]`, `[llm]`, `[tts]` — провайдеры и ключи;
 - `[tools] weather_url` — погода; координаты задают место по умолчанию,
   без них работает поиск по названному городу;
-- `[tools] search_url` — SearXNG JSON или DuckDuckGo HTML, если нужен поиск;
-  `search_api_key_env` — ключ Tavily, если поиск идёт через Tavily;
+- `[tools] search_api_key_env` — имя переменной с ключом Tavily; без ключа
+  `web_search` недоступен;
 - `[tools] nightscout_url` — Nightscout для вопроса о сахаре; при закрытом
   чтении `nightscout_token_env` — имя токена в `secrets.env`;
+- `[spotify]`/`[modules] spotify` — встроенный Spotify Connect; без логина
+  или access token модуль не запускается;
 - `[tools] sandbox_command` — только если действительно нужен `run_code`;
 - `[hardware] model = "auto"`.
 
@@ -102,7 +104,9 @@ python3 installer/petrovich_install.py --ssh-host station --dry-run install
    `/data/petrovich/enabled`, штатный стек не запускается;
 7. запускает супервизор и ждёт `--check-config` и живой pid;
 8. при неудаче переключается на предыдущий релиз; если его нет — снимает
-   `enabled` и оставляет Алису выключенной.
+   `enabled` и оставляет Алису выключенной;
+9. после успешного health-check оставляет текущий релиз, один предыдущий и
+   три последних backup, остальные удаляет.
 
 Если `--wakeword-model` не задан, ставится встроенная `petrovich.tflite` из
 `assets/wakeword/`, а `[wakeword] model` в конфиге переписывается на неё.

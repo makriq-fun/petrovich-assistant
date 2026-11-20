@@ -48,9 +48,7 @@ impl Alsa {
         let mut errors = Vec::new();
         let mut lib = None;
         let candidates: Vec<String> = match path {
-            Some(p) if !p.as_os_str().is_empty() => {
-                vec![p.display().to_string(), "libasound.so.2".into()]
-            }
+            Some(p) if !p.as_os_str().is_empty() => vec![p.display().to_string()],
             _ => vec!["libasound.so.2".into()],
         };
         for name in candidates {

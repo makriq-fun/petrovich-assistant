@@ -1,13 +1,14 @@
 //! Один ход диалога: запись уже собрана VAD. Здесь STT, LLM с инструментами,
 //! потоковый TTS и воспроизведение. Задача прерывается abort() при бардж-ине.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use futures_util::StreamExt;
-use petrovich_core::chat::{ChatMessage, LlmEvent, ToolCall};
+use petrovich_core::chat::{ChatMessage, LlmEvent, Role, ToolCall};
 use petrovich_core::config::TtsFormat;
 use petrovich_core::events::UiEvent;
 use petrovich_core::text::SentenceChunker;
@@ -32,12 +33,26 @@ pub struct TurnContext {
     pub playback: PlaybackHandle,
     pub ui: UnboundedSender<UiEvent>,
     pub max_tool_rounds: u8,
+    /// Отмена текущего поручения: ставится демоном при бардж-ине, кнопке и
+    /// слове «стоп». Проверяется между раундами и вызовами инструментов.
+    pub cancelled: Arc<AtomicBool>,
 }
 
 pub struct TurnOutcome {
     pub messages: Vec<ChatMessage>,
     pub spoken: String,
     pub control: Option<ControlAction>,
+}
+
+/// Отменяет оставшиеся инструменты при разрушении хода.
+struct AbortOnDrop(Vec<tokio::task::AbortHandle>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.abort();
+        }
+    }
 }
 
 /// Выполняет распознавание и ответ. `system_and_history` — снимок истории
@@ -63,6 +78,9 @@ pub async fn run_turn(
             control: Some(ControlAction::StopSpeaking),
         });
     }
+    if ctx.cancelled.load(Ordering::Acquire) {
+        bail!("поручение отменено");
+    }
     let mut messages = system_and_history;
     messages.extend(new_messages.clone());
     let tools = ctx.tools.definitions();
@@ -74,8 +92,14 @@ pub async fn run_turn(
     // Одинаковые вызовы в одном ходе не выполняем повторно: модель этим
     // забивает лимит раундов и обрывает ответ.
     let mut seen_calls = std::collections::HashSet::new();
+    // Музыка приглушается только когда ассистент действительно начинает
+    // говорить, и возвращается после ответа, ошибки или отмены.
+    let mut duck: Option<petrovich_tools::MusicDuck> = None;
     let final_round = ctx.max_tool_rounds.saturating_add(1);
     for round in 0..=final_round {
+        if ctx.cancelled.load(Ordering::Acquire) {
+            bail!("поручение отменено");
+        }
         // После лимита ходов всё равно просим итог, но уже без схем
         // инструментов: иначе модель повторяет вызовы, а пользователь
         // остаётся без ответа.
@@ -88,9 +112,14 @@ pub async fn run_turn(
         } else {
             tools.clone()
         };
+        let round_messages = if force_final {
+            final_round_messages(&messages)
+        } else {
+            messages.clone()
+        };
         let mut rx = ctx
             .llm
-            .chat_stream(messages.clone(), round_tools)
+            .chat_stream(round_messages, round_tools)
             .await
             .context("LLM")?;
         let mut chunker = SentenceChunker::default();
@@ -102,6 +131,9 @@ pub async fn run_turn(
                     let mut sentences = Vec::new();
                     chunker.push(&t, &mut sentences);
                     for s in sentences {
+                        if duck.is_none() {
+                            duck = Some(ctx.tools.duck_music());
+                        }
                         let d = speak_sentence(ctx, &s).await?;
                         audio_total += d;
                         if !d.is_zero() {
@@ -121,6 +153,9 @@ pub async fn run_turn(
             }
         }
         if let Some(s) = chunker.flush() {
+            if duck.is_none() {
+                duck = Some(ctx.tools.duck_music());
+            }
             let d = speak_sentence(ctx, &s).await?;
             audio_total += d;
             if !d.is_zero() {
@@ -133,6 +168,9 @@ pub async fn run_turn(
         }
         if chunker.code_seen() && !round_spoken.contains("Код не пишу.") {
             let refusal = "Код не пишу.";
+            if duck.is_none() {
+                duck = Some(ctx.tools.duck_music());
+            }
             let d = speak_sentence(ctx, refusal).await?;
             audio_total += d;
             if !d.is_zero() {
@@ -162,9 +200,15 @@ pub async fn run_turn(
                 };
                 messages.push(assistant.clone());
                 new_messages.push(assistant);
+                // Независимые вызовы выполняются параллельно: поиск,
+                // погода, таймер и будильник не должны ждать друг друга.
+                // Ошибка одного не мешает остальным; результат каждого
+                // возвращается модели отдельным сообщением.
+                let mut jobs: Vec<
+                    Option<tokio::task::JoinHandle<Result<petrovich_tools::ToolResult>>>,
+                > = Vec::with_capacity(calls.len());
+                let mut skipped = Vec::with_capacity(calls.len());
                 for call in &calls {
-                    // Громкость/таймер можно вызвать повторно с теми же
-                    // аргументами; дедуплицируем только сетевые запросы.
                     let dedup = matches!(
                         call.function.name.as_str(),
                         "youtube" | "web_search" | "web_fetch" | "weather" | "sugar"
@@ -172,32 +216,58 @@ pub async fn run_turn(
                     let first = !dedup
                         || seen_calls
                             .insert((call.function.name.clone(), call.function.arguments.clone()));
-                    let (content, ctrl) = if !first {
-                        (
-                            "Повторный вызов с теми же аргументами проигнорирован.".to_owned(),
-                            None,
-                        )
+                    if first {
+                        let tools = ctx.tools.clone();
+                        let name = call.function.name.clone();
+                        let args = call.function.arguments.clone();
+                        jobs.push(Some(tokio::spawn(async move {
+                            tools.execute(&name, &args).await
+                        })));
+                        skipped.push(None);
                     } else {
-                        match ctx
-                            .tools
-                            .execute(&call.function.name, &call.function.arguments)
-                            .await
-                        {
-                            Ok(r) => (r.content, r.control),
-                            Err(e) => (format!("Ошибка инструмента: {e:#}"), None),
+                        jobs.push(None);
+                        skipped.push(Some(
+                            "Повторный вызов с теми же аргументами проигнорирован.".to_owned(),
+                        ));
+                    }
+                }
+                // Отмена хода (бардж-ин, кнопка, «стоп») должна обрывать
+                // уже запущенные инструменты, а не оставлять их работать.
+                let _abort_guard = AbortOnDrop(
+                    jobs.iter()
+                        .flatten()
+                        .map(tokio::task::JoinHandle::abort_handle)
+                        .collect(),
+                );
+                let mut results = Vec::with_capacity(calls.len());
+                for (call, job) in calls.iter().zip(jobs) {
+                    let outcome = match (job, skipped.remove(0)) {
+                        (Some(handle), _) => match handle.await {
+                            Ok(Ok(r)) => (r.content, r.control),
+                            Ok(Err(e)) => (format!("Ошибка инструмента: {e:#}"), None),
+                            Err(e) if e.is_cancelled() => ("Выполнение отменено.".to_owned(), None),
+                            Err(e) => (format!("Ошибка инструмента: {e}"), None),
+                        },
+                        (None, reason) => {
+                            (reason.unwrap_or_else(|| "Вызов пропущен.".to_owned()), None)
                         }
                     };
+                    results.push((call.id.clone(), call.function.name.clone(), outcome));
+                }
+                for (id, name, (content, ctrl)) in results {
                     tracing::info!(
-                        "инструмент {}: {}",
-                        call.function.name,
+                        "инструмент {name}: {}",
                         content.chars().take(300).collect::<String>()
                     );
                     if control.is_none() {
                         control = ctrl;
                     }
-                    let msg = ChatMessage::tool_result(&call.id, &call.function.name, content);
+                    let msg = ChatMessage::tool_result(&id, &name, content);
                     messages.push(msg.clone());
                     new_messages.push(msg);
+                }
+                if ctx.cancelled.load(Ordering::Acquire) {
+                    bail!("поручение отменено");
                 }
                 if control.is_some() {
                     break;
@@ -229,9 +299,42 @@ pub async fn run_turn(
     })
 }
 
+/// История для финального раунда без схем инструментов. `tool_calls` и
+/// `role=tool` из неё убираются: gpt-oss на Groq видит прошлые вызовы и
+/// пытается вызвать инструмент, которого в запросе нет, — приходит
+/// `tool_use_failed` внутри SSE, и ход диалога обрывается ошибкой.
+/// Результаты инструментов сохраняем обычным текстом, иначе модели не из
+/// чего собрать ответ.
+fn final_round_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out = Vec::with_capacity(messages.len() + 1);
+    for msg in messages {
+        match msg.role {
+            Role::Tool => {
+                let name = msg.name.as_deref().unwrap_or("инструмент");
+                out.push(ChatMessage::user(format!(
+                    "Результат инструмента {name}: {}",
+                    msg.content.as_deref().unwrap_or_default()
+                )));
+            }
+            Role::Assistant if msg.tool_calls.is_some() => {
+                if let Some(text) = msg.content.as_deref().filter(|t| !t.trim().is_empty()) {
+                    out.push(ChatMessage::assistant(text));
+                }
+            }
+            _ => out.push(msg.clone()),
+        }
+    }
+    out.push(ChatMessage::user(
+        "Инструменты больше недоступны. Ответь на вопрос пользователя по уже полученным \
+         результатам, не вызывая инструменты.",
+    ));
+    out
+}
+
 /// Озвучивает готовый текст (например, сработавший таймер). Следующая фраза
 /// синтезируется, пока играет текущая; готовые фразы берутся из кэша.
 pub async fn speak_text(ctx: &TurnContext, text: &str) -> Result<()> {
+    let _duck = ctx.tools.duck_music();
     let mut chunker = SentenceChunker::default();
     let mut sentences = Vec::new();
     chunker.push(text, &mut sentences);
@@ -456,7 +559,7 @@ mod integration_tests {
     use petrovich_core::Secrets;
     use petrovich_providers::tts::AudioStream;
     use petrovich_tools::{AlarmManager, TimerManager, ToolContext, Web};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -571,6 +674,69 @@ mod integration_tests {
         format!("http://{addr}")
     }
 
+    /// Читает заголовки и тело HTTP-запроса.
+    async fn read_http_request(sock: &mut tokio::net::TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let header_end = loop {
+            let n = sock.read(&mut tmp).await.unwrap_or(0);
+            if n == 0 {
+                return String::new();
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break p + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
+        let len: usize = headers
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        while buf.len() < header_end + len {
+            let n = sock.read(&mut tmp).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        String::from_utf8_lossy(&buf[header_end..(header_end + len).min(buf.len())]).into_owned()
+    }
+
+    /// Отвечает на запросы по порядку; если схемы инструментов нет, а в
+    /// истории остались `tool_calls`/`role=tool`, возвращает ту же ошибку,
+    /// что и Groq: HTTP 200 с `tool_use_failed` внутри SSE.
+    async fn serve_tool_history_check(
+        responses: Vec<&'static str>,
+    ) -> (String, mpsc::UnboundedReceiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            for body in responses {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let req = read_http_request(&mut sock).await;
+                let _ = tx.send(req.clone());
+                let has_tools = req.contains("\"tools\"");
+                let has_history =
+                    req.contains("\"tool_calls\"") || req.contains("\"role\":\"tool\"");
+                let payload = if !has_tools && has_history {
+                    "event: error\ndata: {\"error\":{\"message\":\"Tool choice is none, but model called a tool\",\"code\":\"tool_use_failed\",\"status_code\":400}}\n\n"
+                } else {
+                    body
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
     fn ctx(url: String) -> TurnContext {
         let cfg = LlmConfig {
             base_url: url,
@@ -609,6 +775,7 @@ mod integration_tests {
             playback: PlaybackHandle::detached(),
             ui,
             max_tool_rounds: 2,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -665,6 +832,31 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn failed_tool_does_not_cancel_siblings() {
+        let calls = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"time\",\"arguments\":\"{}\"}},{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"nope\",\"arguments\":\"{}\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+        let answer =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Готово.\"}}]}\n\ndata: [DONE]\n\n";
+        let url = serve(vec![calls, answer]).await;
+        let c = ctx(url);
+        let out = run_turn(&c, vec![ChatMessage::system("s")], vec![0; 1600])
+            .await
+            .unwrap();
+        assert!(out.spoken.contains("Готово"));
+        let tool_results: Vec<_> = out
+            .messages
+            .iter()
+            .filter(|m| m.role == petrovich_core::chat::Role::Tool)
+            .collect();
+        assert_eq!(tool_results.len(), 2);
+        assert!(tool_results
+            .iter()
+            .any(|m| m.content.as_deref().is_some_and(|s| s.contains(":"))));
+        assert!(tool_results
+            .iter()
+            .any(|m| m.content.as_deref().is_some_and(|s| s.contains("запрещён"))));
+    }
+
+    #[tokio::test]
     async fn tool_limit_still_answers() {
         let call = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"time\",\"arguments\":\"{}\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
         let url = serve(vec![
@@ -678,5 +870,29 @@ mod integration_tests {
             .await
             .unwrap();
         assert!(out.spoken.contains("поздно"));
+    }
+
+    #[tokio::test]
+    async fn final_round_drops_tool_history() {
+        let call = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"time\",\"arguments\":\"{}\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+        let answer =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Уже поздно.\"}}]}\n\ndata: [DONE]\n\n";
+        // max_tool_rounds = 2: три раунда с инструментами и финальный без них.
+        let (url, mut seen) = serve_tool_history_check(vec![call, call, call, answer]).await;
+        let c = ctx(url);
+        let out = run_turn(&c, vec![ChatMessage::system("s")], vec![0; 1600])
+            .await
+            .unwrap();
+        assert!(out.spoken.contains("поздно"));
+        let mut bodies = Vec::new();
+        while let Ok(body) = seen.try_recv() {
+            bodies.push(body);
+        }
+        assert_eq!(bodies.len(), 4);
+        assert!(bodies[0].contains("\"tools\""));
+        assert!(!bodies[3].contains("\"tools\""));
+        assert!(!bodies[3].contains("\"tool_calls\""));
+        assert!(!bodies[3].contains("\"role\":\"tool\""));
+        assert!(bodies[3].contains("Результат инструмента time"));
     }
 }

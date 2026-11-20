@@ -540,8 +540,8 @@ fn search_test(loaded: &petrovich_core::LoadedConfig, query: &str) -> Result<()>
         .get(&t.search_api_key_env)
         .map(str::to_owned)
         .unwrap_or_default();
-    if t.search_url.is_empty() && search_key.is_empty() {
-        anyhow::bail!("поиск не настроен: нужен search_url или ключ Tavily");
+    if search_key.is_empty() {
+        anyhow::bail!("поиск не настроен: нужен ключ Tavily в secrets.env");
     }
     let web = petrovich_tools::Web::with_search_proxy(
         t.web_timeout_ms,
@@ -551,7 +551,7 @@ fn search_test(loaded: &petrovich_core::LoadedConfig, query: &str) -> Result<()>
     )?
     .with_search_api(search_key);
     let rt = tokio::runtime::Runtime::new()?;
-    let hits = rt.block_on(web.search(&t.search_url, query))?;
+    let hits = rt.block_on(web.search(query))?;
     if hits.is_empty() {
         println!("Ничего не найдено.");
         return Ok(());

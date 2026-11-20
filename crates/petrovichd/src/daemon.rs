@@ -1,5 +1,6 @@
 //! Жизненный цикл демона и голосовой автомат.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -25,7 +26,9 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::byedpi::ByeDpi;
 use crate::music::CommandMusic;
+use crate::spotify::Spotify;
 use crate::turn::{run_turn, speak_text, TurnContext, TurnOutcome};
 use crate::youtube::YouTubePlayer;
 
@@ -76,7 +79,11 @@ struct App {
     task: Option<JoinHandle<()>>,
     ui: mpsc::UnboundedSender<UiEvent>,
     playback: PlaybackHandle,
-    youtube: Arc<YouTubePlayer>,
+    youtube: Option<Arc<YouTubePlayer>>,
+    alarms: AlarmManager,
+    /// Звук до активации: «Петрович, какая погода?» без паузы после имени.
+    pre_roll: VecDeque<Vec<i16>>,
+    pre_roll_samples: usize,
     volume: Arc<dyn VolumeControl>,
     music: Option<Arc<dyn MusicControl>>,
     chime: Arc<LocalChime>,
@@ -90,6 +97,8 @@ struct App {
     task_tx: mpsc::Sender<TurnEvent>,
     started: Instant,
     volume_step: i32,
+    /// Будильник, который сейчас звонит: «стоп» его выключает.
+    ringing_alarm: Option<u64>,
 }
 
 pub async fn run(loaded: LoadedConfig) -> Result<()> {
@@ -148,14 +157,26 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel();
     let (announce_tx, mut announce_rx) = mpsc::channel(4);
     let (alarm_tx, mut alarm_rx) = mpsc::channel(4);
-    let timers = TimerManager::new(ui_tx.clone(), announce_tx);
-    let alarms = AlarmManager::new(ui_tx.clone(), alarm_tx);
+    let timers = TimerManager::new(ui_tx.clone(), announce_tx).with_state(cfg.timer_state_path());
+    let alarms = AlarmManager::with_config(
+        cfg.alarms.clone(),
+        Some(cfg.alarm_state_path()),
+        ui_tx.clone(),
+        alarm_tx,
+    );
+    timers.restore().await;
+    alarms.restore().await;
     let chime = Arc::new(LocalChime::new(playback.clone()));
-    let search_key = loaded
-        .secrets
-        .get(&cfg.tools.search_api_key_env)
-        .map(str::to_owned)
-        .unwrap_or_default();
+    let search_key = if cfg.modules.web_search {
+        loaded
+            .secrets
+            .get(&cfg.tools.search_api_key_env)
+            .map(str::to_owned)
+            .unwrap_or_default()
+    } else {
+        tracing::info!("веб-поиск выключен в конфигурации");
+        String::new()
+    };
     let web = Web::with_search_proxy(
         cfg.tools.web_timeout_ms,
         cfg.tools.web_max_bytes,
@@ -163,8 +184,42 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         &cfg.tools.search_proxy,
     )?
     .with_search_api(search_key);
-    let music: Option<Arc<dyn MusicControl>> = CommandMusic::new(cfg.tools.music_command.clone())
-        .map(|m| Arc::new(m) as Arc<dyn MusicControl>);
+    let spotify = if cfg.modules.spotify {
+        let mut scfg = cfg.spotify.clone();
+        if scfg.cache_dir.is_none() {
+            scfg.cache_dir = Some(cfg.spotify_cache_dir());
+        }
+        match Spotify::start(
+            &scfg,
+            &loaded.secrets,
+            cfg.audio.playback_pcm.clone(),
+            ui_tx.clone(),
+            Some(cfg.daemon.state_dir.join("spotify.json")),
+        )
+        .await
+        {
+            Ok(Some(s)) => {
+                tracing::info!("Spotify Connect: «{}»", scfg.device_name);
+                Some(s)
+            }
+            Ok(None) => {
+                tracing::warn!("Spotify включён, но нет учётных данных; модуль не запущен");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Spotify недоступен: {e:#}");
+                None
+            }
+        }
+    } else {
+        tracing::info!("Spotify выключен в конфигурации");
+        None
+    };
+    let music: Option<Arc<dyn MusicControl>> = match &spotify {
+        Some(s) => Some(s.clone() as Arc<dyn MusicControl>),
+        None => CommandMusic::new(cfg.tools.music_command.clone())
+            .map(|m| Arc::new(m) as Arc<dyn MusicControl>),
+    };
     let app_music = music.clone();
     let commands = if cfg.commands.enabled {
         match CommandSpotter::open(&cfg.commands.model) {
@@ -183,7 +238,63 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     } else {
         None
     };
-    let youtube = YouTubePlayer::new(&cfg.tools, cfg.audio.playback_pcm.clone())?;
+    let youtube_on = cfg.modules.youtube && cfg.tools.enabled.iter().any(|t| t == "youtube");
+    let mut tools_cfg = cfg.tools.clone();
+    let byedpi = if youtube_on && cfg.modules.byedpi && cfg.tools.youtube_proxy.trim().is_empty() {
+        match ByeDpi::start(&cfg.byedpi, cfg.byedpi_state_path()).await {
+            Ok(b) => Some(b),
+            Err(e) => {
+                tracing::warn!("ByeDPI недоступен: {e:#}");
+                None
+            }
+        }
+    } else {
+        if cfg.modules.byedpi && !cfg.tools.youtube_proxy.trim().is_empty() {
+            tracing::info!("YouTube: внешний прокси важнее встроенного ByeDPI");
+        }
+        None
+    };
+    if let Some(b) = &byedpi {
+        tools_cfg.youtube_proxy = b.proxy_url();
+    }
+    let youtube = if youtube_on {
+        Some(
+            YouTubePlayer::new(&tools_cfg, cfg.audio.playback_pcm.clone())?
+                .with_state_path(cfg.youtube_state_path()),
+        )
+    } else {
+        tracing::info!("YouTube выключен в конфигурации");
+        None
+    };
+    if let (Some(bp), Some(yt)) = (byedpi.clone(), youtube.clone()) {
+        let tools = tools_cfg.clone();
+        let video = bp.probe_video().to_owned();
+        let bp_probe = bp.clone();
+        let busy = Arc::new(move || yt.is_playing());
+        tokio::spawn(async move {
+            let probe = {
+                let tools = tools.clone();
+                let video = video.clone();
+                move || {
+                    let tools = tools.clone();
+                    let video = video.clone();
+                    async move { crate::youtube::check(&tools, &video).await }
+                }
+            };
+            match bp_probe.probe(probe.clone()).await {
+                Ok(label) => tracing::info!("ByeDPI: выбрана стратегия «{label}»"),
+                Err(e) => tracing::warn!("ByeDPI: проверка не удалась: {e:#}"),
+            }
+            let video = bp_probe.probe_video().to_owned();
+            let tools = tools.clone();
+            let probe = move || {
+                let tools = tools.clone();
+                let video = video.clone();
+                async move { crate::youtube::check(&tools, &video).await }
+            };
+            bp_probe.refresh_loop(probe, busy).await;
+        });
+    }
     let memory = if cfg.memory.enabled {
         let path = cfg.memory_path();
         let memory = Memory::load(
@@ -197,6 +308,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     } else {
         None
     };
+    let app_alarms = alarms.clone();
     let mut tools = ToolContext::new(
         volume.clone(),
         music,
@@ -205,11 +317,13 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         web,
         chime.clone(),
         ui_tx.clone(),
-        cfg.tools.clone(),
+        tools_cfg.clone(),
         cfg.hardware.volume_step,
-    )
-    .with_youtube(youtube.clone());
-    if !cfg.tools.weather_url.is_empty() {
+    );
+    if let Some(yt) = &youtube {
+        tools = tools.with_youtube(yt.clone());
+    }
+    if cfg.modules.weather && !cfg.tools.weather_url.is_empty() {
         let weather = match (cfg.tools.weather_latitude, cfg.tools.weather_longitude) {
             (Some(lat), Some(lon)) => Weather::new(
                 cfg.tools.weather_url.clone(),
@@ -227,7 +341,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         };
         tools = tools.with_weather(weather.with_geocoding(cfg.tools.weather_geocoding_url.clone()));
     }
-    if !cfg.tools.nightscout_url.is_empty() {
+    if cfg.modules.nightscout && !cfg.tools.nightscout_url.is_empty() {
         let token = loaded
             .secrets
             .get(&cfg.tools.nightscout_token_env)
@@ -248,7 +362,19 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     if let Some(memory) = &memory {
         tools = tools.with_memory(memory.clone());
     }
-    let hardware = petrovich_hw::start(profile, &cfg.hardware, ui_rx);
+    let mut hw_cfg = cfg.hardware.clone();
+    let mut indication = cfg.indication.clone();
+    if !cfg.modules.display {
+        hw_cfg.leds = false;
+        hw_cfg.clock = false;
+        hw_cfg.auto_brightness = false;
+        indication.weather = false;
+        indication.glucose = false;
+        indication.playback = false;
+        indication.timer = false;
+        tracing::info!("экран и светодиоды выключены в конфигурации");
+    }
+    let hardware = petrovich_hw::start(profile, &hw_cfg, &indication, ui_rx);
     let mut buttons = hardware.buttons;
 
     let turn = TurnContext {
@@ -260,11 +386,15 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         playback: playback.clone(),
         ui: ui_tx.clone(),
         max_tool_rounds: cfg.dialog.max_tool_rounds,
+        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let vad = petrovich_audio::vad::Vad::new(
         cfg.audio.sample_rate,
         cfg.vad.min_speech_ms,
         cfg.vad.silence_ms,
+        cfg.vad.short_silence_ms,
+        cfg.vad.short_utterance_ms,
+        cfg.vad.resume_pause_ms,
         cfg.vad.max_utterance_ms,
         cfg.vad.energy_margin_db,
         cfg.vad.pre_roll_ms,
@@ -290,6 +420,10 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         ui: ui_tx,
         playback,
         youtube,
+        alarms: app_alarms,
+        pre_roll: VecDeque::new(),
+        pre_roll_samples: (cfg.audio.sample_rate as u64 * cfg.vad.activation_pre_roll_ms / 1000)
+            as usize,
         volume,
         music: app_music,
         chime,
@@ -303,10 +437,13 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         task_tx,
         started: Instant::now(),
         volume_step: cfg.hardware.volume_step,
+        ringing_alarm: None,
     };
     app.enter_idle();
 
     let mut capture = capture;
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sigterm = signal(SignalKind::terminate()).context("SIGTERM")?;
     let shutdown = async move {
         tokio::select! {
@@ -335,6 +472,9 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
                 tracing::info!("остановка по сигналу");
                 break;
             }
+            _ = ticker.tick() => {
+                app.tick();
+            }
             _ = follow => {
                 if app.mode == Mode::Listening {
                     tracing::info!("ожидание речи истекло");
@@ -360,34 +500,57 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
                     let _ = app.chime.play(ChimeSound::Timer);
                     let ctx = app.turn.clone();
                     let yt = app.youtube.clone();
+                    let music = app.music.clone();
                     let text = format!("Таймер {} сработал.", f.label);
                     tokio::spawn(async move {
-                        yt.duck();
+                        if let Some(m) = &music {
+                            m.duck();
+                        }
+                        if let Some(yt) = &yt {
+                            yt.duck();
+                        }
                         tokio::time::sleep(Duration::from_millis(1100)).await;
                         if let Err(e) = speak_text(&ctx, &text).await {
                             tracing::warn!("таймер: озвучка: {e:#}");
                         }
-                        yt.unduck();
+                        if let Some(yt) = &yt {
+                            yt.unduck();
+                        }
+                        if let Some(m) = &music {
+                            m.unduck();
+                        }
                     });
                 }
             }
             alarm = alarm_rx.recv() => {
                 if let Some(a) = alarm {
                     let _ = app.chime.play(ChimeSound::Alarm);
+                    app.ringing_alarm = Some(a.id);
                     let ctx = app.turn.clone();
                     let yt = app.youtube.clone();
+                    let music = app.music.clone();
                     let text = if a.label.is_empty() || a.label == "будильник" {
                         format!("Будильник на {:02}:{:02}.", a.hour, a.minute)
                     } else {
                         format!("Будильник «{}» сработал.", a.label)
                     };
                     tokio::spawn(async move {
-                        yt.duck();
+                        if let Some(m) = &music {
+                            m.duck();
+                        }
+                        if let Some(yt) = &yt {
+                            yt.duck();
+                        }
                         tokio::time::sleep(Duration::from_millis(1100)).await;
                         if let Err(e) = speak_text(&ctx, &text).await {
                             tracing::warn!("будильник: озвучка: {e:#}");
                         }
-                        yt.unduck();
+                        if let Some(yt) = &yt {
+                            yt.unduck();
+                        }
+                        if let Some(m) = &music {
+                            m.unduck();
+                        }
                     });
                 }
             }
@@ -400,15 +563,52 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     }
     app.abort_turn();
     app.playback.stop();
-    app.youtube.stop_playback();
+    if let Some(yt) = &app.youtube {
+        yt.stop_playback();
+    }
+    if let Some(music) = &app.music {
+        if music.is_playing().unwrap_or(false) {
+            let _ = music.pause();
+        }
+    }
     let _ = std::fs::remove_file(&pid);
     Ok(())
 }
 
 impl App {
+    /// Раз в секунду обновляет экран позицией воспроизведения. Событие
+    /// держится `indication.hold_s`, поэтому без обновления индикатор
+    /// вернулся бы к часам во время фильма.
+    fn tick(&self) {
+        if self.playback.is_playing() {
+            return;
+        }
+        if let Some(yt) = &self.youtube {
+            if let Some((pos, dur)) = yt.position_now() {
+                let status = yt.status_text().unwrap_or_default();
+                let title = status
+                    .split_once(':')
+                    .map(|(_, t)| t.trim())
+                    .unwrap_or(status.as_str())
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .to_owned();
+                let _ = self.ui.send(UiEvent::Playback {
+                    playing: yt.is_playing(),
+                    title,
+                    position_s: pos,
+                    duration_s: dur,
+                });
+            }
+        }
+    }
+
     fn enter_idle(&mut self) {
         self.mode = Mode::Idle;
-        self.youtube.unduck();
+        if let Some(yt) = &self.youtube {
+            yt.unduck();
+        }
         self.follow_deadline = None;
         self.hard_deadline = None;
         self.vad.reset_utterance();
@@ -419,8 +619,8 @@ impl App {
         self.mode = Mode::Listening;
         self.vad.reset_utterance();
         if follow_up {
-            // Не слушаем хвост собственной озвучки.
-            self.ignore_until = tokio::time::Instant::now() + Duration::from_millis(400);
+            // Хвост озвучки уже слит; 40 мс гасят щелчок, не съедая начало фразы.
+            self.ignore_until = tokio::time::Instant::now() + Duration::from_millis(40);
         }
         let ms = if follow_up {
             self.dialog.follow_up_ms
@@ -453,13 +653,51 @@ impl App {
             return;
         }
         tracing::info!("активация: начинаю слушать");
-        self.youtube.duck();
+        if let Some(yt) = &self.youtube {
+            yt.duck();
+        }
         let _ = self.ui.send(UiEvent::Notice(UiNotice::Listening));
         if self.dialog.wake_chime {
             let _ = self.chime.play(ChimeSound::Listening);
-            self.ignore_until = tokio::time::Instant::now() + Duration::from_millis(200);
+            // Сигнал короткий; не отрезаем первые слоги сразу после «Петрович».
+            self.ignore_until = tokio::time::Instant::now() + Duration::from_millis(40);
         }
+        let buffered: Vec<Vec<i16>> = self.pre_roll.drain(..).collect();
         self.enter_listening(false);
+        for samples in buffered {
+            let was_in_speech = self.vad.in_speech();
+            let utts = self.vad.push(&samples);
+            if let Some(d) = listen_deadline(
+                tokio::time::Instant::now(),
+                self.vad.in_speech(),
+                was_in_speech,
+                self.hard_deadline,
+                self.max_utterance_ms,
+                self.dialog.follow_up_ms,
+            ) {
+                self.follow_deadline = Some(d);
+            }
+            if let Some(u) = utts.into_iter().next() {
+                tracing::info!("фраза из пре-ролла: {} мс, отправляю в STT", u.speech_ms);
+                self.start_turn(u.samples);
+                return;
+            }
+        }
+    }
+
+    fn remember_pre_roll(&mut self, samples: &[i16]) {
+        if self.pre_roll_samples == 0 {
+            return;
+        }
+        self.pre_roll.push_back(samples.to_vec());
+        let mut total: usize = self.pre_roll.iter().map(Vec::len).sum();
+        while total > self.pre_roll_samples {
+            if let Some(front) = self.pre_roll.pop_front() {
+                total = total.saturating_sub(front.len());
+            } else {
+                break;
+            }
+        }
     }
 
     fn on_block(&mut self, block: CaptureBlock) {
@@ -477,14 +715,21 @@ impl App {
                 // Во время TTS/сигналов не даём озвучке самой переключать
                 // трек или громкость. «Стоп» остаётся доступен — им и
                 // останавливают ассистента.
-                if self.playback.is_playing() && !matches!(command, Command::Stop) {
-                    tracing::debug!("быстрая команда {command:?}: пропускаю во время речи");
+                let always = matches!(
+                    command,
+                    Command::Stop | Command::VolumeUp | Command::VolumeDown
+                );
+                if self.playback.is_playing() && !always && !self.frontend.echo_cancelled() {
+                    tracing::debug!(
+                        "быстрая команда {command:?}: нет AEC, пропускаю во время речи"
+                    );
                     continue;
                 }
                 self.on_command(command);
             }
             match self.mode {
                 Mode::Idle => {
+                    self.remember_pre_roll(&frame.samples);
                     let hits = self
                         .wake
                         .as_mut()
@@ -570,7 +815,12 @@ impl App {
             inject_shared(memory, &mut snapshot);
         }
         tracing::info!("ход диалога: STT → LLM → TTS");
-        self.youtube.duck();
+        self.turn
+            .cancelled
+            .store(false, std::sync::atomic::Ordering::Release);
+        if let Some(yt) = &self.youtube {
+            yt.duck();
+        }
         self.mode = Mode::Thinking;
         self.follow_deadline = None;
         self.hard_deadline = None;
@@ -626,14 +876,20 @@ impl App {
                     Some(ControlAction::StopSpeaking) => {
                         self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
                         self.playback.stop();
-                        self.youtube.stop_playback();
+                        if let Some(yt) = &self.youtube {
+                            yt.stop_playback();
+                        }
                         self.enter_idle();
                     }
                     None => {
+                        // Без финального сигнала: он задерживал следующее
+                        // прослушивание и мог попасть в микрофон.
                         if !outcome.spoken.is_empty() {
-                            self.feedback(ChimeSound::Done, UiNotice::Done);
+                            let _ = self.ui.send(UiEvent::Notice(UiNotice::Done));
                         }
-                        self.youtube.unduck();
+                        if let Some(yt) = &self.youtube {
+                            yt.unduck();
+                        }
                         self.enter_listening(true);
                     }
                 }
@@ -643,7 +899,9 @@ impl App {
                 let _ = self.ui.send(UiEvent::Error(e.clone()));
                 let _ = self.ui.send(UiEvent::Notice(UiNotice::Error));
                 let _ = self.chime.play(ChimeSound::Error);
-                self.youtube.unduck();
+                if let Some(yt) = &self.youtube {
+                    yt.unduck();
+                }
                 self.enter_listening(true);
             }
         }
@@ -654,15 +912,22 @@ impl App {
         let yt = self.youtube.clone();
         let text = text.to_owned();
         tokio::spawn(async move {
-            yt.duck();
+            if let Some(yt) = &yt {
+                yt.duck();
+            }
             if let Err(e) = speak_text(&ctx, &text).await {
                 tracing::warn!("озвучка: {e:#}");
             }
-            yt.unduck();
+            if let Some(yt) = &yt {
+                yt.unduck();
+            }
         });
     }
 
     fn abort_turn(&mut self) {
+        self.turn
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
         self.generation = self.generation.wrapping_add(1);
         if let Some(t) = self.task.take() {
             t.abort();
@@ -706,7 +971,13 @@ impl App {
     /// Глобальная «пауза»/«стоп»/«хватит»: останавливает только то, что
     /// сейчас на переднем плане, а не всё сразу.
     fn global_stop(&mut self) {
-        let youtube_playing = self.youtube.is_playing();
+        if let Some(id) = self.ringing_alarm.take() {
+            let alarms = self.alarms.clone();
+            tokio::spawn(async move {
+                alarms.dismiss(id).await;
+            });
+        }
+        let youtube_playing = self.youtube.as_ref().is_some_and(|y| y.is_playing());
         let music_playing = self
             .music
             .as_ref()
@@ -732,9 +1003,11 @@ impl App {
                     }
                 }
                 if youtube_playing {
-                    if let Err(e) = self.youtube.pause_playback() {
-                        tracing::warn!("глобальная пауза: видео: {e:#}");
-                        failed = true;
+                    if let Some(yt) = &self.youtube {
+                        if let Err(e) = yt.pause_playback() {
+                            tracing::warn!("глобальная пауза: видео: {e:#}");
+                            failed = true;
+                        }
                     }
                 }
                 if !failed {
@@ -773,7 +1046,9 @@ impl App {
                 let _ = self.ui.send(UiEvent::Muted(m));
                 self.abort_turn();
                 self.playback.stop();
-                self.youtube.stop_playback();
+                if let Some(yt) = &self.youtube {
+                    yt.stop_playback();
+                }
                 if m {
                     tracing::info!("микрофоны выключены аппаратно");
                 } else {

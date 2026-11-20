@@ -343,6 +343,12 @@ impl AudioFrontend {
         self.vqe.is_some()
     }
 
+    /// Есть ли подавление собственного динамика: VQE прошивки или NLMS.
+    /// Быстрые команды во время озвучки принимаются только при нём.
+    pub fn echo_cancelled(&self) -> bool {
+        self.vqe.is_some() || self.aec.is_some()
+    }
+
     pub fn push(&mut self, block: &CaptureBlock) -> Vec<PcmFrame> {
         if block.channels != self.cfg.capture_channels as usize
             || block.rate != self.cfg.capture_rate

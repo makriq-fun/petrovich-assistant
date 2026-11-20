@@ -276,6 +276,55 @@ pub fn volume_colors(percent: i32) -> Vec<[u8; 3]> {
         .collect()
 }
 
+/// Погода: тёплые оттенки для положительной температуры, холодные — для
+/// отрицательной. Яркость мягко дышит.
+pub fn weather_colors(temp_c: f32, t: f32) -> Vec<[u8; 3]> {
+    let level = 0.35 + 0.65 * (0.5 + 0.5 * (t * 1.4).sin());
+    let warm = (temp_c.clamp(-30.0, 35.0) + 30.0) / 65.0;
+    let r = 0.9 * warm + 0.15 * (1.0 - warm);
+    let g = 0.55 + 0.15 * warm;
+    let b = 0.95 * (1.0 - warm) + 0.2 * warm;
+    vec![color(r * level, g * level, b * level); PIXELS]
+}
+
+/// Сахар: зелёный в норме, жёлтый при отклонении, красный при опасном
+/// значении. Тренд задаёт направление бегущего импульса.
+pub fn glucose_colors(mmol: f32, trend: &str, t: f32) -> Vec<[u8; 3]> {
+    let (r, g, b) = if mmol < 3.9 {
+        (0.95, 0.25, 0.05)
+    } else if mmol > 10.0 {
+        (1.0, 0.65, 0.05)
+    } else {
+        (0.1, 0.85, 0.35)
+    };
+    let forward = !trend.to_lowercase().contains("down") && !trend.contains('↓');
+    let pos = (t * 1.6 * PIXELS as f32) % PIXELS as f32;
+    let pos = if forward { pos } else { PIXELS as f32 - pos };
+    (0..PIXELS)
+        .map(|i| {
+            let d = (i as f32 - pos)
+                .abs()
+                .min(PIXELS as f32 - (i as f32 - pos).abs());
+            let level = (1.0 - d / 2.5).max(0.0);
+            color(r * level, g * level, b * level)
+        })
+        .collect()
+}
+
+/// Воспроизведение: зелёная «эквалайзерная» волна; пауза — ровный тусклый
+/// свет. Кольцо остаётся читаемым, но не отвлекает.
+pub fn playback_colors(playing: bool, t: f32) -> Vec<[u8; 3]> {
+    if !playing {
+        return vec![color(0.0, 0.12, 0.08); PIXELS];
+    }
+    (0..PIXELS)
+        .map(|i| {
+            let level = 0.18 + 0.82 * (0.5 + 0.5 * (t * 5.0 + i as f32 * 0.9).sin());
+            color(0.0, 0.75 * level, 0.35 * level)
+        })
+        .collect()
+}
+
 /// Пути для тестов и диагностики.
 pub fn led_paths(profile: &HardwareProfile, dir: &Path) -> Vec<PathBuf> {
     profile

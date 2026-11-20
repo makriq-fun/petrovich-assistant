@@ -68,7 +68,7 @@ wake_chime = true
 # Подтверждения «услышал», «готово», «остановлено», «диалог очищен».
 state_chimes = true
 response_timeout_ms = 180000
-max_tool_rounds = 2
+max_tool_rounds = 20
 
 [memory]
 # Долговременная память: факты, которые ассистент сохраняет инструментом
@@ -134,14 +134,10 @@ enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search",
 timeout_ms = 10000
 web_timeout_ms = 15000
 web_max_bytes = 1048576
-# Поиск: SearXNG JSON ("https://searx.example/search") или DuckDuckGo HTML
-# ("https://html.duckduckgo.com/html/"). Пусто — поиска нет.
-search_url = ""
-# Прокси только для поиска (если общий трафик идёт через другой прокси):
-# search_proxy = "socks5h://127.0.0.1:1080"
+# Поиск только через Tavily: ключ в secrets.env под этим именем.
+# Пусто — инструмент web_search недоступен.
 search_proxy = ""
-# Tavily: ключ в secrets.env под этим именем. Пусто — поиск через search_url.
-search_api_key_env = ""
+search_api_key_env = "TAVILY_API_KEY"
 # Только для отладки: разрешить web_fetch к частным адресам и HTTP.
 web_allow_private = false
 # Погода: Open-Meteo, ключ не нужен. Координаты задают место по умолчанию;
@@ -158,12 +154,61 @@ nightscout_token_env = ""
 # Песочница для run_code: пусто — инструмент выключен.
 sandbox_command = []
 sandbox_timeout_ms = 5000
-# Управление Spotiya; пусто — инструмент music выключен.
+# Устаревший внешний backend. При включённом Spotify не используется.
 # music_command = ["/data/opt/spotify-connect/spotiya", "--{action}"]
 music_command = []
-# YouTube только звуком. Прямое подключение часто блокируется; укажите
-# socks5h://127.0.0.1:1080 от byedpi/ciadpi. Пусто — без прокси.
+# YouTube только звуком. Пусто — встроенный ByeDPI; явный прокси имеет
+# приоритет. Глобальные настройки сети не меняются.
 youtube_proxy = ""
+
+[modules]
+# Отключённый модуль не инициализируется и не запускает фоновые задачи.
+youtube = true
+web_search = true
+weather = true
+nightscout = true
+display = true
+# Spotify Connect работает в petrovichd через librespot. Без логина/пароля
+# или access token из secrets.env модуль остаётся выключенным.
+spotify = true
+byedpi = true
+
+[spotify]
+device_name = "Петрович"
+username = ""
+# Секреты secrets.env: пароль или OAuth access token.
+password_env = "PETROVICH_SPOTIFY_PASSWORD"
+access_token_env = "PETROVICH_SPOTIFY_TOKEN"
+# Поиск идёт токеном Connect-сессии; client_id/секрет — только резерв,
+# если сессия авторизована access token без keymaster.
+client_id = ""
+client_secret_env = "PETROVICH_SPOTIFY_CLIENT_SECRET"
+market = "RU"
+# Пусто — <state_dir>/spotify. Кэш librespot ограничен 64 МБ.
+# cache_dir = "/data/petrovich/state/spotify"
+bitrate = 160
+search_limit = 10
+
+[byedpi]
+# 0 — свободный порт loopback; системные настройки не меняются.
+listen_port = 0
+# Пресеты в формате ByeByeDPI: -d split, -f fake, -o OOB, -s split.
+strategies = [
+  "-d 1 -s 1",
+  "-d 2 -s 2",
+  "-d 4 -s 4",
+  "-d 16 -s 16",
+  "-d 1 -o 1",
+  "-d 2 -o 2",
+  "-d -1 -f -1 -t 1",
+  "split_sni",
+]
+refresh_s = 300
+probe_timeout_ms = 4000
+# Проверка настоящего медиапотока, а не только доступности сайта.
+probe_video = "jNQXAC9IVRw"
+# Пусто — <state_dir>/byedpi.json.
+# state_path = "/data/petrovich/state/byedpi.json"
 
 [hardware]
 model = "auto"

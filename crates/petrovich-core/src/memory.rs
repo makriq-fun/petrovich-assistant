@@ -197,6 +197,66 @@ impl Memory {
         }
     }
 
+    /// Запоминает город как канонический факт «Город: X», заменяя прежний.
+    /// Используется погодой: при переезде старый город не должен остаться.
+    pub fn set_city(&mut self, city: &str) -> Result<bool, MemoryError> {
+        let city = normalize(city);
+        let city = extract_city(&city).unwrap_or(city);
+        let city = city
+            .trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != ' ')
+            .to_owned();
+        if city.is_empty() {
+            return Err(MemoryError::Empty);
+        }
+        let city = city.chars().take(80).collect::<String>();
+        let existing = self.city();
+        if existing
+            .as_deref()
+            .is_some_and(|c| c.to_lowercase() == city.to_lowercase())
+        {
+            return Ok(false);
+        }
+        let mut facts = self
+            .facts
+            .iter()
+            .filter(|f| !is_city_fact(f))
+            .cloned()
+            .collect::<Vec<_>>();
+        facts.push(format!("Город: {city}"));
+        while facts.len() > self.max_entries {
+            facts.remove(0);
+        }
+        while chars(&facts) > self.max_chars {
+            facts.remove(0);
+        }
+        self.persist(&facts)?;
+        self.facts = facts;
+        Ok(true)
+    }
+
+    /// Город из памяти. Понимает каноническую запись и распространённые
+    /// формулировки «живу в …», «переехал в …».
+    pub fn city(&self) -> Option<String> {
+        self.facts.iter().rev().find_map(|f| city_from_fact(f))
+    }
+
+    /// Удаляет прежние записи о городе (при переезде).
+    pub fn forget_city(&mut self) -> Result<usize, MemoryError> {
+        let before = self.facts.len();
+        let facts: Vec<String> = self
+            .facts
+            .iter()
+            .filter(|f| !is_city_fact(f))
+            .cloned()
+            .collect();
+        let removed = before - facts.len();
+        if removed > 0 {
+            self.persist(&facts)?;
+            self.facts = facts;
+        }
+        Ok(removed)
+    }
+
     fn sanitize(&mut self) {
         let mut facts = Vec::new();
         for raw in std::mem::take(&mut self.facts) {
@@ -260,6 +320,72 @@ pub fn inject_shared(memory: &SharedMemory, messages: &mut Vec<ChatMessage>) {
 
 fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Публичный разбор «Город: X» / «живу в X» — инструмент remember
+/// использует его, чтобы не завести второй формат города.
+pub fn extract_city(text: &str) -> Option<String> {
+    city_from_fact(text)
+}
+
+fn is_city_fact(fact: &str) -> bool {
+    city_from_fact(fact).is_some()
+}
+
+/// Достаёт город из факта памяти. Каноническая запись — «Город: X».
+fn city_from_fact(fact: &str) -> Option<String> {
+    let lower = fact.to_lowercase();
+    for prefix in [
+        "город:",
+        "город ",
+        "мой город:",
+        "мой город ",
+        "я живу в ",
+        "живу в ",
+        "я переехал в ",
+        "я переехала в ",
+        "переехал в ",
+        "переехала в ",
+    ] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            let _ = rest;
+            let city = fact
+                .chars()
+                .skip(prefix.chars().count())
+                .collect::<String>();
+            let city = clean_city(&city);
+            if !city.is_empty() {
+                return Some(city);
+            }
+        }
+    }
+    None
+}
+
+fn clean_city(raw: &str) -> String {
+    let raw = raw.trim().trim_end_matches(['.', ',', ';', '!', '?']);
+    // «живу в Москве», «переехал в Казань»: приводим типичные падежные
+    // окончания к именительному. Названия без окончания не трогаем.
+    let mut city = raw.to_owned();
+    let lower = city.to_lowercase();
+    let replacement = if lower.ends_with("ии") {
+        None
+    } else if lower.ends_with('е') {
+        Some('а')
+    } else if lower.ends_with('и') {
+        Some('ь')
+    } else if lower.ends_with('у') {
+        Some('а')
+    } else {
+        None
+    };
+    if let Some(last) = replacement {
+        if city.chars().count() > 4 {
+            city.pop();
+            city.push(last);
+        }
+    }
+    city.trim().to_owned()
 }
 
 fn chars(facts: &[String]) -> usize {
@@ -333,6 +459,24 @@ mod tests {
         assert!(fragment.contains("новый факт"));
         assert!(!fragment.contains("старый факт"));
         assert!(fragment.starts_with("Долговременная память"));
+    }
+
+    #[test]
+    fn city_is_remembered_and_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = store(dir.path(), 10, 1000, 500);
+        assert!(m.set_city("Москва").unwrap());
+        assert_eq!(m.city().as_deref(), Some("Москва"));
+        assert!(!m.set_city("москва").unwrap());
+        assert!(m.set_city("Санкт-Петербург").unwrap());
+        assert_eq!(m.city().as_deref(), Some("Санкт-Петербург"));
+        assert_eq!(m.facts().iter().filter(|f| is_city_fact(f)).count(), 1);
+        m.add("Живу в Казани").unwrap();
+        assert_eq!(m.city().as_deref(), Some("Казань"));
+        assert_eq!(
+            store(dir.path(), 10, 1000, 500).city().as_deref(),
+            Some("Казань")
+        );
     }
 
     #[test]

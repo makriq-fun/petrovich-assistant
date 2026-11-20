@@ -7,6 +7,13 @@ D=/data/petrovich
 PID=$D/supervise.pid
 LOG=$D/log/petrovichd.log
 mkdir -p "$D/log" "$D/state" /run
+# На колонке мало места: держим текущий журнал и один предыдущий.
+if [ -f "$LOG" ]; then
+  size=$(wc -c <"$LOG" 2>/dev/null || echo 0)
+  if [ "$size" -gt 2097152 ]; then
+    mv -f "$LOG" "$LOG.1"
+  fi
+fi
 if [ -f "$PID" ]; then
   old=$(cat "$PID" 2>/dev/null || true)
   if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then

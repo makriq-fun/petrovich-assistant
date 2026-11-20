@@ -111,7 +111,7 @@ personal/non-commercial использования; не добавляйте и
 | `wake_chime` | `true` | звук активации |
 | `state_chimes` | `true` | звуки «услышал», «перестал слушать», «готово», «остановлено», «очищено» |
 | `response_timeout_ms` | `180000` | предел одного хода вместе с озвучкой |
-| `max_tool_rounds` | `2` | раундов вызова инструментов (0..5) |
+| `max_tool_rounds` | `20` | раундов вызова инструментов (0..20) |
 
 ## `[memory]`
 
@@ -150,9 +150,8 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 | `timeout_ms` | `10000` | обычные инструменты |
 | `web_timeout_ms` | `15000` | веб, погода и сахар |
 | `web_max_bytes` | `1048576` | предел ответа |
-| `search_url` | `""` | SearXNG JSON или DuckDuckGo HTML (`https://html.duckduckgo.com/html/`); пусто — поиска нет |
-| `search_proxy` | `""` | прокси только для поиска, например `socks5h://127.0.0.1:1080` |
-| `search_api_key_env` | `""` | переменная secrets.env с ключом Tavily; непусто — поиск через Tavily |
+| `search_proxy` | `""` | прокси только для Tavily, например `socks5h://127.0.0.1:1080` |
+| `search_api_key_env` | `""` | переменная secrets.env с ключом Tavily; пусто — `web_search` выключен |
 | `web_allow_private` | `false` | только отладка: частные адреса и HTTP |
 | `weather_url` | `https://api.open-meteo.com/v1/forecast` | endpoint погоды |
 | `weather_geocoding_url` | `https://geocoding-api.open-meteo.com/v1/search` | геокодинг для города; пусто — только координаты |
@@ -163,24 +162,79 @@ HTTP. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
 | `nightscout_token_env` | `""` | переменная secrets.env с access token Nightscout; пусто — без токена |
 | `sandbox_command` | `[]` | argv песочницы; пусто — `run_code` выключен |
 | `sandbox_timeout_ms` | `5000` | предел кода |
-| `music_command` | `[]` | команда Spotiya, например `["/data/opt/spotify-connect/spotiya", "--{action}"]`; `{action}` подставляется в argv, иначе действие добавляется последним |
-| `youtube_proxy` | `""` | прокси для `youtube`, обычно `socks5h://127.0.0.1:1080` от byedpi; пусто — напрямую |
+| `music_command` | `[]` | устаревший внешний backend; при включённом Spotify не используется |
+| `youtube_proxy` | `""` | внешний прокси для `youtube`; пусто — встроенный ByeDPI |
 
 Инструмент доступен, только если он одновременно в `enabled`, настроен и
 разрешён. `weather` требует `weather_url`, а без координат — названного
-города; `web_search` — `search_url` (SearXNG JSON или DuckDuckGo HTML),
-`search_proxy` — отдельный прокси для него; `search_api_key_env` — ключ Tavily
-(при наличии ключа `search_url` не используется);
-`run_code` — `sandbox_command`; `music` — `music_command`;
-`remember`/`forget` — `memory.enabled`; `sugar` — `nightscout_url`.
+города; `web_search` — ключ Tavily в `search_api_key_env`,
+`search_proxy` — отдельный прокси для него; `run_code` — `sandbox_command`;
+`music` — Spotify или `music_command`; `youtube` — `youtube_proxy` или
+встроенный ByeDPI; `remember`/`forget` — `memory.enabled`;
+`sugar` — `nightscout_url`.
 `sugar` читает `/api/v1/entries/sgv.json` (только чтение), переводит mg/dL в
 ммоль/л и отдаёт значение, тренд, изменение за ~15 минут и диапазон за
 последние часы; `hours` в вызове задаёт глубину 1..24, по умолчанию 3.
 `nightscout_token_env` — имя переменной из `secrets.env` с access token
 Nightscout; для публичного чтения токен не нужен.
 `youtube` не требует отдельной программы: звук извлекается и декодируется
-самим демоном; `youtube_proxy` лишь направляет его трафик через byedpi.
-Таймеры и будильники живут в памяти демона: перезапуск их сбрасывает.
+самим демоном. При пустом `youtube_proxy` включается встроенный ByeDPI;
+заданный внешний прокси имеет приоритет.
+Таймеры и будильники сохраняются в `state_dir` и восстанавливаются после
+перезапуска; будильник звонит до `dismiss`/`snooze`.
+
+## `[modules]`
+
+| Ключ | По умолчанию | Смысл |
+|---|---|---|
+| `youtube` | `true` | поиск и звук YouTube в процессе |
+| `web_search` | `true` | Tavily (нужен ключ) |
+| `weather` | `true` | погода Open-Meteo |
+| `nightscout` | `true` | глюкоза, если задан URL |
+| `display` | `true` | экран и светодиоды |
+| `spotify` | `true` | встроенный Spotify Connect |
+| `byedpi` | `true` | встроенный обход YouTube |
+
+Выключенный модуль не создаёт клиентов, потоков и фоновых задач.
+
+## `[spotify]`
+
+| Ключ | По умолчанию | Смысл |
+|---|---|---|
+| `device_name` | `Петрович` | имя в Spotify Connect |
+| `username` | `""` | логин Spotify |
+| `password_env` | `PETROVICH_SPOTIFY_PASSWORD` | пароль в secrets.env |
+| `access_token_env` | `PETROVICH_SPOTIFY_TOKEN` | альтернатива паролю |
+| `client_id` | `""` | резервный client id, если нет токена Connect-сессии |
+| `client_secret_env` | `PETROVICH_SPOTIFY_CLIENT_SECRET` | секрет резервного client id |
+| `market` | `RU` | рынок поиска |
+| `cache_dir` | `<state_dir>/spotify` | кэш librespot, предел 64 МБ |
+| `bitrate` | `160` | 96, 160 или 320 кбит/с |
+| `search_limit` | `10` | результатов на тип поиска |
+
+Connect-устройство регистрируется сразу после старта и остаётся видимым,
+даже когда музыка не играет. Пароль/токен и client secret кладутся только
+в `secrets.env`; без них модуль не запускается и ничего не занимает.
+Управление: play/pause/next/previous, seek и seek_to, очередь, sleep,
+сохранение позиции (librespot/Spotify Connect).
+
+## `[byedpi]`
+
+| Ключ | По умолчанию | Смысл |
+|---|---|---|
+| `listen_port` | `0` | порт loopback SOCKS5; 0 — свободный |
+| `strategies` | пресеты ByeByeDPI | порядок проверки |
+| `refresh_s` | `300` | период перепроверки |
+| `probe_timeout_ms` | `4000` | таймаут одной проверки |
+| `probe_video` | `jNQXAC9IVRw` | ролик для проверки медиапотока |
+| `state_path` | `<state_dir>/byedpi.json` | запомненная стратегия |
+
+SOCKS5 слушает только `127.0.0.1`; глобальные настройки сети не меняются.
+Desync применяется только к доменам YouTube/Google Video. Поддерживаются
+символические имена (`split_sni`, `disorder_sni`, `oob_sni`,
+`fake_ttl_sni`, `split_N`) и пресеты ByeByeDPI (`-d`, `-f`, `-o`, `-s`).
+Выбор проверяется реальным декодированием первого аудиопакета, а не только
+HTTP-доступностью; при сбое стратегии перебор повторяется.
 
 ## `[hardware]`
 

@@ -103,6 +103,27 @@ pub enum UiEvent {
     Alarm(AlarmEvent),
     /// Ассистент показывает эмоцию.
     Emotion(Emotion),
+    /// Погода: температура и код WMO для индикатора.
+    Weather {
+        temp_c: f32,
+        feels_like: Option<f32>,
+        code: i64,
+    },
+    /// Сахар из Nightscout: ммоль/л и направление тренда.
+    Glucose {
+        mmol: f32,
+        delta: f32,
+        trend: String,
+    },
+    /// Воспроизведение медиа: состояние, позиция и длительность.
+    Playback {
+        playing: bool,
+        title: String,
+        position_s: u64,
+        duration_s: u64,
+    },
+    /// Медиа остановлено.
+    PlaybackStopped,
     /// Аппаратный мут микрофонов.
     Muted(bool),
     /// Ответ ассистента начинается: удобно для визуализации.

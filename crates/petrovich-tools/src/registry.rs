@@ -103,9 +103,42 @@ impl ToolContext {
         self
     }
 
+    /// Заменяет музыкальный backend (например, встроенным Spotify).
+    pub fn with_music(mut self, music: Arc<dyn MusicControl>) -> Self {
+        self.music = Some(music);
+        self
+    }
+
+    /// Приглушает музыку на время речи. Возвращённый guard вернёт громкость
+    /// при разрушении, в том числе при ошибке или отмене хода.
+    pub fn duck_music(&self) -> MusicDuck {
+        if let Some(music) = &self.music {
+            music.duck();
+        }
+        MusicDuck(self.music.clone())
+    }
+
     pub fn with_memory(mut self, memory: SharedMemory) -> Self {
         self.memory = Some(memory);
         self
+    }
+
+    /// Отправляет на экран факт начала воспроизведения. Точную позицию
+    /// присылает плеер отдельными событиями; здесь важен сам факт и название.
+    fn media_event(&self, text: String) {
+        let title = text
+            .trim_start_matches("Включаю:")
+            .trim_start_matches("Продолжаю:")
+            .trim()
+            .chars()
+            .take(80)
+            .collect::<String>();
+        let _ = self.ui.send(UiEvent::Playback {
+            playing: true,
+            title,
+            position_s: 0,
+            duration_s: 0,
+        });
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -144,7 +177,7 @@ impl ToolContext {
         match name {
             "music" => self.music.is_some(),
             "youtube" => self.youtube.is_some(),
-            "web_search" => !self.cfg.search_url.is_empty() || self.web.has_search_api(),
+            "web_search" => self.web.has_search_api(),
             "weather" => self.weather.is_some(),
             "sugar" => self.nightscout.is_some(),
             "remember" | "forget" => self.memory.is_some(),
@@ -166,26 +199,30 @@ impl ToolContext {
             ),
             "timer" => ToolDefinition::new(
                 "timer",
-                "Поставить таймер. Секунды от 1 до 86400.",
+                "Таймеры: add (seconds 1..86400), list, cancel по id. Таймеры переживают перезапуск и не зависят от разговора.",
                 obj(
                     json!({
+                        "action": {"type":"string","enum":["add","list","cancel"]},
                         "seconds": {"type":"integer","minimum":1,"maximum":86400},
-                        "label": {"type":"string","maxLength":80}
+                        "label": {"type":"string","maxLength":80},
+                        "id": {"type":"integer","minimum":1}
                     }),
-                    json!(["seconds"]),
+                    json!(["action"]),
                 ),
             ),
             "alarm" => ToolDefinition::new(
                 "alarm",
-                "Будильники: set на ближайшее HH:MM (сегодня или завтра), cancel по id, list",
+                "Будильники: set на ближайшее HH:MM, repeat — дни недели 1..7/пн..вс/daily/будни/выходные; cancel, list, snooze и dismiss для звонящего.",
                 obj(
                     json!({
-                        "action": {"type":"string","enum":["set","cancel","list"]},
+                        "action": {"type":"string","enum":["set","cancel","list","snooze","dismiss"]},
                         "time": {"type":"string","pattern":"^([01]?[0-9]|2[0-3]):[0-5][0-9]$"},
                         "label": {"type":"string","maxLength":80},
-                        "id": {"type":"integer","minimum":1}
+                        "id": {"type":"integer","minimum":1},
+                        "repeat": {"type":"array","items":{"type":"string","maxLength":24},"maxItems":7},
+                        "minutes": {"type":"integer","minimum":1,"maximum":1440}
                     }),
-                    json!([]),
+                    json!(["action"]),
                 ),
             ),
             "emotion" => ToolDefinition::new(
@@ -209,22 +246,29 @@ impl ToolContext {
             ),
             "music" => ToolDefinition::new(
                 "music",
-                "Управление музыкой через Spotiya",
+                "Spotify: play (поиск по названию), pause, resume, next, previous, status, seek (секунды, ±), seek_to (секунды), queue, sleep (минуты), save (пауза), continue (сохранённая позиция)",
                 obj(
                     json!({
-                        "action":{"type":"string","enum":["play","pause","resume","next","previous","status"]},
-                        "query":{"type":"string","minLength":1,"maxLength":200}
+                        "action":{"type":"string","enum":["play","pause","resume","next","previous","status","seek","seek_to","queue","sleep","save","continue"]},
+                        "query":{"type":"string","minLength":1,"maxLength":200},
+                        "seconds":{"type":"integer","minimum":-86400,"maximum":86400},
+                        "minutes":{"type":"integer","minimum":1,"maximum":1440}
                     }),
                     json!(["action"]),
                 ),
             ),
             "youtube" => ToolDefinition::new(
                 "youtube",
-                "Звук с YouTube: подкасты и видео без картинки. play по ссылке, id или названию; pause, resume, stop, status",
+                "Звук YouTube. play по ссылке, id или названию; search (limit 1..50, page — токен продолжения); details (субтитры и комментарии); pause, resume, stop, status; seek (±секунды), seek_to, queue, sleep (минуты), resume (сохранённая позиция)",
                 obj(
                     json!({
-                        "action":{"type":"string","enum":["play","pause","resume","stop","status"]},
-                        "query":{"type":"string","minLength":1,"maxLength":500}
+                        "action":{"type":"string","enum":["play","search","details","pause","resume","stop","status","seek","seek_to","queue","sleep","continue"]},
+                        "query":{"type":"string","minLength":1,"maxLength":500},
+                        "id":{"type":"string","minLength":1,"maxLength":100},
+                        "limit":{"type":"integer","minimum":1,"maximum":50},
+                        "page":{"type":"string","maxLength":4000},
+                        "seconds":{"type":"integer","minimum":-86400,"maximum":86400},
+                        "minutes":{"type":"integer","minimum":1,"maximum":1440}
                     }),
                     json!(["action"]),
                 ),
@@ -366,37 +410,92 @@ impl ToolContext {
                 )))
             }
             "timer" => {
-                let seconds = args
-                    .get("seconds")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| anyhow::anyhow!("timer: нет seconds"))?;
-                if !(1..=86_400).contains(&seconds) {
-                    bail!("timer: seconds вне 1..86400");
-                }
-                let label = args
-                    .get("label")
-                    .and_then(Value::as_str)
-                    .unwrap_or("таймер")
-                    .chars()
-                    .take(80)
-                    .collect::<String>();
-                let id = self.timers.add(seconds, label.clone()).await;
-                Ok(ToolResult::text(format!(
-                    "Таймер «{label}» на {seconds} с запущен (id {id})."
-                )))
-            }
-            "alarm" => {
-                let action = args.get("action").and_then(Value::as_str).unwrap_or("set");
+                let action = args.get("action").and_then(Value::as_str).unwrap_or("add");
                 match action {
+                    "add" => {
+                        let seconds = args
+                            .get("seconds")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| anyhow::anyhow!("timer: нет seconds"))?;
+                        if !(1..=86_400).contains(&seconds) {
+                            bail!("timer: seconds вне 1..86400");
+                        }
+                        let label = args
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .unwrap_or("таймер")
+                            .chars()
+                            .take(80)
+                            .collect::<String>();
+                        let id = self.timers.add(seconds, label.clone()).await;
+                        Ok(ToolResult::text(format!(
+                            "Таймер «{label}» на {seconds} с запущен (id {id})."
+                        )))
+                    }
+                    "list" => {
+                        let all = self.timers.list().await;
+                        if all.is_empty() {
+                            return Ok(ToolResult::text("Таймеров нет."));
+                        }
+                        let mut out = String::new();
+                        for t in all {
+                            out.push_str(&format!(
+                                "{}: «{}», осталось {} с (id {})\n",
+                                t.id, t.label, t.remaining_s, t.id
+                            ));
+                        }
+                        Ok(ToolResult::text(out.trim_end().to_owned()))
+                    }
                     "cancel" => {
                         let id = args
                             .get("id")
                             .and_then(Value::as_u64)
-                            .ok_or_else(|| anyhow::anyhow!("alarm: для cancel нужен id"))?;
-                        if self.alarms.cancel(id).await {
-                            Ok(ToolResult::text(format!("Будильник {id} отменён.")))
+                            .ok_or_else(|| anyhow::anyhow!("timer: для cancel нужен id"))?;
+                        if self.timers.cancel(id).await {
+                            Ok(ToolResult::text(format!("Таймер {id} отменён.")))
                         } else {
-                            Ok(ToolResult::text(format!("Будильника {id} нет.")))
+                            Ok(ToolResult::text(format!("Таймера {id} нет.")))
+                        }
+                    }
+                    _ => bail!("timer: неизвестное действие {action}"),
+                }
+            }
+            "alarm" => {
+                let action = args.get("action").and_then(Value::as_str).unwrap_or("set");
+                match action {
+                    "cancel" | "snooze" | "dismiss" => {
+                        let id = args
+                            .get("id")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| anyhow::anyhow!("alarm: для {action} нужен id"))?;
+                        match action {
+                            "cancel" => {
+                                if self.alarms.cancel(id).await {
+                                    Ok(ToolResult::text(format!("Будильник {id} отменён.")))
+                                } else {
+                                    Ok(ToolResult::text(format!("Будильника {id} нет.")))
+                                }
+                            }
+                            "snooze" => {
+                                let minutes = args
+                                    .get("minutes")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or_else(|| self.alarms.snooze_minutes());
+                                if self.alarms.snooze(id, minutes).await {
+                                    Ok(ToolResult::text(format!(
+                                        "Будильник {id} отложен на {minutes} мин."
+                                    )))
+                                } else {
+                                    Ok(ToolResult::text(format!("Будильника {id} нет.")))
+                                }
+                            }
+                            _ => {
+                                if self.alarms.dismiss(id).await {
+                                    Ok(ToolResult::text(format!("Будильник {id} выключен.")))
+                                } else {
+                                    Ok(ToolResult::text(format!("Будильника {id} нет.")))
+                                }
+                            }
                         }
                     }
                     "list" => {
@@ -407,8 +506,17 @@ impl ToolContext {
                         let mut out = String::new();
                         for a in all {
                             out.push_str(&format!(
-                                "{:02}:{:02} «{}» (id {})\n",
-                                a.hour, a.minute, a.label, a.id
+                                "{:02}:{:02} «{}» (id {}, {}, {})\n",
+                                a.hour,
+                                a.minute,
+                                a.label,
+                                a.id,
+                                crate::timers::weekdays_label(&a.repeat),
+                                if a.ringing {
+                                    "звонит"
+                                } else {
+                                    "ожидает"
+                                }
                             ));
                         }
                         Ok(ToolResult::text(out.trim_end().to_owned()))
@@ -426,6 +534,17 @@ impl ToolContext {
                             .chars()
                             .take(80)
                             .collect::<String>();
+                        let repeat: Vec<String> = args
+                            .get("repeat")
+                            .and_then(Value::as_array)
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let repeat = crate::timers::parse_weekdays(&repeat);
                         let now = Local::now();
                         let mut target = now
                             .date_naive()
@@ -435,9 +554,13 @@ impl ToolContext {
                             target += chrono::Duration::days(1);
                         }
                         let seconds = (target - now.naive_local()).num_seconds().max(1) as u64;
-                        let id = self.alarms.add(seconds, hour, minute, label.clone()).await;
+                        let id = self
+                            .alarms
+                            .add(seconds, hour, minute, label.clone(), repeat.clone())
+                            .await;
+                        let repeat_text = crate::timers::weekdays_label(&repeat);
                         Ok(ToolResult::text(format!(
-                            "Будильник «{label}» на {hour:02}:{minute:02} поставлен (id {id})."
+                            "Будильник «{label}» на {hour:02}:{minute:02} ({repeat_text}) поставлен (id {id})."
                         )))
                     }
                     _ => bail!("alarm: неизвестное действие {action}"),
@@ -495,20 +618,81 @@ impl ToolContext {
                     .and_then(Value::as_str)
                     .unwrap_or("status");
                 match action {
-                    // Spotya: `--play` требует поисковый запрос, а «включи
-                    // музыку» без названия означает продолжить текущую.
                     "play" => match args.get("query").and_then(Value::as_str) {
-                        Some(q) if !q.trim().is_empty() => music.play_query(q.trim())?,
-                        _ => music.resume()?,
+                        Some(q) if !q.trim().is_empty() => {
+                            let text = music.play_search(q.trim()).await?;
+                            self.media_event(text.clone());
+                            Ok(ToolResult::text(text))
+                        }
+                        _ => {
+                            music.resume()?;
+                            self.media_event("Продолжаю Spotify.".into());
+                            Ok(ToolResult::text("Продолжаю."))
+                        }
                     },
-                    "resume" => music.resume()?,
-                    "pause" => music.pause()?,
-                    "next" => music.next()?,
-                    "previous" => music.previous()?,
-                    "status" => return Ok(ToolResult::text(music.status()?)),
+                    "resume" => {
+                        music.resume()?;
+                        Ok(ToolResult::text("Продолжаю."))
+                    }
+                    "pause" => {
+                        music.pause()?;
+                        Ok(ToolResult::text("Пауза."))
+                    }
+                    "next" => {
+                        music.next()?;
+                        Ok(ToolResult::text("Следующий трек."))
+                    }
+                    "previous" => {
+                        music.previous()?;
+                        Ok(ToolResult::text("Предыдущий трек."))
+                    }
+                    "status" => Ok(ToolResult::text(music.status()?)),
+                    "seek" => {
+                        let seconds = args
+                            .get("seconds")
+                            .and_then(Value::as_i64)
+                            .ok_or_else(|| anyhow::anyhow!("music: для seek нужны seconds"))?;
+                        music.seek_by(seconds * 1000)?;
+                        Ok(ToolResult::text(format!("Перемотал на {seconds} с.")))
+                    }
+                    "seek_to" => {
+                        let seconds = args
+                            .get("seconds")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| anyhow::anyhow!("music: для seek_to нужны seconds"))?;
+                        music.seek_to(seconds * 1000)?;
+                        Ok(ToolResult::text(format!("Позиция {seconds} с.")))
+                    }
+                    "queue" => {
+                        let query = args
+                            .get("query")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|q| !q.is_empty())
+                            .ok_or_else(|| anyhow::anyhow!("music: для queue нужен query"))?;
+                        Ok(ToolResult::text(music.queue(query).await?))
+                    }
+                    "sleep" => {
+                        let minutes = args
+                            .get("minutes")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| anyhow::anyhow!("music: для sleep нужны minutes"))?;
+                        music.sleep_timer(minutes)?;
+                        Ok(ToolResult::text(format!(
+                            "Таймер сна на {minutes} мин поставлен."
+                        )))
+                    }
+                    "save" => {
+                        music.pause()?;
+                        Ok(ToolResult::text("Позиция сохранена, пауза."))
+                    }
+                    "continue" => {
+                        let text = music.resume_saved().await?;
+                        self.media_event(text.clone());
+                        Ok(ToolResult::text(text))
+                    }
                     _ => bail!("music: неизвестное действие {action}"),
                 }
-                Ok(ToolResult::text("Готово."))
             }
             "youtube" => {
                 let yt = self
@@ -527,7 +711,97 @@ impl ToolContext {
                             .map(str::trim)
                             .filter(|q| !q.is_empty())
                             .ok_or_else(|| anyhow::anyhow!("youtube: для play нужен query"))?;
-                        Ok(ToolResult::text(yt.play(query).await?))
+                        let text = yt.play(query).await?;
+                        self.media_event(text.clone());
+                        Ok(ToolResult::text(text))
+                    }
+                    "search" => {
+                        let query = args
+                            .get("query")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|q| !q.is_empty())
+                            .ok_or_else(|| anyhow::anyhow!("youtube: для search нужен query"))?;
+                        let limit = args
+                            .get("limit")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(20)
+                            .clamp(1, 50) as usize;
+                        let page = args.get("page").and_then(Value::as_str);
+                        let found = yt.search(query, limit, page).await?;
+                        if found.hits.is_empty() {
+                            return Ok(ToolResult::text("Ничего не найдено."));
+                        }
+                        let mut out = format!(
+                            "Найдено{}:\n",
+                            if found.estimated_results > 0 {
+                                format!(" примерно {} результатов", found.estimated_results)
+                            } else {
+                                String::new()
+                            }
+                        );
+                        for (i, h) in found.hits.iter().enumerate() {
+                            out.push_str(&format!(
+                                "{}. {} [{}] — канал {}, {}, {}; id {}\n",
+                                i + 1,
+                                h.title,
+                                if h.live {
+                                    "прямой эфир".to_owned()
+                                } else {
+                                    format_duration(h.duration_s)
+                                },
+                                h.channel,
+                                if h.published.is_empty() {
+                                    "дата неизвестна".to_owned()
+                                } else {
+                                    h.published.clone()
+                                },
+                                if h.views.is_empty() {
+                                    String::new()
+                                } else {
+                                    h.views.clone()
+                                },
+                                h.id
+                            ));
+                            if !h.description.is_empty() {
+                                out.push_str(&format!("   {}\n", h.description));
+                            }
+                        }
+                        if !found.continuation.is_empty() {
+                            out.push_str(&format!(
+                                "Следующая страница: page=\"{}\"\n",
+                                found.continuation
+                            ));
+                        }
+                        Ok(ToolResult::text(out))
+                    }
+                    "details" => {
+                        let id = args
+                            .get("id")
+                            .or_else(|| args.get("query"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|q| !q.is_empty())
+                            .ok_or_else(|| anyhow::anyhow!("youtube: для details нужен id"))?;
+                        let d = yt.details(id).await?;
+                        let mut out = format!(
+                            "{} — {}, канал {}, {}; id {}\n",
+                            d.hit.title,
+                            format_duration(d.hit.duration_s),
+                            d.hit.channel,
+                            d.hit.published,
+                            d.hit.id
+                        );
+                        if !d.hit.description.is_empty() {
+                            out.push_str(&format!("Описание: {}\n", d.hit.description));
+                        }
+                        if !d.subtitles.is_empty() {
+                            out.push_str(&format!("Субтитры: {}\n", d.subtitles));
+                        }
+                        if !d.comments.is_empty() {
+                            out.push_str(&format!("Комментарии: {}\n", d.comments));
+                        }
+                        Ok(ToolResult::text(out.trim_end().to_owned()))
                     }
                     "pause" => {
                         yt.pause()?;
@@ -539,9 +813,50 @@ impl ToolContext {
                     }
                     "stop" => {
                         yt.stop()?;
+                        let _ = self.ui.send(UiEvent::PlaybackStopped);
                         Ok(ToolResult::text("Остановлено."))
                     }
                     "status" => Ok(ToolResult::text(yt.status()?)),
+                    "seek" => {
+                        let seconds = args
+                            .get("seconds")
+                            .and_then(Value::as_i64)
+                            .ok_or_else(|| anyhow::anyhow!("youtube: для seek нужны seconds"))?;
+                        yt.seek_by(seconds * 1000)?;
+                        Ok(ToolResult::text(format!("Перемотал на {seconds} с.")))
+                    }
+                    "seek_to" => {
+                        let seconds = args
+                            .get("seconds")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| anyhow::anyhow!("youtube: для seek_to нужны seconds"))?;
+                        yt.seek_to(seconds * 1000)?;
+                        Ok(ToolResult::text(format!("Позиция {seconds} с.")))
+                    }
+                    "queue" => {
+                        let query = args
+                            .get("query")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|q| !q.is_empty())
+                            .ok_or_else(|| anyhow::anyhow!("youtube: для queue нужен query"))?;
+                        Ok(ToolResult::text(yt.queue(query).await?))
+                    }
+                    "sleep" => {
+                        let minutes = args
+                            .get("minutes")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| anyhow::anyhow!("youtube: для sleep нужны minutes"))?;
+                        yt.sleep_timer(minutes)?;
+                        Ok(ToolResult::text(format!(
+                            "Таймер сна на {minutes} мин поставлен."
+                        )))
+                    }
+                    "continue" => {
+                        let text = yt.resume_saved().await?;
+                        self.media_event(text.clone());
+                        Ok(ToolResult::text(text))
+                    }
                     _ => bail!("youtube: неизвестное действие {action}"),
                 }
             }
@@ -563,7 +878,7 @@ impl ToolContext {
                     .get("query")
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("web_search: нет query"))?;
-                let hits = self.web.search(&self.cfg.search_url, query).await?;
+                let hits = self.web.search(query).await?;
                 if hits.is_empty() {
                     return Ok(ToolResult::text("Ничего не найдено."));
                 }
@@ -584,8 +899,38 @@ impl ToolContext {
                     .weather
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("погода не настроена"))?;
-                let location = args.get("location").and_then(Value::as_str);
-                Ok(ToolResult::text(w.current_at(location).await?))
+                let explicit = args
+                    .get("location")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !is_generic_place(l));
+                let remembered = self
+                    .memory
+                    .as_ref()
+                    .and_then(|m| m.read().unwrap_or_else(|e| e.into_inner()).city());
+                let location = explicit.map(str::to_owned).or(remembered);
+                if location.is_none() && !w.has_default_location() {
+                    return Ok(ToolResult::text(
+                        "Я пока не знаю город. Спросите один раз: «В каком городе вы живёте?» \
+                         Получив ответ, сохраните его инструментом remember как «Город: …» \
+                         и сразу повторите запрос погоды.",
+                    ));
+                }
+                let now = w.current_data_at(location.as_deref()).await?;
+                if let Some(city) = explicit {
+                    if let Some(memory) = &self.memory {
+                        let mut memory = memory.write().unwrap_or_else(|e| e.into_inner());
+                        if let Err(e) = memory.set_city(city) {
+                            tracing::warn!("погода: запомнить город: {e}");
+                        }
+                    }
+                }
+                let _ = self.ui.send(UiEvent::Weather {
+                    temp_c: now.temp_c,
+                    feels_like: now.feels_like,
+                    code: now.code,
+                });
+                Ok(ToolResult::text(now.summary))
             }
             "sugar" => {
                 let ns = self
@@ -593,7 +938,13 @@ impl ToolContext {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Nightscout не настроен"))?;
                 let hours = args.get("hours").and_then(Value::as_u64);
-                Ok(ToolResult::text(ns.sugar(hours).await?))
+                let now = ns.sugar_data(hours).await?;
+                let _ = self.ui.send(UiEvent::Glucose {
+                    mmol: now.mmol,
+                    delta: now.delta,
+                    trend: now.trend.clone(),
+                });
+                Ok(ToolResult::text(now.text))
             }
             "remember" => {
                 let memory = self
@@ -603,7 +954,11 @@ impl ToolContext {
                 let text = args.get("text").and_then(Value::as_str).unwrap_or("");
                 let added = {
                     let mut memory = memory.write().unwrap_or_else(|e| e.into_inner());
-                    memory.add(text)?
+                    if let Some(city) = petrovich_core::memory::extract_city(text) {
+                        memory.set_city(&city)?
+                    } else {
+                        memory.add(text)?
+                    }
                 };
                 Ok(ToolResult::text(if added {
                     "Запомнил."
@@ -666,10 +1021,36 @@ impl ToolContext {
     }
 }
 
+fn is_generic_place(text: &str) -> bool {
+    crate::weather::is_generic_place(text)
+}
+
+fn format_duration(seconds: u64) -> String {
+    let h = seconds / 3600;
+    let m = (seconds % 3600) / 60;
+    let s = seconds % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 fn parse_hhmm(text: &str) -> Result<(u32, u32)> {
     let t = NaiveTime::parse_from_str(text.trim(), "%H:%M")
         .map_err(|_| anyhow::anyhow!("alarm: ожидается HH:MM"))?;
     Ok((t.hour(), t.minute()))
+}
+
+/// Возвращает музыке исходную громкость при выходе из области речи.
+pub struct MusicDuck(Option<Arc<dyn MusicControl>>);
+
+impl Drop for MusicDuck {
+    fn drop(&mut self) {
+        if let Some(music) = &self.0 {
+            music.unduck();
+        }
+    }
 }
 
 #[cfg(test)]

@@ -13,6 +13,15 @@ const MAX_HOURS: u64 = 24;
 /// Окно, по которому считается изменение: CGM пишет примерно раз в 5 минут.
 const DELTA_MINUTES: i64 = 15;
 
+/// Показатели для экрана и голосового ответа.
+#[derive(Clone, Debug)]
+pub struct SugarNow {
+    pub text: String,
+    pub mmol: f32,
+    pub delta: f32,
+    pub trend: String,
+}
+
 #[derive(Clone)]
 pub struct Nightscout {
     client: reqwest::Client,
@@ -53,6 +62,10 @@ impl Nightscout {
 
     /// Сколько часов истории показать; без аргумента — три часа.
     pub async fn sugar(&self, hours: Option<u64>) -> Result<String> {
+        Ok(self.sugar_data(hours).await?.text)
+    }
+
+    pub async fn sugar_data(&self, hours: Option<u64>) -> Result<SugarNow> {
         let hours = hours.unwrap_or(DEFAULT_HOURS).clamp(1, MAX_HOURS);
         let mut url = self.endpoint()?;
         if !self.allow_private && url.scheme() != "https" {
@@ -110,9 +123,14 @@ impl Nightscout {
     }
 }
 
-fn format_sugar(entries: &[Entry], hours: u64) -> String {
+fn format_sugar(entries: &[Entry], hours: u64) -> SugarNow {
     let Some(latest) = entries.iter().max_by_key(|e| e.date) else {
-        return "Нет данных о сахаре в Nightscout.".into();
+        return SugarNow {
+            text: "Нет данных о сахаре в Nightscout.".into(),
+            mmol: 0.0,
+            delta: 0.0,
+            trend: String::new(),
+        };
     };
     let now = chrono::Utc::now().timestamp_millis();
     let mmol = latest.sgv / MGDL_PER_MMOL;
@@ -141,7 +159,12 @@ fn format_sugar(entries: &[Entry], hours: u64) -> String {
             range.min, range.max, range.avg, range.count
         ));
     }
-    out
+    SugarNow {
+        text: out,
+        mmol: mmol as f32,
+        delta: delta.unwrap_or(0.0) as f32,
+        trend: trend.to_owned(),
+    }
 }
 
 fn delta(entries: &[Entry], latest: &Entry) -> (Option<f64>, Option<i64>) {
@@ -289,7 +312,10 @@ mod tests {
 
     #[test]
     fn empty_entries_are_reported_without_error() {
-        assert_eq!(format_sugar(&[], 3), "Нет данных о сахаре в Nightscout.");
+        assert_eq!(
+            format_sugar(&[], 3).text,
+            "Нет данных о сахаре в Nightscout."
+        );
     }
 
     #[test]
@@ -300,7 +326,7 @@ mod tests {
             sgv: 108.0,
             direction: "Flat".into(),
         }];
-        let text = format_sugar(&entries, 3);
+        let text = format_sugar(&entries, 3).text;
         assert!(text.contains("6.0 ммоль/л"), "{text}");
         assert!(text.contains("40 мин назад"), "{text}");
         assert!(text.contains("Данные устарели"), "{text}");

@@ -11,7 +11,7 @@ pub mod web;
 mod testutil;
 
 pub use nightscout::Nightscout;
-pub use registry::{ControlAction, ToolContext, ToolResult};
+pub use registry::{ControlAction, MusicDuck, ToolContext, ToolResult};
 pub use timers::{AlarmFired, AlarmInfo, AlarmManager, TimerFired, TimerInfo, TimerManager};
 pub use weather::Weather;
 pub use web::Web;

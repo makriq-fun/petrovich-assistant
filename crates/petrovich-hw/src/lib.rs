@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::Timelike as _;
-use petrovich_core::config::HardwareConfig;
+use petrovich_core::config::{HardwareConfig, IndicationConfig};
 use petrovich_core::events::{AlarmEvent, TimerEvent, UiEvent, UiNotice, VoiceState};
 use petrovich_core::profile::HardwareProfile;
 use tokio::sync::mpsc;
@@ -25,6 +25,7 @@ pub struct Hardware {
 pub fn start(
     profile: &'static HardwareProfile,
     cfg: &HardwareConfig,
+    indication: &IndicationConfig,
     ui: mpsc::UnboundedReceiver<UiEvent>,
 ) -> Hardware {
     let (btn_tx, btn_rx) = mpsc::unbounded_channel();
@@ -38,6 +39,10 @@ pub fn start(
     }
     let gpio = cfg.mic_mute_gpio.or(profile.mute_gpio);
     let _ = gpio;
+    if !cfg.leds && !cfg.clock && !cfg.auto_brightness {
+        tracing::info!("индикация выключена; UI-поток не запускается");
+        return Hardware { buttons: btn_rx };
+    }
     let leds_on = cfg.leds;
     let clock_on = cfg.clock;
     let profile: &'static HardwareProfile = profile;
@@ -46,6 +51,7 @@ pub fn start(
     let auto_brightness = cfg.auto_brightness;
     let light_sensor = cfg.light_sensor.clone();
     let night_brightness = cfg.night_brightness;
+    let indication = indication.clone();
     tokio::spawn(async move {
         run_ui(
             profile,
@@ -56,6 +62,7 @@ pub fn start(
             auto_brightness,
             light_sensor,
             night_brightness,
+            indication,
             ui,
         )
         .await
@@ -73,6 +80,7 @@ async fn run_ui(
     auto_brightness: bool,
     light_sensor: Option<PathBuf>,
     night_brightness: f32,
+    indication: IndicationConfig,
     mut ui: mpsc::UnboundedReceiver<UiEvent>,
 ) {
     let mut leds = if leds_on {
@@ -121,6 +129,10 @@ async fn run_ui(
     let mut error_until = tokio::time::Instant::now();
     let mut notice: Option<(UiNotice, tokio::time::Instant)> = None;
     let mut timer_deadline: Option<tokio::time::Instant> = None;
+    let mut weather: Option<(f32, tokio::time::Instant)> = None;
+    let mut glucose: Option<(f32, String, tokio::time::Instant)> = None;
+    let mut playback: Option<(bool, String, u64, u64, tokio::time::Instant)> = None;
+    let hold = Duration::from_secs(indication.hold_s);
     let mut alarm_time: Option<(u32, u32)> = None;
     let mut alarm_until = tokio::time::Instant::now();
     let start = tokio::time::Instant::now();
@@ -171,6 +183,33 @@ async fn run_ui(
                     Some(UiEvent::Emotion(e)) => {
                         notice = Some((UiNotice::Emotion(e), tokio::time::Instant::now()));
                     }
+                    Some(UiEvent::Weather { temp_c, .. }) => {
+                        if indication.weather {
+                            weather = Some((temp_c, tokio::time::Instant::now()));
+                        }
+                    }
+                    Some(UiEvent::Glucose { mmol, trend, .. }) => {
+                        if indication.glucose {
+                            glucose = Some((mmol, trend, tokio::time::Instant::now()));
+                        }
+                    }
+                    Some(UiEvent::Playback {
+                        playing,
+                        title,
+                        position_s,
+                        duration_s,
+                    }) => {
+                        if indication.playback {
+                            playback = Some((
+                                playing,
+                                title,
+                                position_s,
+                                duration_s,
+                                tokio::time::Instant::now(),
+                            ));
+                        }
+                    }
+                    Some(UiEvent::PlaybackStopped) => playback = None,
                     Some(UiEvent::Muted(m)) => muted = m,
                     Some(UiEvent::SpeechStarted) => state = VoiceState::Speaking,
                     Some(UiEvent::SpeechFinished) => state = VoiceState::Idle,
@@ -200,6 +239,21 @@ async fn run_ui(
                 notice = None;
             }
         }
+        if weather.is_some_and(|(_, at)| now.duration_since(at) > hold) {
+            weather = None;
+        }
+        if glucose
+            .as_ref()
+            .is_some_and(|(_, _, at)| now.duration_since(*at) > hold)
+        {
+            glucose = None;
+        }
+        if playback
+            .as_ref()
+            .is_some_and(|(_, _, _, _, at)| now.duration_since(*at) > hold)
+        {
+            playback = None;
+        }
 
         let base = if muted {
             leds::mute_colors(t)
@@ -207,6 +261,12 @@ async fn run_ui(
             leds::volume_colors(volume_percent)
         } else if now < error_until {
             leds::state_colors(VoiceState::Error, t)
+        } else if let Some((temp, at)) = weather {
+            leds::weather_colors(temp, now.duration_since(at).as_secs_f32())
+        } else if let Some((mmol, trend, at)) = &glucose {
+            leds::glucose_colors(*mmol, trend, now.duration_since(*at).as_secs_f32())
+        } else if let Some((playing, _, _, _, at)) = &playback {
+            leds::playback_colors(*playing, now.duration_since(*at).as_secs_f32())
         } else {
             leds::state_colors(state, t)
         };
@@ -264,8 +324,19 @@ async fn run_ui(
                     timer_deadline = None;
                     c.all_off()
                 }
-            } else if let Some((n, _at)) = notice {
-                let masks = clock::notice_masks(n);
+            } else if let Some((temp, _)) = weather {
+                c.show_temperature(temp)
+            } else if let Some((mmol, _, _)) = &glucose {
+                c.show_glucose(*mmol)
+            } else if let Some((playing, _, pos, _, _)) = &playback {
+                if *playing {
+                    c.show_position(*pos)
+                } else {
+                    c.show_time_level(0, 0, 0)
+                }
+            } else if let Some((n, at)) = notice {
+                let elapsed = now.duration_since(at).as_secs_f32();
+                let masks = clock::notice_masks(n, elapsed);
                 if masks != [0; 4] {
                     let level = (f32::from(c.level()) * 0.6).round() as u8;
                     c.set_levels(&masks, 0, level)

@@ -21,6 +21,9 @@ pub struct Vad {
     absolute_db: f32,
     min_speech_ms: u64,
     silence_ms: u64,
+    short_silence_ms: u64,
+    short_utterance_ms: u64,
+    resume_pause_ms: u64,
     max_utterance_ms: u64,
     pre_roll: VecDeque<i16>,
     pre_roll_len: usize,
@@ -33,7 +36,6 @@ pub struct Vad {
     speech_frames: u64,
     voiced_frames: u64,
     voiced: bool,
-    warmup: u32,
 }
 
 impl Vad {
@@ -42,6 +44,9 @@ impl Vad {
         sample_rate: u32,
         min_speech_ms: u64,
         silence_ms: u64,
+        short_silence_ms: u64,
+        short_utterance_ms: u64,
+        resume_pause_ms: u64,
         max_utterance_ms: u64,
         margin_db: f32,
         pre_roll_ms: u64,
@@ -56,6 +61,9 @@ impl Vad {
             absolute_db,
             min_speech_ms,
             silence_ms,
+            short_silence_ms: short_silence_ms.max(FRAME_MS).min(silence_ms.max(FRAME_MS)),
+            short_utterance_ms,
+            resume_pause_ms: resume_pause_ms.min(silence_ms.saturating_sub(FRAME_MS)),
             max_utterance_ms,
             pre_roll: VecDeque::with_capacity(pre_roll_len),
             pre_roll_len,
@@ -68,7 +76,6 @@ impl Vad {
             speech_frames: 0,
             voiced_frames: 0,
             voiced: false,
-            warmup: 15,
         }
     }
 
@@ -121,13 +128,9 @@ impl Vad {
 
     fn frame(&mut self, frame: &[i16]) -> Option<Utterance> {
         let db = dbfs(frame);
-        if self.warmup > 0 {
-            self.noise_db = (self.noise_db * 0.75 + db * 0.25).clamp(-90.0, -20.0);
-            self.push_pre_roll(frame);
-            self.warmup -= 1;
-            return None;
-        }
-        let threshold = (self.noise_db + self.margin_db).min(self.absolute_db);
+        // Первые же кадры речи должны участвовать в фразе: прогрев,
+        // съедавший 300 мс, обрезал короткие команды и начала фраз.
+        let threshold = (self.noise_db + self.margin_db).max(self.absolute_db);
         let loud = db > threshold;
         self.voiced = loud && self.in_speech;
 
@@ -159,7 +162,22 @@ impl Vad {
         } else {
             self.below += 1;
         }
-        let silence_frames = self.silence_ms.div_ceil(FRAME_MS);
+        // Короткая команда завершается быстрее; длинная фраза ждёт
+        // естественную паузу, чтобы не потерять её вторую половину.
+        let speech_ms = self.speech_frames * FRAME_MS;
+        let silence_ms = if speech_ms <= self.short_utterance_ms {
+            self.short_silence_ms
+        } else {
+            self.silence_ms
+        };
+        // Пауза короче resume_pause_ms — почти наверняка внутри фразы:
+        // даже для короткой команды даём ей шанс продолжиться.
+        let silence_ms = if self.below as u64 * FRAME_MS > self.resume_pause_ms {
+            silence_ms
+        } else {
+            silence_ms.max(self.resume_pause_ms + FRAME_MS)
+        };
+        let silence_frames = silence_ms.div_ceil(FRAME_MS);
         let max_frames = self.max_utterance_ms.div_ceil(FRAME_MS);
         let done_silence = self.below as u64 >= silence_frames.max(1);
         let done_max = self.speech_frames >= max_frames.max(1);
@@ -235,7 +253,44 @@ mod tests {
     }
 
     fn vad() -> Vad {
-        Vad::new(16_000, 200, 300, 2_000, 9.0, 200, -18.0)
+        Vad::new(16_000, 200, 300, 150, 800, 300, 2_000, 9.0, 200, -18.0)
+    }
+
+    /// Медленная речь с паузой 400 мс внутри предложения не должна
+    /// распадаться на две фразы.
+    #[test]
+    fn natural_pause_keeps_sentence_together() {
+        let mut v = Vad::new(16_000, 200, 900, 450, 1_200, 400, 4_000, 9.0, 100, -18.0);
+        let mut out = Vec::new();
+        out.extend(v.push(&tone(4_800, 440.0, 0.3)));
+        out.extend(v.push(&vec![0; 6_400])); // 400 мс
+        out.extend(v.push(&tone(4_800, 440.0, 0.3)));
+        out.extend(v.push(&vec![0; 16_000]));
+        assert_eq!(out.len(), 1, "фраза разорвана паузой");
+        assert!(out[0].speech_ms > 1_000);
+    }
+
+    /// Короткая команда не ждёт полную секунду тишины.
+    #[test]
+    fn short_command_finishes_fast() {
+        let mut v = Vad::new(16_000, 200, 900, 450, 1_200, 400, 4_000, 9.0, 100, -18.0);
+        let mut out = Vec::new();
+        out.extend(v.push(&tone(3_200, 440.0, 0.3)));
+        out.extend(v.push(&vec![0; 8_000])); // 500 мс
+        assert_eq!(out.len(), 1);
+    }
+
+    /// Пауза 600 мс посреди длинной фразы не завершает её.
+    #[test]
+    fn long_sentence_survives_long_pause() {
+        let mut v = Vad::new(16_000, 200, 900, 450, 1_200, 400, 4_000, 9.0, 100, -18.0);
+        let mut out = Vec::new();
+        out.extend(v.push(&tone(32_000, 440.0, 0.3)));
+        out.extend(v.push(&vec![0; 9_600])); // 600 мс
+        assert!(out.is_empty());
+        out.extend(v.push(&tone(4_800, 440.0, 0.3)));
+        out.extend(v.push(&vec![0; 16_000]));
+        assert_eq!(out.len(), 1);
     }
 
     #[test]
@@ -277,7 +332,7 @@ mod tests {
 
     #[test]
     fn long_speech_is_cut_at_max() {
-        let mut v = Vad::new(16_000, 100, 300, 500, 9.0, 0, -18.0);
+        let mut v = Vad::new(16_000, 100, 300, 150, 400, 100, 500, 9.0, 0, -18.0);
         let mut out = Vec::new();
         for _ in 0..30 {
             out.extend(v.push(&tone(1600, 440.0, 0.3)));

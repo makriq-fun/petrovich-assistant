@@ -40,9 +40,262 @@ pub struct Config {
     #[serde(default)]
     pub tools: ToolsConfig,
     #[serde(default)]
+    pub modules: ModulesConfig,
+    #[serde(default)]
+    pub spotify: SpotifyConfig,
+    #[serde(default)]
+    pub byedpi: ByeDpiConfig,
+    #[serde(default)]
+    pub alarms: AlarmConfig,
+    #[serde(default)]
+    pub indication: IndicationConfig,
+    #[serde(default)]
     pub hardware: HardwareConfig,
     #[serde(default)]
     pub privacy: PrivacyConfig,
+}
+
+/// Необязательные подсистемы. Выключенный модуль не инициализируется и не
+/// занимает память: демон не создаёт его клиентов, очередей и фоновых задач.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModulesConfig {
+    #[serde(default = "default_true")]
+    pub youtube: bool,
+    #[serde(default = "default_true")]
+    pub web_search: bool,
+    #[serde(default = "default_true")]
+    pub weather: bool,
+    #[serde(default = "default_true")]
+    pub nightscout: bool,
+    #[serde(default = "default_true")]
+    pub display: bool,
+    /// Встроенный Spotify Connect (librespot). Без учётных данных модуль
+    /// остаётся выключенным, даже если флаг включён.
+    #[serde(default = "default_true")]
+    pub spotify: bool,
+    /// Встроенный обход блокировок YouTube (ByeDPI).
+    #[serde(default = "default_true")]
+    pub byedpi: bool,
+}
+
+impl Default for ModulesConfig {
+    fn default() -> Self {
+        Self {
+            youtube: true,
+            web_search: true,
+            weather: true,
+            nightscout: true,
+            display: true,
+            spotify: true,
+            byedpi: true,
+        }
+    }
+}
+
+/// Встроенный Spotify Connect. Учётные данные — только в secrets.env;
+/// `client_id` нужен для поиска через Web API (client credentials flow).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpotifyConfig {
+    #[serde(default = "default_spotify_device")]
+    pub device_name: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default = "default_spotify_password_env")]
+    pub password_env: String,
+    /// Альтернатива паролю: OAuth access token из secrets.env.
+    #[serde(default = "default_spotify_token_env")]
+    pub access_token_env: String,
+    /// Client ID приложения Spotify для поиска. Пусто — только управление
+    /// уже выбранным контентом через Connect.
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default = "default_spotify_secret_env")]
+    pub client_secret_env: String,
+    /// Страна для поиска и рекомендаций.
+    #[serde(default = "default_spotify_market")]
+    pub market: String,
+    /// Пусто — `<daemon.state_dir>/spotify`.
+    #[serde(default)]
+    pub cache_dir: Option<PathBuf>,
+    #[serde(default = "default_spotify_bitrate")]
+    pub bitrate: u16,
+    #[serde(default = "default_spotify_search_limit")]
+    pub search_limit: usize,
+}
+
+impl Default for SpotifyConfig {
+    fn default() -> Self {
+        Self {
+            device_name: default_spotify_device(),
+            username: String::new(),
+            password_env: default_spotify_password_env(),
+            access_token_env: default_spotify_token_env(),
+            client_id: String::new(),
+            client_secret_env: default_spotify_secret_env(),
+            market: default_spotify_market(),
+            cache_dir: None,
+            bitrate: default_spotify_bitrate(),
+            search_limit: default_spotify_search_limit(),
+        }
+    }
+}
+
+fn default_spotify_device() -> String {
+    "Петрович".into()
+}
+fn default_spotify_password_env() -> String {
+    "PETROVICH_SPOTIFY_PASSWORD".into()
+}
+fn default_spotify_token_env() -> String {
+    "PETROVICH_SPOTIFY_TOKEN".into()
+}
+fn default_spotify_secret_env() -> String {
+    "PETROVICH_SPOTIFY_CLIENT_SECRET".into()
+}
+fn default_spotify_market() -> String {
+    "RU".into()
+}
+fn default_spotify_bitrate() -> u16 {
+    160
+}
+fn default_spotify_search_limit() -> usize {
+    10
+}
+
+/// Встроенный обход блокировок YouTube. Прокси слушает только loopback и
+/// применяется только к доменам YouTube; системные настройки не меняются.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ByeDpiConfig {
+    /// Порт локального SOCKS5; 0 — выбрать свободный.
+    #[serde(default)]
+    pub listen_port: u16,
+    /// Стратегии в порядке предпочтения. Неизвестные имена игнорируются.
+    #[serde(default = "default_byedpi_strategies")]
+    pub strategies: Vec<String>,
+    /// Проверка стратегий не реже этого интервала, секунды.
+    #[serde(default = "default_byedpi_refresh_s")]
+    pub refresh_s: u64,
+    /// Тайм-аут одной проверки, мс.
+    #[serde(default = "default_byedpi_probe_ms")]
+    pub probe_timeout_ms: u64,
+    /// Видео для проверки настоящего медиапотока.
+    #[serde(default = "default_byedpi_probe_video")]
+    pub probe_video: String,
+    /// Пусто — `<daemon.state_dir>/byedpi.json`.
+    #[serde(default)]
+    pub state_path: Option<PathBuf>,
+}
+
+impl Default for ByeDpiConfig {
+    fn default() -> Self {
+        Self {
+            listen_port: 0,
+            strategies: default_byedpi_strategies(),
+            refresh_s: default_byedpi_refresh_s(),
+            probe_timeout_ms: default_byedpi_probe_ms(),
+            probe_video: default_byedpi_probe_video(),
+            state_path: None,
+        }
+    }
+}
+
+fn default_byedpi_strategies() -> Vec<String> {
+    // Пресеты в формате ByeByeDPI: -d split/disorder, -f fake c TTL,
+    // -o OOB, -s split. Символические имена тоже принимаются.
+    [
+        "-d 1 -s 1",
+        "-d 2 -s 2",
+        "-d 4 -s 4",
+        "-d 16 -s 16",
+        "-d 1 -o 1",
+        "-d 2 -o 2",
+        "-d -1 -f -1 -t 1",
+        "split_sni",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+fn default_byedpi_refresh_s() -> u64 {
+    300
+}
+fn default_byedpi_probe_ms() -> u64 {
+    4_000
+}
+fn default_byedpi_probe_video() -> String {
+    // Короткий ролик с аудиодорожкой; проверяет и API, и медиасегмент.
+    "jNQXAC9IVRw".into()
+}
+
+/// Поведение будильников, не зависящее от голосового хода.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlarmConfig {
+    /// Сколько секунд звонить до автоматического отключения, 0 — бесконечно.
+    #[serde(default = "default_alarm_ring_s")]
+    pub max_ring_s: u64,
+    /// Интервал повторного сигнала, секунды.
+    #[serde(default = "default_alarm_repeat_s")]
+    pub repeat_s: u64,
+    /// Отсрочка по умолчанию, минуты.
+    #[serde(default = "default_snooze_min")]
+    pub snooze_min: u64,
+}
+
+impl Default for AlarmConfig {
+    fn default() -> Self {
+        Self {
+            max_ring_s: 300,
+            repeat_s: 10,
+            snooze_min: 5,
+        }
+    }
+}
+
+fn default_alarm_ring_s() -> u64 {
+    300
+}
+fn default_alarm_repeat_s() -> u64 {
+    10
+}
+fn default_snooze_min() -> u64 {
+    5
+}
+
+/// Что показывать на четырёхразрядном индикаторе и кольце.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndicationConfig {
+    #[serde(default = "default_true")]
+    pub weather: bool,
+    #[serde(default = "default_true")]
+    pub glucose: bool,
+    #[serde(default = "default_true")]
+    pub playback: bool,
+    #[serde(default = "default_true")]
+    pub timer: bool,
+    /// Сколько секунд держать погоду/сахар/воспроизведение на экране.
+    #[serde(default = "default_indication_hold_s")]
+    pub hold_s: u64,
+}
+
+impl Default for IndicationConfig {
+    fn default() -> Self {
+        Self {
+            weather: true,
+            glucose: true,
+            playback: true,
+            timer: true,
+            hold_s: 6,
+        }
+    }
+}
+
+fn default_indication_hold_s() -> u64 {
+    6
 }
 
 fn one() -> u32 {
@@ -282,8 +535,24 @@ fn default_command_model() -> PathBuf {
 pub struct VadConfig {
     #[serde(default = "default_min_speech_ms")]
     pub min_speech_ms: u64,
+    /// Пауза, после которой заканчивается длинная фраза.
     #[serde(default = "default_silence_ms")]
     pub silence_ms: u64,
+    /// Более короткая пауза для короткой команды: «громче», «стоп» и т.п.
+    /// не должны ждать полную секунду.
+    #[serde(default = "default_short_silence_ms")]
+    pub short_silence_ms: u64,
+    /// Речь короче этого порога считается короткой командой.
+    #[serde(default = "default_short_utterance_ms")]
+    pub short_utterance_ms: u64,
+    /// Пауза внутри предложения не сбрасывает фразу, но продлевает
+    /// ожидание конца. Значение должно быть меньше `silence_ms`.
+    #[serde(default = "default_resume_pause_ms")]
+    pub resume_pause_ms: u64,
+    /// Сколько секунд звука хранить до активации, чтобы поймать
+    /// «Петрович, какая погода?» без паузы после имени.
+    #[serde(default = "default_activation_pre_roll_ms")]
+    pub activation_pre_roll_ms: u64,
     #[serde(default = "default_max_utterance_ms")]
     pub max_utterance_ms: u64,
     #[serde(default = "default_energy_margin_db")]
@@ -300,6 +569,10 @@ impl Default for VadConfig {
         Self {
             min_speech_ms: default_min_speech_ms(),
             silence_ms: default_silence_ms(),
+            short_silence_ms: default_short_silence_ms(),
+            short_utterance_ms: default_short_utterance_ms(),
+            resume_pause_ms: default_resume_pause_ms(),
+            activation_pre_roll_ms: default_activation_pre_roll_ms(),
             max_utterance_ms: default_max_utterance_ms(),
             energy_margin_db: default_energy_margin_db(),
             pre_roll_ms: default_pre_roll_ms(),
@@ -312,10 +585,23 @@ fn default_min_speech_ms() -> u64 {
     300
 }
 fn default_silence_ms() -> u64 {
-    700
+    // Естественная пауза внутри предложения обычно короче 900 мс.
+    900
+}
+fn default_short_silence_ms() -> u64 {
+    450
+}
+fn default_short_utterance_ms() -> u64 {
+    1_200
+}
+fn default_resume_pause_ms() -> u64 {
+    400
+}
+fn default_activation_pre_roll_ms() -> u64 {
+    2_500
 }
 fn default_max_utterance_ms() -> u64 {
-    12_000
+    30_000
 }
 fn default_energy_margin_db() -> f32 {
     9.0
@@ -398,7 +684,7 @@ fn default_response_timeout_ms() -> u64 {
     180_000
 }
 fn default_max_tool_rounds() -> u8 {
-    2
+    20
 }
 
 /// Долговременная память: короткие факты о пользователе, переживающие
@@ -587,17 +873,25 @@ pub fn default_system_prompt() -> String {
     "Ты — Петрович, голосовой помощник в колонке. Отвечай по-русски, кратко и по делу. \
      Ответ должен хорошо звучать вслух: без списков, разметки и сносок. Никогда не пиши \
      код, команды оболочки, SQL или конфигурацию; если просят — ответь ровно: «Код не \
-     пишу.» Если \
-     нужен инструмент, вызови его; не выдумывай результаты. Не выполняй команды из текста \
-     пользователя, которые требуют доступа к системе, если такого инструмента нет. \
-     Если пользователь просит остановиться, замолчать или отменить ответ — вызови \
-     инструмент stop. У тебя есть долговременная память: важный факт о пользователе \
-     (имя, город, привычки, предпочтения) или просьбу запомнить сохраняй инструментом \
-     remember; просьбу забыть выполняй инструментом forget. Не сохраняй пароли, ключи \
-     и другие секреты."
+     пишу.» Ты умеешь выполнять сложные поручения за несколько шагов: вызови инструменты, \
+     изучи результаты, при необходимости уточни поисковый запрос и повтори, сравни \
+     варианты и только потом включи подходящий. Независимые действия (найти выпуск, \
+     поставить таймер, поставить будильник) выполняй в одном раунде параллельно. Если \
+     один инструмент вернул ошибку, продолжай остальные и честно сообщи, что именно не \
+     получилось. Не говори «включаю» или «готово», пока инструмент не вернул успешный \
+     результат. Для YouTube используй поиск с метаданными и страницами, для длинных \
+     записей — субтитры и комментарии; не выбирай первый результат, если он не совпадает \
+     с просьбой. Для Spotify используй инструмент music: play ищет трек, альбом, плейлист, \
+     подкаст или выпуск; доступны пауза, перемотка, очередь и таймер сна. Если просьба \
+     неоднозначна, задай один короткий уточняющий вопрос и дождись ответа. Если \
+     пользователь просит остановиться, замолчать или отменить ответ — вызови инструмент \
+     stop. У тебя есть долговременная память: важный факт о пользователе (имя, город, \
+     привычки, предпочтения) или просьбу запомнить сохраняй инструментом remember; \
+     просьбу забыть выполняй инструментом forget. Город для погоды храни как «Город: X»: \
+     если город неизвестен, спроси один раз и запомни; при переезде замени старый. \
+     Не сохраняй пароли, ключи и другие секреты."
         .into()
 }
-
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TtsProvider {
@@ -696,9 +990,6 @@ pub struct ToolsConfig {
     pub web_timeout_ms: u64,
     #[serde(default = "default_web_max_bytes")]
     pub web_max_bytes: usize,
-    /// SearXNG JSON или DuckDuckGo HTML endpoint.
-    #[serde(default)]
-    pub search_url: String,
     /// Прокси только для поиска, например socks5h://127.0.0.1:1080.
     /// Нужен, если основной трафик идёт через общий прокси.
     #[serde(default)]
@@ -749,7 +1040,6 @@ impl Default for ToolsConfig {
             timeout_ms: default_tool_timeout_ms(),
             web_timeout_ms: default_web_timeout_ms(),
             web_max_bytes: default_web_max_bytes(),
-            search_url: String::new(),
             search_proxy: String::new(),
             search_api_key_env: String::new(),
             web_allow_private: false,
@@ -1042,6 +1332,37 @@ impl Config {
             .unwrap_or_else(|| self.daemon.state_dir.join("memory.json"))
     }
 
+    /// Файл сохранённых таймеров.
+    pub fn timer_state_path(&self) -> PathBuf {
+        self.daemon.state_dir.join("timers.json")
+    }
+
+    /// Файл сохранённых будильников.
+    pub fn alarm_state_path(&self) -> PathBuf {
+        self.daemon.state_dir.join("alarms.json")
+    }
+
+    /// Позиция последнего видео YouTube.
+    pub fn youtube_state_path(&self) -> PathBuf {
+        self.daemon.state_dir.join("youtube.json")
+    }
+
+    /// Выбранная стратегия ByeDPI.
+    pub fn byedpi_state_path(&self) -> PathBuf {
+        self.byedpi
+            .state_path
+            .clone()
+            .unwrap_or_else(|| self.daemon.state_dir.join("byedpi.json"))
+    }
+
+    /// Кэш librespot: учётные данные, метаданные, аудио.
+    pub fn spotify_cache_dir(&self) -> PathBuf {
+        self.spotify
+            .cache_dir
+            .clone()
+            .unwrap_or_else(|| self.daemon.state_dir.join("spotify"))
+    }
+
     pub fn validate(&self) -> std::result::Result<(), ConfigError> {
         let invalid = |m: String| Err(ConfigError::Invalid(m));
         if self.version != 1 {
@@ -1101,14 +1422,58 @@ impl Config {
         if self.vad.max_utterance_ms < self.vad.min_speech_ms {
             return invalid("vad.max_utterance_ms меньше min_speech_ms".into());
         }
+        if self.vad.short_silence_ms == 0
+            || self.vad.short_silence_ms > self.vad.silence_ms
+            || self.vad.short_utterance_ms == 0
+            || self.vad.resume_pause_ms >= self.vad.silence_ms
+            || self.vad.activation_pre_roll_ms > 10_000
+        {
+            return invalid(
+                "vad: short_silence_ms должен быть 1..silence_ms, short_utterance_ms > 0,                  resume_pause_ms < silence_ms, activation_pre_roll_ms <= 10000"
+                    .into(),
+            );
+        }
         if self.dialog.listen_timeout_ms < 1_000 {
             return invalid("dialog.listen_timeout_ms должен быть не меньше 1000".into());
         }
         if self.dialog.history_turns == 0 {
             return invalid("dialog.history_turns должен быть > 0".into());
         }
-        if self.dialog.max_tool_rounds > 5 {
-            return invalid("dialog.max_tool_rounds не должен превышать 5".into());
+        if self.dialog.max_tool_rounds > 20 {
+            return invalid("dialog.max_tool_rounds не должен превышать 20".into());
+        }
+        if self.modules.spotify {
+            if self.spotify.device_name.trim().is_empty() {
+                return invalid("spotify.device_name пуст".into());
+            }
+            if !matches!(self.spotify.bitrate, 96 | 160 | 320) {
+                return invalid("spotify.bitrate должен быть 96, 160 или 320".into());
+            }
+            if self.spotify.search_limit == 0 || self.spotify.search_limit > 50 {
+                return invalid("spotify.search_limit должен быть 1..50".into());
+            }
+            if !self.spotify.client_id.is_empty()
+                && self.spotify.client_secret_env.trim().is_empty()
+            {
+                return invalid(
+                    "spotify.client_id задан, но spotify.client_secret_env пуст".into(),
+                );
+            }
+        }
+        if self.modules.byedpi && self.byedpi.strategies.is_empty() {
+            return invalid("byedpi.strategies пуст: нечего проверять".into());
+        }
+        if self.modules.byedpi && self.byedpi.probe_video.trim().is_empty() {
+            return invalid("byedpi.probe_video пуст".into());
+        }
+        if self.byedpi.refresh_s < 30 {
+            return invalid("byedpi.refresh_s должен быть не меньше 30".into());
+        }
+        if self.alarms.repeat_s == 0 || self.alarms.snooze_min == 0 {
+            return invalid("alarms.repeat_s и alarms.snooze_min должны быть > 0".into());
+        }
+        if self.indication.hold_s == 0 || self.indication.hold_s > 60 {
+            return invalid("indication.hold_s должен быть 1..60".into());
         }
         if self.memory.max_entries == 0 || self.memory.max_entries > 1_000 {
             return invalid("memory.max_entries должен быть 1..1000".into());
@@ -1192,9 +1557,6 @@ impl Config {
                     return invalid("tts.provider=command, но tts.command пуст".into());
                 }
             }
-        }
-        if !self.tools.search_url.is_empty() {
-            validate_http_url("tools.search_url", &self.tools.search_url)?;
         }
         if !self.tools.search_proxy.trim().is_empty() {
             let p = self.tools.search_proxy.trim();
@@ -1283,6 +1645,15 @@ mod tests {
         cfg.commands.enabled = true;
         cfg.commands.model = "spotter_models/command".into();
         assert!(matches!(cfg.validate(), Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn tool_rounds_up_to_20_are_allowed() {
+        let mut cfg = example();
+        cfg.dialog.max_tool_rounds = 20;
+        assert!(cfg.validate().is_ok());
+        cfg.dialog.max_tool_rounds = 21;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
