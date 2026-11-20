@@ -16,7 +16,9 @@
 Зависимости направлены вниз: `petrovichd` знает все крейты, но ни один крейт не
 зависит от демона. Провайдеры и инструменты тестируются без ALSA и колонки.
 Медиа-модули живут в `petrovichd`: Spotify Connect (librespot), встроенный
-SOCKS5 ByeDPI и декодер YouTube пишут звук в тот же ALSA `default`. Отдельных
+SOCKS5 ByeDPI и декодер YouTube пишут звук в тот же ALSA `default`.
+Для SOCKS5 librespot внутри процесса поднимается HTTP CONNECT-мост на
+loopback: librespot видит обычный HTTP-прокси, а мост идёт в SOCKS5. Отдельных
 процессов `spotifyd`, `ciadpi`, `mpv` или `yt-dlp` нет. Модуль, выключенный в
 `[modules]`, не создаёт клиентов, потоков и фоновых задач.
 

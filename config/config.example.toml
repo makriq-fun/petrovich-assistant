@@ -5,8 +5,8 @@ version = 1
 [network]
 # Единый прокси для всех сетевых компонентов: STT, LLM, TTS, Tavily,
 # web_fetch, погода, Nightscout, Spotify API и librespot.
-# Явный proxy у компонента имеет приоритет. SOCKS5 подходит для HTTP-
-# компонентов; librespot принимает только HTTP(S)-прокси.
+# Явный proxy у компонента имеет приоритет. SOCKS5 и HTTP(S) работают для
+# всех компонентов: для librespot поднимается локальный HTTP CONNECT мост.
 # Пример: "socks5h://127.0.0.1:1080" или "http://127.0.0.1:8080".
 proxy = ""
 

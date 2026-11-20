@@ -3,6 +3,7 @@
 mod byedpi;
 mod daemon;
 mod music;
+mod netbridge;
 mod spotify;
 mod tts_cache;
 mod turn;

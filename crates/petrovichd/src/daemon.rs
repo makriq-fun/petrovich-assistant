@@ -28,6 +28,7 @@ use tokio::task::JoinHandle;
 
 use crate::byedpi::ByeDpi;
 use crate::music::CommandMusic;
+use crate::netbridge::HttpConnectBridge;
 use crate::spotify::Spotify;
 use crate::turn::{run_turn, speak_text, TurnContext, TurnOutcome};
 use crate::youtube::YouTubePlayer;
@@ -205,6 +206,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     )?
     .with_fetch_client_proxy(cfg.tools.web_timeout_ms, cfg.network.proxy.trim())?
     .with_search_api(search_key);
+    let mut spotify_bridge = None;
     let spotify = if cfg.modules.spotify {
         let mut scfg = cfg.spotify.clone();
         if scfg.cache_dir.is_none() {
@@ -212,6 +214,21 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         }
         if scfg.proxy.trim().is_empty() {
             scfg.proxy = cfg.network.proxy.clone();
+        }
+        // librespot умеет только HTTP CONNECT. Для SOCKS5 поднимаем
+        // локальный мост в этом же процессе и отдаём librespot его URL.
+        if scfg.proxy.starts_with("socks5://") || scfg.proxy.starts_with("socks5h://") {
+            match HttpConnectBridge::start(&scfg.proxy).await {
+                Ok(bridge) => {
+                    tracing::info!(
+                        "Spotify: SOCKS5 через локальный HTTP CONNECT {}",
+                        bridge.url()
+                    );
+                    scfg.proxy = bridge.url().to_owned();
+                    spotify_bridge = Some(bridge);
+                }
+                Err(e) => tracing::warn!("Spotify: SOCKS5-мост не запущен: {e:#}"),
+            }
         }
         match Spotify::start(
             &scfg,
@@ -239,6 +256,9 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         tracing::info!("Spotify выключен в конфигурации");
         None
     };
+    // Мост должен жить столько же, сколько демон: librespot держит
+    // постоянные TCP-соединения к Spotify.
+    let _spotify_bridge = spotify_bridge;
     let music: Option<Arc<dyn MusicControl>> = match &spotify {
         Some(s) => Some(s.clone() as Arc<dyn MusicControl>),
         None => CommandMusic::new(cfg.tools.music_command.clone())
