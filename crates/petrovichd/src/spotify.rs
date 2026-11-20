@@ -119,10 +119,16 @@ struct Api {
 impl Api {
     fn new(session: librespot::core::Session, cfg: &SpotifyConfig, secret: String) -> Result<Self> {
         Ok(Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(12))
-                .build()
-                .context("Spotify API: клиент")?,
+            client: {
+                let mut b = reqwest::Client::builder().timeout(Duration::from_secs(12));
+                if !cfg.proxy.trim().is_empty() {
+                    b = b.proxy(
+                        reqwest::Proxy::all(cfg.proxy.trim())
+                            .with_context(|| format!("Spotify API: прокси {}", cfg.proxy))?,
+                    );
+                }
+                b.build().context("Spotify API: клиент")?
+            },
             session,
             client_id: cfg.client_id.clone(),
             client_secret: secret,
@@ -370,10 +376,22 @@ impl Spotify {
                 }
             })
             .context("Spotify: нет учётных данных")?;
-        let session_cfg = SessionConfig {
+        let mut session_cfg = SessionConfig {
             autoplay: Some(false),
             ..SessionConfig::default()
         };
+        if !cfg.proxy.trim().is_empty() {
+            match url::Url::parse(cfg.proxy.trim()) {
+                Ok(url) if matches!(url.scheme(), "http" | "https") => {
+                    session_cfg.proxy = Some(url);
+                }
+                Ok(_) => tracing::warn!(
+                    "Spotify: librespot поддерживает только HTTP(S)-прокси; {} пропущен",
+                    cfg.proxy
+                ),
+                Err(e) => tracing::warn!("Spotify: прокси {}: {e}", cfg.proxy),
+            }
+        }
         let session = Session::new(session_cfg, Some(cache));
         let mixer = mixer::find(None).context("Spotify: микшер")?(MixerConfig::default())
             .context("Spotify: микшер")?;

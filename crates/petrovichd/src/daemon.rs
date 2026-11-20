@@ -158,9 +158,16 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         }
     );
 
-    let stt = Arc::from(stt_from_config(&cfg.stt, &loaded.secrets)?);
-    let tts = Arc::from(tts_from_config(&cfg.tts, &loaded.secrets)?);
-    let llm = Arc::new(OpenAiLlm::new(&cfg.llm, &loaded.secrets)?);
+    // Явный proxy компонента важнее общего `[network] proxy`.
+    let mut stt_cfg = cfg.stt.clone();
+    stt_cfg.proxy = cfg.proxy_for(&stt_cfg.proxy).to_owned();
+    let mut tts_cfg = cfg.tts.clone();
+    tts_cfg.proxy = cfg.proxy_for(&tts_cfg.proxy).to_owned();
+    let mut llm_cfg = cfg.llm.clone();
+    llm_cfg.proxy = cfg.proxy_for(&llm_cfg.proxy).to_owned();
+    let stt = Arc::from(stt_from_config(&stt_cfg, &loaded.secrets)?);
+    let tts = Arc::from(tts_from_config(&tts_cfg, &loaded.secrets)?);
+    let llm = Arc::new(OpenAiLlm::new(&llm_cfg, &loaded.secrets)?);
 
     let (ui_tx, ui_rx) = mpsc::unbounded_channel();
     let (announce_tx, mut announce_rx) = mpsc::channel(4);
@@ -185,17 +192,22 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         tracing::info!("веб-поиск выключен в конфигурации");
         String::new()
     };
+    let search_proxy = cfg.proxy_for(&cfg.tools.search_proxy);
     let web = Web::with_search_proxy(
         cfg.tools.web_timeout_ms,
         cfg.tools.web_max_bytes,
         cfg.tools.web_allow_private,
-        &cfg.tools.search_proxy,
+        search_proxy,
     )?
+    .with_fetch_client_proxy(cfg.tools.web_timeout_ms, cfg.network.proxy.trim())?
     .with_search_api(search_key);
     let spotify = if cfg.modules.spotify {
         let mut scfg = cfg.spotify.clone();
         if scfg.cache_dir.is_none() {
             scfg.cache_dir = Some(cfg.spotify_cache_dir());
+        }
+        if scfg.proxy.trim().is_empty() {
+            scfg.proxy = cfg.network.proxy.clone();
         }
         match Spotify::start(
             &scfg,
@@ -351,7 +363,11 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
                 cfg.tools.web_allow_private,
             )?,
         };
-        tools = tools.with_weather(weather.with_geocoding(cfg.tools.weather_geocoding_url.clone()));
+        tools = tools.with_weather(
+            weather
+                .with_geocoding(cfg.tools.weather_geocoding_url.clone())
+                .with_proxy(cfg.network.proxy.trim()),
+        );
     }
     if cfg.modules.nightscout && !cfg.tools.nightscout_url.is_empty() {
         let token = loaded
@@ -364,12 +380,15 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
                 cfg.tools.nightscout_token_env
             );
         }
-        tools = tools.with_nightscout(Nightscout::new(
-            cfg.tools.nightscout_url.clone(),
-            token,
-            cfg.tools.web_timeout_ms,
-            cfg.tools.web_allow_private,
-        )?);
+        tools = tools.with_nightscout(
+            Nightscout::new(
+                cfg.tools.nightscout_url.clone(),
+                token,
+                cfg.tools.web_timeout_ms,
+                cfg.tools.web_allow_private,
+            )?
+            .with_proxy(cfg.network.proxy.trim()),
+        );
     }
     if let Some(memory) = &memory {
         tools = tools.with_memory(memory.clone());

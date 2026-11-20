@@ -29,12 +29,28 @@ pub struct Nightscout {
     token: String,
     allow_private: bool,
     max_bytes: usize,
+    timeout_ms: u64,
 }
 
 struct Entry {
     date: i64,
     sgv: f64,
     direction: String,
+}
+
+fn build_client(timeout_ms: u64, proxy: &str) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms))
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("petrovich-assistant/", env!("CARGO_PKG_VERSION")));
+    if !proxy.trim().is_empty() {
+        builder = builder.proxy(
+            reqwest::Proxy::all(proxy.trim())
+                .with_context(|| format!("прокси Nightscout {proxy}"))?,
+        );
+    }
+    builder.build().context("HTTP-клиент Nightscout")
 }
 
 impl Nightscout {
@@ -44,20 +60,27 @@ impl Nightscout {
         timeout_ms: u64,
         allow_private: bool,
     ) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(timeout_ms))
-            .connect_timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("petrovich-assistant/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .context("HTTP-клиент Nightscout")?;
+        let client = build_client(timeout_ms, "")?;
         Ok(Self {
             client,
             url: url.into(),
             token: token.into(),
             allow_private,
             max_bytes: 256 * 1024,
+            timeout_ms,
         })
+    }
+
+    /// Общий прокси для Nightscout.
+    pub fn with_proxy(mut self, proxy: &str) -> Self {
+        if proxy.trim().is_empty() {
+            return self;
+        }
+        match build_client(self.timeout_ms, proxy) {
+            Ok(client) => self.client = client,
+            Err(e) => tracing::warn!("Nightscout: прокси {proxy}: {e:#}"),
+        }
+        self
     }
 
     /// Сколько часов истории показать; без аргумента — три часа.

@@ -206,7 +206,13 @@ fn doctor(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
             _ => warn("amixer не читает PDM Gain"),
         }
     }
-    for (name, proxy) in [("STT", &cfg.stt.proxy), ("LLM", &cfg.llm.proxy)] {
+    for (name, proxy) in [
+        ("STT", cfg.proxy_for(&cfg.stt.proxy)),
+        ("LLM", cfg.proxy_for(&cfg.llm.proxy)),
+        ("TTS", cfg.proxy_for(&cfg.tts.proxy)),
+        ("Tavily", cfg.proxy_for(&cfg.tools.search_proxy)),
+        ("Spotify", cfg.proxy_for(&cfg.spotify.proxy)),
+    ] {
         let p = proxy.trim();
         if p.is_empty() {
             continue;
@@ -512,7 +518,9 @@ fn parse_proc_ip(hex: &str, v6: bool) -> Option<IpAddr> {
 fn tts_test(loaded: &petrovich_core::LoadedConfig, text: &str, out: &Path) -> Result<()> {
     use futures_util::StreamExt as _;
     let rt = tokio::runtime::Runtime::new()?;
-    let tts = petrovich_providers::tts_from_config(&loaded.config.tts, &loaded.secrets)?;
+    let mut tts_cfg = loaded.config.tts.clone();
+    tts_cfg.proxy = loaded.config.proxy_for(&tts_cfg.proxy).to_owned();
+    let tts = petrovich_providers::tts_from_config(&tts_cfg, &loaded.secrets)?;
     let mut audio = rt.block_on(tts.synthesize(text))?;
     let mut bytes = Vec::new();
     rt.block_on(async {
@@ -536,7 +544,9 @@ fn tts_test(loaded: &petrovich_core::LoadedConfig, text: &str, out: &Path) -> Re
 fn stt_test(loaded: &petrovich_core::LoadedConfig, wav: &Path) -> Result<()> {
     let bytes = std::fs::read(wav)?;
     petrovich_core::wav::parse(&bytes)?;
-    let stt = petrovich_providers::stt_from_config(&loaded.config.stt, &loaded.secrets)?;
+    let mut stt_cfg = loaded.config.stt.clone();
+    stt_cfg.proxy = loaded.config.proxy_for(&stt_cfg.proxy).to_owned();
+    let stt = petrovich_providers::stt_from_config(&stt_cfg, &loaded.secrets)?;
     let rt = tokio::runtime::Runtime::new()?;
     let text = rt.block_on(stt.transcribe(bytes))?;
     println!("STT: {text}");
@@ -575,7 +585,8 @@ fn weather_test(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
         t.weather_place.clone(),
         t.web_timeout_ms,
         t.web_allow_private,
-    )?;
+    )?
+    .with_proxy(loaded.config.network.proxy.trim());
     let rt = tokio::runtime::Runtime::new()?;
     println!("{}", rt.block_on(w.current())?);
     Ok(())
@@ -595,7 +606,8 @@ fn sugar_test(loaded: &petrovich_core::LoadedConfig, hours: u64) -> Result<()> {
         token,
         t.web_timeout_ms,
         t.web_allow_private,
-    )?;
+    )?
+    .with_proxy(loaded.config.network.proxy.trim());
     let rt = tokio::runtime::Runtime::new()?;
     println!("{}", rt.block_on(ns.sugar(Some(hours)))?);
     Ok(())
@@ -607,7 +619,7 @@ fn fetch_test(loaded: &petrovich_core::LoadedConfig, url: &str, proxy: Option<&s
         t.web_timeout_ms,
         t.web_max_bytes,
         false,
-        proxy.unwrap_or(""),
+        proxy.unwrap_or_else(|| loaded.config.network.proxy.trim()),
     )?;
     let rt = tokio::runtime::Runtime::new()?;
     let page = rt.block_on(web.fetch(url))?;
@@ -629,8 +641,9 @@ fn search_test(loaded: &petrovich_core::LoadedConfig, query: &str) -> Result<()>
         t.web_timeout_ms,
         t.web_max_bytes,
         t.web_allow_private,
-        &t.search_proxy,
+        loaded.config.proxy_for(&t.search_proxy),
     )?
+    .with_fetch_client_proxy(t.web_timeout_ms, loaded.config.network.proxy.trim())?
     .with_search_api(search_key);
     let rt = tokio::runtime::Runtime::new()?;
     let hits = rt.block_on(web.search(query))?;
@@ -645,7 +658,9 @@ fn search_test(loaded: &petrovich_core::LoadedConfig, query: &str) -> Result<()>
 }
 
 fn llm_test(loaded: &petrovich_core::LoadedConfig, text: &str) -> Result<()> {
-    let llm = petrovich_providers::OpenAiLlm::new(&loaded.config.llm, &loaded.secrets)?;
+    let mut llm_cfg = loaded.config.llm.clone();
+    llm_cfg.proxy = loaded.config.proxy_for(&llm_cfg.proxy).to_owned();
+    let llm = petrovich_providers::OpenAiLlm::new(&llm_cfg, &loaded.secrets)?;
     let rt = tokio::runtime::Runtime::new()?;
     let mut messages = Vec::new();
     if !loaded.config.llm.system_prompt.trim().is_empty() {

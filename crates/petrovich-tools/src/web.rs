@@ -53,6 +53,24 @@ impl Web {
         Ok(web)
     }
 
+    /// Прокси для чтения страниц, сохраняя отдельный клиент поиска.
+    pub fn with_fetch_client_proxy(mut self, timeout_ms: u64, proxy: &str) -> Result<Self> {
+        if !proxy.trim().is_empty() {
+            self.client = reqwest::Client::builder()
+                .timeout(Duration::from_millis(timeout_ms))
+                .connect_timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(concat!("petrovich-assistant/", env!("CARGO_PKG_VERSION")))
+                .proxy(
+                    reqwest::Proxy::all(proxy.trim())
+                        .with_context(|| format!("web_fetch proxy {proxy}"))?,
+                )
+                .build()
+                .context("HTTP-клиент web_fetch")?;
+        }
+        Ok(self)
+    }
+
     /// `search_proxy` применяется только к Tavily: чтение страниц идёт
     /// напрямую, чтобы прокси не влиял на проверку адресов.
     pub fn with_search_proxy(

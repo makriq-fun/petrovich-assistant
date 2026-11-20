@@ -6,6 +6,18 @@
 
 Пример: [config/config.example.toml](../config/config.example.toml).
 
+## `[network]`
+
+| Ключ | По умолчанию | Смысл |
+|---|---|---|
+| `proxy` | `""` | общий прокси для STT, LLM, TTS, Tavily, `web_fetch`, погоды, Nightscout, Spotify API и librespot |
+
+Это SOCKS5/SOCKS5h/HTTP(S), например `socks5h://127.0.0.1:1080`. Явный
+`proxy` у STT, LLM, TTS или Spotify имеет приоритет над общим. librespot
+принимает только HTTP(S)-прокси; для SOCKS5 он предупреждает и идёт напрямую,
+чтобы не сломать Connect. Остальные HTTP-компоненты поддерживают SOCKS5h.
+Прокси не меняет системные настройки и применяется только внутри демона.
+
 ## `[daemon]`
 
 | Ключ | По умолчанию | Смысл |
@@ -141,9 +153,10 @@ personal/non-commercial использования; не добавляйте и
 порядку при 429, 404 и при отказе провайдера разобрать вызов инструмента.
 `api_key_envs` — дополнительные переменные с ключами того же провайдера: при
 429/401 ключи перебираются до смены модели.
-`proxy` у STT и LLM — SOCKS5/HTTP только для этих запросов, например
-`socks5h://127.0.0.1:1080` (Hysteria 2). Он не меняет маршрут остальных
-модулей и не требует прав на сеть. STT/TTS поддерживают `openai`, `fish`,
+`proxy` у STT, LLM и TTS — SOCKS5/HTTP только для этих запросов, например
+`socks5h://127.0.0.1:1080` (Hysteria 2). Пусто — берётся общий
+`[network] proxy`. Прокси не меняет системный маршрут и не требует прав на
+сеть. STT/TTS поддерживают `openai`, `fish`,
 `chat_audio`, `command`; LLM —
 OpenAI-совместимый HTTP. `chat_audio` отправляет WAV в мультимодальную
 chat-модель (например, Gemini через VoidAI), когда отдельного Whisper-эндпоинта
@@ -159,7 +172,7 @@ chat-модель (например, Gemini через VoidAI), когда от�
 | `timeout_ms` | `10000` | обычные инструменты |
 | `web_timeout_ms` | `15000` | веб, погода и сахар |
 | `web_max_bytes` | `1048576` | предел ответа |
-| `search_proxy` | `""` | прокси только для Tavily, например `socks5h://127.0.0.1:1080` |
+| `search_proxy` | `""` | прокси только для Tavily; пусто — общий `[network] proxy` |
 | `search_api_key_env` | `""` | переменная secrets.env с ключом Tavily; пусто — `web_search` выключен |
 | `web_allow_private` | `false` | только отладка: частные адреса и HTTP |
 | `weather_url` | `https://api.open-meteo.com/v1/forecast` | endpoint погоды |
@@ -177,7 +190,7 @@ chat-модель (например, Gemini через VoidAI), когда от�
 Инструмент доступен, только если он одновременно в `enabled`, настроен и
 разрешён. `weather` требует `weather_url`, а без координат — названного
 города; `web_search` — ключ Tavily в `search_api_key_env`,
-`search_proxy` — отдельный прокси для него; `run_code` — `sandbox_command`;
+`search_proxy` — отдельный прокси для него (иначе общий); `run_code` — `sandbox_command`;
 `music` — Spotify или `music_command`; `youtube` — `youtube_proxy` или
 встроенный ByeDPI; `remember`/`forget` — `memory.enabled`;
 `sugar` — `nightscout_url`.

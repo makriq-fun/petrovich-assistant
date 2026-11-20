@@ -2,6 +2,14 @@
 # Секреты — в отдельный файл /data/petrovich/secrets.env с правами 0600.
 version = 1
 
+[network]
+# Единый прокси для всех сетевых компонентов: STT, LLM, TTS, Tavily,
+# web_fetch, погода, Nightscout, Spotify API и librespot.
+# Явный proxy у компонента имеет приоритет. SOCKS5 подходит для HTTP-
+# компонентов; librespot принимает только HTTP(S)-прокси.
+# Пример: "socks5h://127.0.0.1:1080" или "http://127.0.0.1:8080".
+proxy = ""
+
 [daemon]
 log_level = "info"
 state_dir = "/data/petrovich/state"
@@ -133,6 +141,8 @@ sample_rate = 24000
 timeout_ms = 30000
 retries = 2
 max_bytes = 16777216
+# Пусто — общий [network] proxy.
+proxy = ""
 
 [tools]
 enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search", "emotion", "web_fetch", "weather", "sugar", "remember", "forget", "reset_dialog", "stop"]
@@ -193,6 +203,8 @@ market = "RU"
 # cache_dir = "/data/petrovich/state/spotify"
 bitrate = 160
 search_limit = 10
+# Пусто — общий [network] proxy. librespot поддерживает HTTP(S), не SOCKS5.
+proxy = ""
 
 [byedpi]
 # 0 — свободный порт loopback; системные настройки не меняются.

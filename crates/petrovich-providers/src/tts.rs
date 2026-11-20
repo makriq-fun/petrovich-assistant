@@ -15,7 +15,7 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::http::{client, endpoint, read_limited, redact};
+use crate::http::{client_with_ca_proxy, endpoint, read_limited, redact};
 
 pub struct AudioStream {
     pub format: TtsFormat,
@@ -56,7 +56,7 @@ impl FishTts {
             bail!("Fish TTS: пустой reference_id (tts.voice)");
         }
         Ok(Self {
-            http: client(cfg.timeout_ms)?,
+            http: client_with_ca_proxy(cfg.timeout_ms, None, &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/tts"),
             model: cfg.model.clone(),
             reference_id: cfg.voice.clone(),
@@ -160,7 +160,7 @@ pub struct OpenAiTts {
 impl OpenAiTts {
     pub fn new(cfg: &TtsConfig, secrets: &Secrets) -> Result<Self> {
         Ok(Self {
-            http: client(cfg.timeout_ms)?,
+            http: client_with_ca_proxy(cfg.timeout_ms, None, &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/audio/speech"),
             model: cfg.model.clone(),
             voice: cfg.voice.clone(),

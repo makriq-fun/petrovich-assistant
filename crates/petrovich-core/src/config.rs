@@ -53,6 +53,28 @@ pub struct Config {
     pub hardware: HardwareConfig,
     #[serde(default)]
     pub privacy: PrivacyConfig,
+    #[serde(default)]
+    pub network: NetworkConfig,
+}
+
+/// Общие сетевые настройки. `proxy` — прокси по умолчанию для всех сетевых
+/// компонентов; явный proxy у провайдера или инструмента имеет приоритет.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkConfig {
+    #[serde(default)]
+    pub proxy: String,
+}
+
+impl Config {
+    /// Прокси компонента: явный, иначе общий `[network] proxy`.
+    pub fn proxy_for<'a>(&'a self, specific: &'a str) -> &'a str {
+        if specific.trim().is_empty() {
+            self.network.proxy.trim()
+        } else {
+            specific.trim()
+        }
+    }
 }
 
 /// Необязательные подсистемы. Выключенный модуль не инициализируется и не
@@ -123,6 +145,10 @@ pub struct SpotifyConfig {
     pub bitrate: u16,
     #[serde(default = "default_spotify_search_limit")]
     pub search_limit: usize,
+    /// Прокси librespot и Web API. Поддерживается HTTP(S); пусто — общий
+    /// `[network] proxy`, если он HTTP(S).
+    #[serde(default)]
+    pub proxy: String,
 }
 
 impl Default for SpotifyConfig {
@@ -138,6 +164,7 @@ impl Default for SpotifyConfig {
             cache_dir: None,
             bitrate: default_spotify_bitrate(),
             search_limit: default_spotify_search_limit(),
+            proxy: String::new(),
         }
     }
 }
@@ -952,6 +979,9 @@ pub struct TtsConfig {
     /// Для локального TTS: argv команды; текст подаётся на stdin, PCM/WAV — на stdout.
     #[serde(default)]
     pub command: Vec<String>,
+    /// Прокси TTS; пусто — общий `[network] proxy`.
+    #[serde(default)]
+    pub proxy: String,
 }
 
 impl Default for TtsConfig {
@@ -968,6 +998,7 @@ impl Default for TtsConfig {
             retries: default_retries(),
             max_bytes: default_tts_limit(),
             command: Vec::new(),
+            proxy: String::new(),
         }
     }
 }
@@ -1549,8 +1580,11 @@ impl Config {
             }
         }
         for (name, proxy) in [
+            ("network.proxy", &self.network.proxy),
             ("stt.proxy", &self.stt.proxy),
             ("llm.proxy", &self.llm.proxy),
+            ("tts.proxy", &self.tts.proxy),
+            ("spotify.proxy", &self.spotify.proxy),
         ] {
             let p = proxy.trim();
             if !p.is_empty()
@@ -1687,6 +1721,18 @@ mod tests {
         cfg.dialog.max_tool_rounds = 20;
         assert!(cfg.validate().is_ok());
         cfg.dialog.max_tool_rounds = 21;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn network_proxy_is_fallback_for_components() {
+        let mut cfg = example();
+        cfg.network.proxy = "socks5h://127.0.0.1:1080".into();
+        cfg.stt.proxy.clear();
+        cfg.llm.proxy = "http://127.0.0.1:8080".into();
+        assert_eq!(cfg.proxy_for(&cfg.stt.proxy), cfg.network.proxy);
+        assert_eq!(cfg.proxy_for(&cfg.llm.proxy), cfg.llm.proxy);
+        cfg.network.proxy = "ftp://127.0.0.1:21".into();
         assert!(cfg.validate().is_err());
     }
 

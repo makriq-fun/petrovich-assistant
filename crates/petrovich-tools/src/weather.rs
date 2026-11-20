@@ -26,6 +26,21 @@ pub struct Weather {
     place: String,
     allow_private: bool,
     max_bytes: usize,
+    timeout_ms: u64,
+}
+
+fn build_client(timeout_ms: u64, proxy: &str) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms))
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("petrovich-assistant/", env!("CARGO_PKG_VERSION")));
+    if !proxy.trim().is_empty() {
+        builder = builder.proxy(
+            reqwest::Proxy::all(proxy.trim()).with_context(|| format!("прокси погоды {proxy}"))?,
+        );
+    }
+    builder.build().context("HTTP-клиент погоды")
 }
 
 impl Weather {
@@ -37,13 +52,7 @@ impl Weather {
         timeout_ms: u64,
         allow_private: bool,
     ) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(timeout_ms))
-            .connect_timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("petrovich-assistant/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .context("HTTP-клиент погоды")?;
+        let client = build_client(timeout_ms, "")?;
         Ok(Self {
             client,
             url: url.into(),
@@ -53,6 +62,7 @@ impl Weather {
             place: place.into(),
             allow_private,
             max_bytes: 256 * 1024,
+            timeout_ms,
         })
     }
 
@@ -62,10 +72,7 @@ impl Weather {
         timeout_ms: u64,
         allow_private: bool,
     ) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(timeout_ms))
-            .build()
-            .context("клиент погоды")?;
+        let client = build_client(timeout_ms, "")?;
         Ok(Self {
             client,
             url: url.into(),
@@ -75,11 +82,24 @@ impl Weather {
             place: String::new(),
             allow_private,
             max_bytes: 256 * 1024,
+            timeout_ms,
         })
     }
 
     pub fn with_geocoding(mut self, url: impl Into<String>) -> Self {
         self.geocoding_url = url.into();
+        self
+    }
+
+    /// Общий прокси; явная настройка инструмента имеет приоритет.
+    pub fn with_proxy(mut self, proxy: &str) -> Self {
+        if proxy.trim().is_empty() {
+            return self;
+        }
+        match build_client(self.timeout_ms, proxy) {
+            Ok(client) => self.client = client,
+            Err(e) => tracing::warn!("погода: прокси {proxy}: {e:#}"),
+        }
         self
     }
 
