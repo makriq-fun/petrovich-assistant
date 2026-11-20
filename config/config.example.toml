@@ -203,7 +203,7 @@ market = "RU"
 # cache_dir = "/data/petrovich/state/spotify"
 bitrate = 160
 search_limit = 10
-# Пусто — общий [network] proxy. librespot поддерживает HTTP(S), не SOCKS5.
+# Пусто — общий [network] proxy; SOCKS5 подключается через встроенный мост.
 proxy = ""
 
 [byedpi]
