@@ -263,7 +263,11 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         None
     };
     if let Some(b) = &byedpi {
-        tools_cfg.youtube_proxy = b.proxy_url();
+        if b.is_direct() {
+            tracing::info!("YouTube: стратегия не нужна, прямое подключение");
+        } else {
+            tools_cfg.youtube_proxy = b.proxy_url();
+        }
     }
     let youtube = if youtube_on {
         Some(

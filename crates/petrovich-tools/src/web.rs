@@ -32,6 +32,27 @@ impl Web {
         Self::with_search_proxy(timeout_ms, max_bytes, allow_private, "")
     }
 
+    /// Клиент чтения через SOCKS/HTTP-прокси — для проверки обхода.
+    pub fn with_fetch_proxy(
+        timeout_ms: u64,
+        max_bytes: usize,
+        allow_private: bool,
+        proxy: &str,
+    ) -> Result<Self> {
+        let mut web = Self::with_search_proxy(timeout_ms, max_bytes, allow_private, "")?;
+        if !proxy.trim().is_empty() {
+            web.client = reqwest::Client::builder()
+                .timeout(Duration::from_millis(timeout_ms))
+                .connect_timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(concat!("petrovich-assistant/", env!("CARGO_PKG_VERSION")))
+                .proxy(reqwest::Proxy::all(proxy.trim())?)
+                .build()
+                .context("HTTP-клиент с прокси")?;
+        }
+        Ok(web)
+    }
+
     /// `search_proxy` применяется только к Tavily: чтение страниц идёт
     /// напрямую, чтобы прокси не влиял на проверку адресов.
     pub fn with_search_proxy(

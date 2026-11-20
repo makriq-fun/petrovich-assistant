@@ -58,6 +58,12 @@ enum Cmd {
     },
     /// Проверить веб-поиск
     SearchTest { query: String },
+    /// Проверить прямой HTTP(S)-доступ без прокси
+    FetchTest {
+        url: String,
+        #[arg(long)]
+        proxy: Option<String>,
+    },
     /// Прочитать датчик освещённости (5 отсчётов)
     LightTest,
 }
@@ -73,6 +79,7 @@ fn main() -> Result<()> {
             | Cmd::WeatherTest
             | Cmd::SugarTest { .. }
             | Cmd::SearchTest { .. }
+            | Cmd::FetchTest { .. }
     ) {
         enter_network_gid(&loaded.config);
     }
@@ -89,6 +96,7 @@ fn main() -> Result<()> {
         Cmd::WeatherTest => weather_test(&loaded),
         Cmd::SugarTest { hours } => sugar_test(&loaded, hours),
         Cmd::SearchTest { query } => search_test(&loaded, &query),
+        Cmd::FetchTest { url, proxy } => fetch_test(&loaded, &url, proxy.as_deref()),
         Cmd::LightTest => light_test(&loaded),
     }
 }
@@ -530,6 +538,20 @@ fn sugar_test(loaded: &petrovich_core::LoadedConfig, hours: u64) -> Result<()> {
     )?;
     let rt = tokio::runtime::Runtime::new()?;
     println!("{}", rt.block_on(ns.sugar(Some(hours)))?);
+    Ok(())
+}
+
+fn fetch_test(loaded: &petrovich_core::LoadedConfig, url: &str, proxy: Option<&str>) -> Result<()> {
+    let t = &loaded.config.tools;
+    let web = petrovich_tools::Web::with_fetch_proxy(
+        t.web_timeout_ms,
+        t.web_max_bytes,
+        false,
+        proxy.unwrap_or(""),
+    )?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let page = rt.block_on(web.fetch(url))?;
+    println!("HTTP OK: {} байт, {}", page.text.len(), page.url);
     Ok(())
 }
 

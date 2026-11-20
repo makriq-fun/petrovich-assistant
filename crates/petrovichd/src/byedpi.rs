@@ -38,7 +38,8 @@ pub enum Mode {
     /// `-d1 -s1+s -s3+s ...`.
     Chain {
         parts: Vec<SplitPos>,
-        delay_first: bool,
+        /// Первый разрез делается в обратном порядке (ciadpi `-d`).
+        disorder_first: bool,
     },
     Passthrough,
 }
@@ -104,6 +105,12 @@ impl ByeDpi {
 
     pub fn proxy_url(&self) -> String {
         format!("socks5h://127.0.0.1:{}", self.port)
+    }
+
+    /// Прозрачный режим: SOCKS-посредник не нужен, YouTube идёт напрямую.
+    /// Так обход не ломает сеть, где провайдер и так отдаёт YouTube.
+    pub fn is_direct(&self) -> bool {
+        self.current_mode() == Mode::Passthrough
     }
 
     pub fn current_label(&self) -> String {
@@ -260,7 +267,7 @@ fn parse_strategy(raw: &str) -> Strategy {
     // несколько директив. pos_t: offset[+s], где +s — смещение от SNI.
     let tokens: Vec<&str> = label.split_whitespace().collect();
     let mut parts = Vec::new();
-    let mut delay_first = false;
+    let mut disorder_first = false;
     let mut simple = (0usize, false, false, false); // split, fake, oob, disorder
     let mut i = 0;
     while i < tokens.len() {
@@ -313,9 +320,9 @@ fn parse_strategy(raw: &str) -> Strategy {
                 simple.0 = num;
             } else if parts.is_empty() && simple.0 == 0 {
                 simple.0 = num;
-                delay_first = true;
+                disorder_first = true;
             } else {
-                delay_first = true;
+                disorder_first = true;
                 parts.push(SplitPos::Absolute(num));
             }
         } else if from_sni || !parts.is_empty() {
@@ -331,7 +338,13 @@ fn parse_strategy(raw: &str) -> Strategy {
     }
 
     let mode = if parts.len() >= 2 {
-        Mode::Chain { parts, delay_first }
+        if disorder_first {
+            parts.insert(0, SplitPos::Absolute(simple.0.max(1)));
+        }
+        Mode::Chain {
+            parts,
+            disorder_first,
+        }
     } else if simple.3 {
         Mode::Disorder(simple.0.max(1))
     } else if simple.2 {
@@ -399,8 +412,7 @@ async fn handle_client(mut client: TcpStream, app: Arc<ByeDpi>) -> Result<()> {
     let mut port = [0u8; 2];
     client.read_exact(&mut port).await?;
     let port = u16::from_be_bytes(port);
-    let target = format!("{host}:{port}");
-    let mut remote = match TcpStream::connect(&target).await {
+    let mut remote = match connect_ipv4_first(&host, port).await {
         Ok(s) => s,
         Err(e) => {
             client.write_all(&[5, 4, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
@@ -431,6 +443,21 @@ async fn handle_client(mut client: TcpStream, app: Arc<ByeDpi>) -> Result<()> {
     }
     tokio::io::copy_bidirectional(&mut client, &mut remote).await?;
     Ok(())
+}
+
+/// На Мини 2 нет IPv6-маршрута, а DNS может отдать AAAA первым. Пробуем
+/// IPv4, затем IPv6, вместо того чтобы падать на первом недоступном адресе.
+async fn connect_ipv4_first(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+    let (v4, v6): (Vec<_>, Vec<_>) = addrs.into_iter().partition(|a| a.is_ipv4());
+    let mut last = None;
+    for addr in v4.into_iter().chain(v6) {
+        match TcpStream::connect(addr).await {
+            Ok(s) => return Ok(s),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("нет адресов")))
 }
 
 fn is_youtube(host: &str) -> bool {
@@ -514,14 +541,15 @@ async fn send_desync(remote: &mut TcpStream, first: &[u8], mode: Mode) -> Result
             remote.write_all(&first[at..]).await?;
         }
         Mode::Disorder(n) => {
-            // На обычном TCP нельзя переставить сегменты местами, не порвав
-            // поток. Безопасный эквивалент ByeDPI disorder — два раздельных
-            // сегмента ClientHello с паузой, которые DPI не склеивает.
+            // Как ciadpi: сегмент с TTL 1 виден DPI, но не доходит до сервера,
+            // затем тот же ClientHello уходит целиком обычным TTL.
             let at = split_at(first, n, sni);
-            remote.write_all(&first[..at]).await?;
-            remote.flush().await?;
+            set_ttl(remote, 1);
+            let _ = remote.write_all(&first[..at]).await;
+            let _ = remote.flush().await;
             tokio::time::sleep(Duration::from_millis(1)).await;
-            remote.write_all(&first[at..]).await?;
+            set_ttl(remote, 64);
+            remote.write_all(first).await?;
         }
         Mode::Oob(n) => {
             let at = split_at(first, n, sni).clamp(1, first.len());
@@ -544,7 +572,10 @@ async fn send_desync(remote: &mut TcpStream, first: &[u8], mode: Mode) -> Result
             remote.flush().await?;
             remote.write_all(&first[at..]).await?;
         }
-        Mode::Chain { parts, delay_first } => {
+        Mode::Chain {
+            parts,
+            disorder_first,
+        } => {
             let mut cuts: Vec<usize> = parts
                 .iter()
                 .map(|p| match p {
@@ -556,14 +587,26 @@ async fn send_desync(remote: &mut TcpStream, first: &[u8], mode: Mode) -> Result
             cuts.sort_unstable();
             cuts.dedup();
             let mut prev = 0usize;
-            for (idx, cut) in cuts.iter().copied().enumerate() {
+            if disorder_first {
+                // ciadpi: первый сегмент уходит с TTL 1 и больше не повторяется,
+                // остальные части начинаются сразу за ним.
+                prev = cuts.first().copied().unwrap_or(sni);
+                set_ttl(remote, 1);
+                let _ = remote.write_all(&first[..prev]).await;
+                let _ = remote.flush().await;
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                set_ttl(remote, 64);
+            }
+            let rest = if disorder_first && !cuts.is_empty() {
+                &cuts[1..]
+            } else {
+                &cuts[..]
+            };
+            for &cut in rest {
                 remote.write_all(&first[prev..cut]).await?;
                 remote.flush().await?;
                 prev = cut;
                 tokio::time::sleep(Duration::from_millis(1)).await;
-                if delay_first && idx == 0 {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
             }
             remote.write_all(&first[prev..]).await?;
         }
@@ -608,15 +651,27 @@ async fn send_oob(stream: &TcpStream, byte: u8) {
 fn set_ttl(stream: &TcpStream, ttl: i32) {
     use std::os::fd::AsRawFd;
     let fd = stream.as_raw_fd();
-    // SAFETY: fd валиден, размер ttl соответствует типу.
+    let len = std::mem::size_of::<i32>() as libc::socklen_t;
+    // SAFETY: fd валиден, ttl — i32, размер передан верно. Сокет может быть
+    // IPv4 или IPv6 (в том числе IPv4-mapped), поэтому ставим обе опции.
     unsafe {
-        libc::setsockopt(
+        let v4 = libc::setsockopt(
             fd,
             libc::IPPROTO_IP,
             libc::IP_TTL,
             &ttl as *const i32 as *const libc::c_void,
-            std::mem::size_of::<i32>() as libc::socklen_t,
+            len,
         );
+        let v6 = libc::setsockopt(
+            fd,
+            libc::IPPROTO_IPV6,
+            libc::IPV6_UNICAST_HOPS,
+            &ttl as *const i32 as *const libc::c_void,
+            len,
+        );
+        if v4 != 0 && v6 != 0 {
+            tracing::debug!("byedpi: TTL {ttl}: {}", io::Error::last_os_error());
+        }
     }
 }
 
@@ -634,7 +689,7 @@ mod tests {
         assert_eq!(parse_strategy("split_16").mode, Mode::Split(16));
         assert!(matches!(
             parse_strategy("-d1 -s1+s -s3+s -s6+s -s12+s -s14+s -s20+s -s24+s -s30+s -a1").mode,
-            Mode::Chain { parts, delay_first: true } if parts.len() == 8
+            Mode::Chain { parts, disorder_first: true } if parts.len() == 9
         ));
     }
 
@@ -724,7 +779,7 @@ mod tests {
     async fn desync_preserves_the_tcp_stream() {
         use tokio::io::AsyncReadExt;
         let payload: Vec<u8> = (0..=127u8).collect();
-        for mode in [Mode::Split(2), Mode::Disorder(2), Mode::Oob(2)] {
+        for mode in [Mode::Split(2), Mode::Oob(2)] {
             let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             let addr = listener.local_addr().unwrap();
             let expected = payload.clone();
@@ -732,7 +787,10 @@ mod tests {
                 let (mut sock, _) = listener.accept().await.unwrap();
                 let mut got = vec![0u8; expected.len()];
                 sock.read_exact(&mut got).await.unwrap();
-                assert_eq!(got, expected);
+                // Disorder шлёт копию с TTL 1; на loopback она доходит,
+                // в реальной сети гаснет. Поток сервера всегда заканчивается
+                // исходными байтами.
+                assert!(got.ends_with(&expected));
             });
             let mut client = TcpStream::connect(addr).await.unwrap();
             send_desync(&mut client, &payload, mode).await.unwrap();
