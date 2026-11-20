@@ -169,7 +169,7 @@ chat-модель (например, Gemini через VoidAI), когда от�
 
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `enabled` | `time,timer,alarm,volume,music,youtube,web_search,emotion,web_fetch,weather,sugar,remember,forget,reset_dialog,stop` | белый список |
+| `enabled` | `time,timer,alarm,volume,music,youtube,web_search,emotion,web_fetch,weather,sugar,computer,remember,forget,reset_dialog,stop` | белый список |
 | `timeout_ms` | `10000` | обычные инструменты |
 | `web_timeout_ms` | `15000` | веб, погода и сахар |
 | `web_max_bytes` | `1048576` | предел ответа |
@@ -187,6 +187,15 @@ chat-модель (например, Gemini через VoidAI), когда от�
 | `sandbox_timeout_ms` | `5000` | предел кода |
 | `music_command` | `[]` | устаревший внешний backend; при включённом Spotify не используется |
 | `youtube_proxy` | `""` | внешний прокси для `youtube`; пусто — встроенный ByeDPI |
+| `computer.host` | нет | адрес ПК; без `[tools.computer]` инструмент выключен |
+| `computer.mac` | нет | MAC для magic packet |
+| `computer.broadcast` | нет | broadcast локальной сети |
+| `computer.wake_port` | `9` | UDP-порт WOL |
+| `computer.ssh_port` | `2222` | порт ограниченного endpoint ПК |
+| `computer.ssh_bin` | нет | клиент SSH (`dbclient`) |
+| `computer.key` | нет | приватный ключ endpoint'а |
+| `computer.home` | `/data/petrovich/pc` | HOME для `dbclient`; ключ хоста — в `<home>/.ssh/known_hosts` |
+| `computer.timeout_ms` | `12000` | предел одной команды ПК |
 
 Инструмент доступен, только если он одновременно в `enabled`, настроен и
 разрешён. `weather` требует `weather_url`, а без координат — названного
@@ -194,7 +203,16 @@ chat-модель (например, Gemini через VoidAI), когда от�
 `search_proxy` — отдельный прокси для него (иначе общий); `run_code` — `sandbox_command`;
 `music` — Spotify или `music_command`; `youtube` — `youtube_proxy` или
 встроенный ByeDPI; `remember`/`forget` — `memory.enabled`;
-`sugar` — `nightscout_url`.
+`sugar` — `nightscout_url`; `computer` — `[tools.computer]`.
+
+`computer` управляет домашним ПК закрытым набором действий: `power_on` и
+`wake` шлют magic packet (включение из выключенного состояния и пробуждение
+из сна), `power_off`, `sleep`, `lock`, `coffee_on`/`coffee_off` и `status`
+идут одной командой на ограниченный SSH-endpoint ПК. Endpoint принимает
+только эти действия; произвольные команды и оболочка невозможны.
+На прошивке нет `openssh-client`, поэтому `ssh_bin` — это `dbclient`
+(dropbear). Ключ и `known_hosts` готовятся при установке; проверка —
+`petrovichctl computer-test`.
 `sugar` читает `/api/v1/entries/sgv.json` (только чтение), переводит mg/dL в
 ммоль/л и отдаёт значение, тренд, изменение за ~15 минут и диапазон за
 последние часы; `hours` в вызове задаёт глубину 1..24, по умолчанию 3.

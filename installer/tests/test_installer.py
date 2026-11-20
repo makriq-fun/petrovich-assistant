@@ -23,6 +23,11 @@ class Tests(unittest.TestCase):
         self.assertIn("/data/petrovich/backups/quasar-init/S97quasar.orig", text)
         self.assertIn("/data/petrovich/enabled", text)
 
+    def test_package_version_matches_cargo(self):
+        version = ji.package_version()
+        self.assertEqual(version, ji.validate_version(version))
+        self.assertIn(f'version = "{version}"', (ji.ROOT / "Cargo.toml").read_text())
+
     def test_version_validation(self):
         self.assertEqual(ji.validate_version("0.1.0"), "0.1.0")
         for bad in ["../x", "a b", "", "x" * 41]:

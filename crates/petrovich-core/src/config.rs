@@ -1098,6 +1098,49 @@ pub struct ToolsConfig {
     /// Пусто — прямое подключение. Поддерживаются socks5(h) и http(s).
     #[serde(default)]
     pub youtube_proxy: String,
+    /// Управление домашним ПК; отсутствие секции выключает инструмент.
+    #[serde(default)]
+    pub computer: Option<ComputerConfig>,
+}
+
+/// Домашний ПК, которым управляет колонка. Включение и пробуждение — это
+/// magic packet (WOL); остальные действия идут одной SSH-командой на
+/// ограниченный endpoint ПК. Свободных команд и оболочки нет.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerConfig {
+    /// Адрес ПК; закрепляется в роутере.
+    pub host: String,
+    /// MAC для magic packet, например "fc:34:97:17:d1:00".
+    pub mac: String,
+    /// Broadcast-адрес локальной сети, например "192.168.3.255".
+    pub broadcast: String,
+    #[serde(default = "default_wake_port")]
+    pub wake_port: u16,
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+    /// Клиент SSH (dropbear dbclient): на прошивке нет openssh-client.
+    pub ssh_bin: String,
+    /// Приватный ключ для ограниченного endpoint ПК.
+    pub key: String,
+    /// HOME для dbclient: в `<home>/.ssh/known_hosts` лежит ключ хоста ПК.
+    #[serde(default = "default_computer_home")]
+    pub home: String,
+    #[serde(default = "default_computer_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_wake_port() -> u16 {
+    9
+}
+fn default_ssh_port() -> u16 {
+    2222
+}
+fn default_computer_home() -> String {
+    "/data/petrovich/pc".into()
+}
+fn default_computer_timeout_ms() -> u64 {
+    12_000
 }
 
 impl Default for ToolsConfig {
@@ -1121,6 +1164,7 @@ impl Default for ToolsConfig {
             sandbox_timeout_ms: default_sandbox_timeout_ms(),
             music_command: Vec::new(),
             youtube_proxy: String::new(),
+            computer: None,
         }
     }
 }
@@ -1142,6 +1186,7 @@ fn default_tools_enabled() -> Vec<String> {
         "forget",
         "reset_dialog",
         "stop",
+        "computer",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -1567,6 +1612,34 @@ impl Config {
                 );
             }
         }
+        if let Some(pc) = &self.tools.computer {
+            if pc.host.trim().is_empty() {
+                return invalid("tools.computer.host пуст".into());
+            }
+            if parse_mac(&pc.mac).is_none() {
+                return invalid("tools.computer.mac должен быть MAC из шести байт".into());
+            }
+            if pc.broadcast.parse::<std::net::Ipv4Addr>().is_err() {
+                return invalid("tools.computer.broadcast должен быть IPv4-адресом".into());
+            }
+            if pc.wake_port == 0 || pc.ssh_port == 0 {
+                return invalid("tools.computer.wake_port/ssh_port не могут быть 0".into());
+            }
+            for (field, value) in [
+                ("ssh_bin", &pc.ssh_bin),
+                ("key", &pc.key),
+                ("home", &pc.home),
+            ] {
+                if !Path::new(value).is_absolute() {
+                    return invalid(format!(
+                        "tools.computer.{field} должен быть абсолютным путём"
+                    ));
+                }
+            }
+            if !(1_000..=60_000).contains(&pc.timeout_ms) {
+                return invalid("tools.computer.timeout_ms должен быть 1000..60000".into());
+            }
+        }
         if !(0.0..=1.0).contains(&self.hardware.led_brightness) {
             return invalid("hardware.led_brightness должен быть 0..1".into());
         }
@@ -1681,6 +1754,22 @@ impl Config {
     }
 }
 
+/// Разбирает MAC из `aa:bb:cc:dd:ee:ff`; разделители `:` и `-` допустимы.
+pub fn parse_mac(value: &str) -> Option<[u8; 6]> {
+    let parts: Vec<&str> = value.split([':', '-']).collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    let mut out = [0u8; 6];
+    for (slot, part) in out.iter_mut().zip(parts) {
+        if part.len() != 2 {
+            return None;
+        }
+        *slot = u8::from_str_radix(part, 16).ok()?;
+    }
+    Some(out)
+}
+
 fn validate_http_url(field: &str, value: &str) -> std::result::Result<(), ConfigError> {
     let url = Url::parse(value)
         .map_err(|e| ConfigError::Invalid(format!("{field}: неверный URL: {e}")))?;
@@ -1758,6 +1847,28 @@ mod tests {
     fn unknown_key_is_rejected() {
         let text = "[audio]\ncapure_pcm = \"default\"\n";
         assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    #[test]
+    fn computer_config_requires_valid_mac_and_absolute_paths() {
+        let mut cfg = example();
+        cfg.tools.computer = Some(ComputerConfig {
+            host: "192.168.3.2".into(),
+            mac: "fc:34:97:17:d1:00".into(),
+            broadcast: "192.168.3.255".into(),
+            wake_port: 9,
+            ssh_port: 2222,
+            ssh_bin: "/data/petrovich/pc/dbclient".into(),
+            key: "/data/petrovich/pc/client-key".into(),
+            home: "/data/petrovich/pc".into(),
+            timeout_ms: 12_000,
+        });
+        assert!(cfg.validate().is_ok());
+        cfg.tools.computer.as_mut().unwrap().mac = "fc:34:97:17:d1".into();
+        assert!(cfg.validate().is_err());
+        cfg.tools.computer.as_mut().unwrap().mac = "fc:34:97:17:d1:00".into();
+        cfg.tools.computer.as_mut().unwrap().key = "client-key".into();
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

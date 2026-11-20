@@ -142,7 +142,7 @@ max_bytes = 16777216
 proxy = ""
 
 [tools]
-enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search", "emotion", "web_fetch", "weather", "sugar", "remember", "forget", "reset_dialog", "stop"]
+enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search", "emotion", "web_fetch", "weather", "sugar", "computer", "remember", "forget", "reset_dialog", "stop"]
 timeout_ms = 10000
 web_timeout_ms = 15000
 web_max_bytes = 1048576
@@ -172,6 +172,20 @@ music_command = []
 # YouTube только звуком. Пусто — встроенный ByeDPI; явный прокси имеет
 # приоритет. Глобальные настройки сети не меняются.
 youtube_proxy = ""
+# Управление домашним ПК. Без секции [tools.computer] инструмент недоступен.
+# Включение и пробуждение — magic packet (WOL); остальные действия идут
+# одной командой на ограниченный SSH-endpoint ПК (dbclient из прошивки или
+# свой). Свободных команд нет.
+# [tools.computer]
+# host = "192.168.3.2"
+# mac = "fc:34:97:17:d1:00"
+# broadcast = "192.168.3.255"
+# wake_port = 9
+# ssh_port = 2222
+# ssh_bin = "/data/petrovich/pc/dbclient"
+# key = "/data/petrovich/pc/client-key"
+# home = "/data/petrovich/pc"
+# timeout_ms = 12000
 
 [modules]
 # Отключённый модуль не инициализируется и не запускает фоновые задачи.

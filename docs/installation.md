@@ -56,6 +56,8 @@ $EDITOR config.toml secrets.env
   или access token модуль не запускается. Для голосового поиска при входе
   по access token нужен Tavily-ключ или `spotify.client_id` + secret;
 - `[tools] sandbox_command` — только если действительно нужен `run_code`;
+- `[tools.computer]` — управление домашним ПК; без секции инструмент
+  недоступен;
 - `[hardware] model = "auto"`.
 
 Секреты не попадают в репозиторий и не печатаются в журнал. Файл с правами
@@ -113,6 +115,32 @@ python3 installer/petrovich_install.py --ssh-host station --dry-run install
 `assets/wakeword/`, а `[wakeword] model` в конфиге переписывается на неё.
 Старые модели из `/data/skynet`, `/data/jarvis` и `/data/opt/wakeword` не
 импортируются.
+
+## Управление ПК
+
+ПК должен принимать ограниченный SSH-endpoint: `command="..."` в
+`authorized_keys`, закрытый список действий, без PTY и проброса портов.
+Файлы для колонки — `dbclient`, приватный ключ и `known_hosts` с ключом хоста
+ПК. Установщик умеет положить их сразу:
+
+```bash
+python3 installer/petrovich_install.py --ssh-host station install \
+  --config config.toml --secrets secrets.env \
+  --pc-ssh-bin ./dbclient \
+  --pc-key ./client-key \
+  --pc-known-hosts ./known_hosts
+```
+
+Файлы окажутся в `/data/petrovich/pc/` с правами `0755` у `dbclient` и
+`0600` у ключей. Без флагов положите их туда вручную; путь к `dbclient`
+задаётся в `[tools.computer] ssh_bin`. Проверка:
+
+```bash
+/data/petrovich/current/petrovichctl --config /data/petrovich/config.toml computer-test
+```
+
+Добавьте `"computer"` в `[tools] enabled` (в примере он уже есть) и
+раскомментируйте `[tools.computer]`.
 
 ## Обновление
 

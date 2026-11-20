@@ -56,6 +56,11 @@ enum Cmd {
         #[arg(default_value_t = 3)]
         hours: u64,
     },
+    /// Проверить управление ПК; --wake дополнительно шлёт magic packet
+    ComputerTest {
+        #[arg(long)]
+        wake: bool,
+    },
     /// Проверить веб-поиск
     SearchTest { query: String },
     /// Проверить прямой HTTP(S)-доступ без прокси
@@ -95,6 +100,7 @@ fn main() -> Result<()> {
         Cmd::LlmTest { text } => llm_test(&loaded, &text),
         Cmd::WeatherTest => weather_test(&loaded),
         Cmd::SugarTest { hours } => sugar_test(&loaded, hours),
+        Cmd::ComputerTest { wake } => computer_test(&loaded, wake),
         Cmd::SearchTest { query } => search_test(&loaded, &query),
         Cmd::FetchTest { url, proxy } => fetch_test(&loaded, &url, proxy.as_deref()),
         Cmd::LightTest => light_test(&loaded),
@@ -610,6 +616,24 @@ fn sugar_test(loaded: &petrovich_core::LoadedConfig, hours: u64) -> Result<()> {
     .with_proxy(loaded.config.network.proxy.trim());
     let rt = tokio::runtime::Runtime::new()?;
     println!("{}", rt.block_on(ns.sugar(Some(hours)))?);
+    Ok(())
+}
+
+fn computer_test(loaded: &petrovich_core::LoadedConfig, wake: bool) -> Result<()> {
+    let cfg = loaded
+        .config
+        .tools
+        .computer
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("[tools.computer] не задан"))?;
+    let pc = petrovich_tools::Computer::new(cfg)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    if wake {
+        rt.block_on(pc.wake())?;
+        println!("magic packet отправлен на {}", pc.config().mac);
+    }
+    let answer = rt.block_on(pc.probe())?;
+    println!("ПК на связи: {}", answer.trim());
     Ok(())
 }
 

@@ -542,8 +542,10 @@ pid=$(cat /run/petrovichd.pid 2>/dev/null || true)
 if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then echo "pid: нет" >&2; exit 1; fi
 "$D/current/petrovichd" --config "$D/config.toml" --check-config >/tmp/petrovich-check.out 2>&1 || {
   echo "check-config:" >&2; cat /tmp/petrovich-check.out >&2; exit 1; }
-"$D/current/petrovichctl" --config "$D/config.toml" doctor >/tmp/petrovich-doctor.out 2>&1 || {
-  echo "doctor:" >&2; cat /tmp/petrovich-doctor.out >&2; exit 1; }
+# status проверяет процесс и конфигурацию, но не внешнюю сеть: прокси
+# может быть временно недоступен, и это не повод откатывать релиз.
+"$D/current/petrovichctl" --config "$D/config.toml" status >/tmp/petrovich-status.out 2>&1 || {
+  echo "status:" >&2; cat /tmp/petrovich-status.out >&2; exit 1; }
 echo "ok pid=$pid"
 """,
             check=False,
@@ -600,6 +602,15 @@ def deploy_release(t: Transport, artifact: Path, ctl: Path, version: str, dry: b
     )
 
 
+def package_version() -> str:
+    """Версия из Cargo.toml, чтобы установщик не отставал от выпуска."""
+    text = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line.startswith("version = "):
+            return validate_version(line.split('"')[1])
+    raise InstallError("в Cargo.toml нет version")
+
+
 def _default_binary(name: str) -> Path:
     for rel in (f"dist/{name}", f"bin/{name}"):
         p = ROOT / rel
@@ -629,7 +640,7 @@ def install(args) -> int:
             r"""
 set -eu
 D=/data/petrovich
-for d in releases backups models assets state log staging packaging; do mkdir -p "$D/$d"; done
+for d in releases backups models assets state log staging packaging pc/.ssh; do mkdir -p "$D/$d"; done
 cp -f "$D/current/supervise.sh" "$D/supervise.sh" 2>/dev/null || true
 """
         )
@@ -661,6 +672,16 @@ cp -f "$D/current/supervise.sh" "$D/supervise.sh" 2>/dev/null || true
             "755",
         )
         upload_file(t, ROOT / "assets/oww.bin", f"{DEVICE_ROOT}/assets/oww.bin", "644")
+        if args.pc_ssh_bin:
+            upload_file(
+                t, Path(args.pc_ssh_bin), f"{DEVICE_ROOT}/pc/dbclient", "755"
+            )
+        if args.pc_key:
+            upload_secret(t, Path(args.pc_key), f"{DEVICE_ROOT}/pc/client-key")
+        if args.pc_known_hosts:
+            upload_secret(
+                t, Path(args.pc_known_hosts), f"{DEVICE_ROOT}/pc/.ssh/known_hosts"
+            )
         # Конфигурация: существующую не затираем без явного файла.
         if args.config:
             upload_file(t, Path(args.config), f"{DEVICE_ROOT}/config.toml", "644")
@@ -992,10 +1013,13 @@ def main(argv=None) -> int:
         s = sub.add_parser(name)
         s.add_argument("--artifact")
         s.add_argument("--petrovichctl")
-        s.add_argument("--version", default="0.2.4")
+        s.add_argument("--version", default=package_version())
         s.add_argument("--config")
         s.add_argument("--secrets")
         s.add_argument("--wakeword-model")
+        s.add_argument("--pc-ssh-bin", help="dbclient для управления ПК")
+        s.add_argument("--pc-key", help="приватный ключ endpoint'а ПК")
+        s.add_argument("--pc-known-hosts", help="known_hosts с ключом хоста ПК")
         s.add_argument("--always-backup", action="store_true")
         s.add_argument("--allow-unknown-model", action="store_true")
         s.set_defaults(func=install)

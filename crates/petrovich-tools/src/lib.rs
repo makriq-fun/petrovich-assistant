@@ -1,5 +1,6 @@
 //! Инструменты ассистента и проверка разрешений.
 
+pub mod computer;
 pub mod html;
 pub mod nightscout;
 pub mod registry;
@@ -10,6 +11,7 @@ pub mod web;
 #[cfg(test)]
 mod testutil;
 
+pub use computer::{magic_packet, Computer, ComputerAction};
 pub use nightscout::Nightscout;
 pub use registry::{ControlAction, MusicDuck, ToolContext, ToolResult};
 pub use timers::{AlarmFired, AlarmInfo, AlarmManager, TimerFired, TimerInfo, TimerManager};

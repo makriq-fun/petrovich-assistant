@@ -45,7 +45,9 @@
   перемотка, таймер сна), звук YouTube без картинки (поиск с метаданными,
   субтитры и комментарии, seek, очередь, сохранение позиции), встроенный
   обход блокировок ByeDPI, эмоции, погода по городу из памяти, сахар из
-  Nightscout, Tavily-поиск, чтение HTTPS-страниц, сброс диалога, остановка;
+  Nightscout, управление домашним ПК (включение по WOL, выключение, сон,
+  пробуждение, блокировка, режим кофе), Tavily-поиск, чтение HTTPS-страниц,
+  сброс диалога, остановка;
 - агент выполняет несколько инструментов за ход параллельно, продолжает
   цепочку после ошибки отдельного действия, умеет уточнять и отменять
   поручение; результаты каждого действия возвращаются модели честно;
@@ -117,7 +119,7 @@ LLM, TTS, Tavily, `web_fetch`, погоде, Nightscout, Spotify API и librespo
 # На ПК: собрать релиз под ARMv7
 cargo install cross --git https://github.com/cross-rs/cross
 scripts/build.sh
-# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.4-armv7.tar.gz
+# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.6-armv7.tar.gz
 
 # Установка по SSH (ключ root уже настроен)
 python3 installer/petrovich_install.py --ssh-host station install \
@@ -160,6 +162,7 @@ tail -f /data/petrovich/log/petrovichd.log
 | `petrovichctl light-test` | пять отсчётов датчика освещённости |
 | `petrovichctl search-test "запрос"` | проверка веб-поиска |
 | `petrovichctl sugar-test 3` | сахар из Nightscout за 3 часа |
+| `petrovichctl computer-test` | связь с ограниченным endpoint ПК |
 | `installer ... rollback` | предыдущий релиз и проверка |
 | `installer ... restore` | снять помощника и вернуть init-скрипты Quasar |
 

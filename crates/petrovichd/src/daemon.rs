@@ -19,7 +19,7 @@ use petrovich_hw::ButtonEvent;
 use petrovich_providers::llm::OpenAiLlm;
 use petrovich_providers::{stt_from_config, tts_from_config};
 use petrovich_tools::{
-    AlarmManager, ControlAction, Nightscout, TimerManager, ToolContext, Weather, Web,
+    AlarmManager, Computer, ControlAction, Nightscout, TimerManager, ToolContext, Weather, Web,
 };
 use petrovich_wakeword::WakeWord;
 use tokio::signal::unix::{signal, SignalKind};
@@ -413,6 +413,14 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
             )?
             .with_proxy(cfg.network.proxy.trim()),
         );
+    }
+    if cfg.tools.enabled.iter().any(|t| t == "computer") {
+        match &cfg.tools.computer {
+            Some(pc) => tools = tools.with_computer(Computer::new(pc.clone())?),
+            None => tracing::warn!(
+                "инструмент computer включён, но [tools.computer] не задан; ПК не управляется"
+            ),
+        }
     }
     if let Some(memory) = &memory {
         tools = tools.with_memory(memory.clone());

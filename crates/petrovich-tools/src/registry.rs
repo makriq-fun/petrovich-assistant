@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use crate::computer::{Computer, ComputerAction};
 use crate::nightscout::Nightscout;
 use crate::timers::{AlarmManager, TimerManager};
 use crate::weather::Weather;
@@ -51,6 +52,7 @@ pub struct ToolContext {
     web: Web,
     weather: Option<Weather>,
     nightscout: Option<Nightscout>,
+    computer: Option<Computer>,
     memory: Option<SharedMemory>,
     chime: Arc<dyn Chime>,
     ui: mpsc::UnboundedSender<UiEvent>,
@@ -80,6 +82,7 @@ impl ToolContext {
             web,
             weather: None,
             nightscout: None,
+            computer: None,
             memory: None,
             chime,
             ui,
@@ -95,6 +98,11 @@ impl ToolContext {
 
     pub fn with_nightscout(mut self, nightscout: Nightscout) -> Self {
         self.nightscout = Some(nightscout);
+        self
+    }
+
+    pub fn with_computer(mut self, computer: Computer) -> Self {
+        self.computer = Some(computer);
         self
     }
 
@@ -180,6 +188,7 @@ impl ToolContext {
             "web_fetch",
             "weather",
             "sugar",
+            "computer",
             "remember",
             "forget",
             "run_code",
@@ -199,6 +208,7 @@ impl ToolContext {
             "web_search" => self.web.has_search_api(),
             "weather" => self.weather.is_some(),
             "sugar" => self.nightscout.is_some(),
+            "computer" => self.computer.is_some(),
             "remember" | "forget" => self.memory.is_some(),
             "run_code" => !self.cfg.sandbox_command.is_empty(),
             _ => true,
@@ -324,6 +334,16 @@ impl ToolContext {
                     json!([]),
                 ),
             ),
+            "computer" => ToolDefinition::new(
+                "computer",
+                "Управление домашним ПК: power_on — включить, power_off — выключить, sleep — спящий режим, wake — разбудить, lock — заблокировать, coffee_on/coffee_off — не давать засыпать, status — проверить связь",
+                obj(
+                    json!({
+                        "action": {"type":"string","enum":["power_on","power_off","sleep","wake","lock","coffee_on","coffee_off","status"]}
+                    }),
+                    json!(["action"]),
+                ),
+            ),
             "remember" => ToolDefinition::new(
                 "remember",
                 "Запомнить факт о пользователе надолго: имя, город, предпочтения, договорённости. Не сохраняй пароли, ключи и другие секреты",
@@ -378,6 +398,13 @@ impl ToolContext {
             "web_fetch" | "web_search" | "weather" | "sugar" => {
                 Duration::from_millis(self.cfg.web_timeout_ms)
             }
+            "computer" => Duration::from_millis(
+                self.computer
+                    .as_ref()
+                    .map(|c| c.config().timeout_ms)
+                    .unwrap_or(self.cfg.timeout_ms)
+                    + 1_000,
+            ),
             "run_code" => Duration::from_millis(self.cfg.sandbox_timeout_ms),
             // Разрешение ссылки и проверка первого сегмента ходят в сеть;
             // при заблокированном googlevideo это занимает несколько секунд.
@@ -978,6 +1005,19 @@ impl ToolContext {
                     trend: now.trend.clone(),
                 });
                 Ok(ToolResult::text(now.text))
+            }
+            "computer" => {
+                let computer = self
+                    .computer
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("ПК не настроен"))?;
+                let name = args
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("computer: нет action"))?;
+                let action = ComputerAction::parse(name)
+                    .ok_or_else(|| anyhow::anyhow!("computer: неизвестное действие {name}"))?;
+                Ok(ToolResult::text(computer.perform(action).await?))
             }
             "remember" => {
                 let memory = self
