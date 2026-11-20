@@ -173,6 +173,66 @@ fn doctor(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
         failures += 1;
     };
     let cfg = &loaded.config;
+    if cfg.vad.short_silence_ms < 1000 || cfg.vad.resume_pause_ms < 700 {
+        warn(&format!(
+            "VAD обрывает паузы: short_silence={} мс, resume={} мс (ожидается >=1000/700)",
+            cfg.vad.short_silence_ms, cfg.vad.resume_pause_ms
+        ));
+    } else {
+        ok("VAD пережидает естественные паузы");
+    }
+    if cfg.audio.mic_gain > 0 {
+        let out = Command::new("amixer")
+            .args(["-c", "0", "sget", "PDM Gain"])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                if text.contains("Playback channels") && text.contains("Mono:") {
+                    let level = text
+                        .split("Mono:")
+                        .nth(1)
+                        .and_then(|v| v.split_whitespace().next())
+                        .unwrap_or("?");
+                    if level.starts_with('0') {
+                        fail("PDM Gain = 0: микрофон не слышит");
+                    } else {
+                        ok(&format!("PDM Gain {level}"));
+                    }
+                } else {
+                    warn("PDM Gain не найден");
+                }
+            }
+            _ => warn("amixer не читает PDM Gain"),
+        }
+    }
+    for (name, proxy) in [("STT", &cfg.stt.proxy), ("LLM", &cfg.llm.proxy)] {
+        let p = proxy.trim();
+        if p.is_empty() {
+            continue;
+        }
+        let Some(rest) = p
+            .strip_prefix("socks5h://")
+            .or_else(|| p.strip_prefix("socks5://"))
+            .or_else(|| p.strip_prefix("http://"))
+            .or_else(|| p.strip_prefix("https://"))
+        else {
+            fail(&format!("{name}: неверный proxy {p}"));
+            continue;
+        };
+        let addr = rest.split('/').next().unwrap_or(rest);
+        match addr.to_socket_addrs().ok().and_then(|mut a| a.next()) {
+            Some(addr) => {
+                let timeout = std::time::Duration::from_millis(700);
+                if std::net::TcpStream::connect_timeout(&addr, timeout).is_ok() {
+                    ok(&format!("{name}: прокси {addr} доступен"));
+                } else {
+                    fail(&format!("{name}: прокси {addr} не отвечает"));
+                }
+            }
+            None => warn(&format!("{name}: не разобрать proxy {p}")),
+        }
+    }
     match profile::resolve(&cfg.hardware.model) {
         Ok(p) => ok(&format!("модель {} ({})", p.model_name, p.codename)),
         Err(e) => fail(&format!("модель: {e}")),
