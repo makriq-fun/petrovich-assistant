@@ -914,13 +914,18 @@ impl App {
                         self.enter_idle();
                     }
                     None => {
-                        // Без финального сигнала: он задерживал следующее
-                        // прослушивание и мог попасть в микрофон.
                         if !outcome.spoken.is_empty() {
                             let _ = self.ui.send(UiEvent::Notice(UiNotice::Done));
                         }
                         if let Some(yt) = &self.youtube {
                             yt.unduck();
+                        }
+                        // Короткий сигнал завершения, но прослушивание
+                        // включается сразу: сигнал не задерживает диалог.
+                        if self.dialog.state_chimes {
+                            let _ = self.chime.play(ChimeSound::Done);
+                            self.command_ignore_until =
+                                tokio::time::Instant::now() + Duration::from_millis(700);
                         }
                         self.enter_listening(true);
                     }

@@ -289,7 +289,7 @@ pub async fn run_turn(
         if !left.is_zero() {
             tokio::time::sleep(left).await;
         }
-        let _ = tokio::time::timeout(Duration::from_secs(3), ctx.playback.wait_idle()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(15), ctx.playback.wait_idle()).await;
         let _ = ctx.ui.send(UiEvent::SpeechFinished);
     }
     Ok(TurnOutcome {
@@ -354,7 +354,7 @@ pub async fn speak_text(ctx: &TurnContext, text: &str) -> Result<()> {
     if !left.is_zero() {
         tokio::time::sleep(left).await;
     }
-    let _ = tokio::time::timeout(Duration::from_secs(3), ctx.playback.wait_idle()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(15), ctx.playback.wait_idle()).await;
     let _ = ctx.ui.send(UiEvent::SpeechFinished);
     Ok(())
 }
