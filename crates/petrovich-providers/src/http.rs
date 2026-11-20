@@ -17,6 +17,15 @@ pub fn client(timeout_ms: u64) -> Result<Client> {
 
 /// Клиент с дополнительным корневым сертификатом для self-hosted HTTPS.
 pub fn client_with_ca(timeout_ms: u64, ca_file: Option<&std::path::Path>) -> Result<Client> {
+    client_with_ca_proxy(timeout_ms, ca_file, "")
+}
+
+/// Клиент с корневым сертификатом и SOCKS5/HTTP-прокси.
+pub fn client_with_ca_proxy(
+    timeout_ms: u64,
+    ca_file: Option<&std::path::Path>,
+    proxy: &str,
+) -> Result<Client> {
     let mut builder = Client::builder()
         .timeout(Duration::from_millis(timeout_ms))
         .connect_timeout(Duration::from_secs(10))
@@ -26,6 +35,12 @@ pub fn client_with_ca(timeout_ms: u64, ca_file: Option<&std::path::Path>) -> Res
         let cert = reqwest::Certificate::from_pem(&pem)
             .with_context(|| format!("разбор сертификата {}", path.display()))?;
         builder = builder.add_root_certificate(cert);
+    }
+    if !proxy.trim().is_empty() {
+        builder = builder.proxy(
+            reqwest::Proxy::all(proxy.trim())
+                .with_context(|| format!("прокси провайдера {proxy}"))?,
+        );
     }
     builder.build().context("создание HTTP-клиента")
 }

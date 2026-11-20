@@ -286,6 +286,22 @@ mod tests {
         assert_eq!(out.len(), 1);
     }
 
+    /// Новая настройка: пауза 1,2 с после короткого начала — ещё не конец.
+    #[test]
+    fn one_second_pause_does_not_cut_request() {
+        let mut v = Vad::new(
+            16_000, 300, 2_200, 1_400, 4_000, 1_100, 45_000, 6.0, 300, -55.0,
+        );
+        let mut out = Vec::new();
+        out.extend(v.push(&tone(12_800, 440.0, 0.3))); // 800 мс речи
+        out.extend(v.push(&vec![0; 19_200])); // пауза 1,2 с
+        assert!(out.is_empty(), "фраза оборвана на паузе");
+        out.extend(v.push(&tone(12_800, 440.0, 0.3)));
+        out.extend(v.push(&vec![0; 40_000]));
+        assert_eq!(out.len(), 1, "продолжение потеряно");
+        assert!(out[0].speech_ms > 2_500);
+    }
+
     /// Пауза 600 мс посреди длинной фразы не завершает её.
     #[test]
     fn long_sentence_survives_long_pause() {

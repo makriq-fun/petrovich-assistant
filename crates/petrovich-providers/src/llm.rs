@@ -16,7 +16,7 @@ use reqwest::Response;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::http::{client, endpoint, redact, SseDecoder};
+use crate::http::{endpoint, redact, SseDecoder};
 
 #[derive(Clone)]
 pub struct OpenAiLlm {
@@ -59,7 +59,7 @@ impl OpenAiLlm {
             }
         }
         Ok(Self {
-            http: client(cfg.timeout_ms)?,
+            http: crate::http::client_with_ca_proxy(cfg.timeout_ms, None, &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/chat/completions"),
             models,
             keys,

@@ -589,23 +589,24 @@ fn default_min_speech_ms() -> u64 {
     300
 }
 fn default_silence_ms() -> u64 {
-    // Естественная пауза внутри предложения обычно короче 900 мс.
-    900
+    // Длинная фраза: даём договорить после паузы на размышление.
+    2_200
 }
 fn default_short_silence_ms() -> u64 {
-    450
+    // Даже короткая команда не обрывается на паузе внутри предложения.
+    1_400
 }
 fn default_short_utterance_ms() -> u64 {
-    1_200
+    4_000
 }
 fn default_resume_pause_ms() -> u64 {
-    400
+    1_100
 }
 fn default_activation_pre_roll_ms() -> u64 {
     2_500
 }
 fn default_max_utterance_ms() -> u64 {
-    30_000
+    45_000
 }
 fn default_energy_margin_db() -> f32 {
     9.0
@@ -768,6 +769,9 @@ pub struct SttConfig {
     /// Дополнительный корневой сертификат для self-hosted HTTPS.
     #[serde(default)]
     pub tls_ca_file: Option<PathBuf>,
+    /// Прокси только для STT, например socks5h://127.0.0.1:1080.
+    #[serde(default)]
+    pub proxy: String,
 }
 
 impl Default for SttConfig {
@@ -782,6 +786,7 @@ impl Default for SttConfig {
             retries: default_retries(),
             command: Vec::new(),
             tls_ca_file: None,
+            proxy: String::new(),
         }
     }
 }
@@ -839,6 +844,9 @@ pub struct LlmConfig {
     pub stream: bool,
     #[serde(default = "default_true")]
     pub tools: bool,
+    /// Прокси только для LLM, например socks5h://127.0.0.1:1080.
+    #[serde(default)]
+    pub proxy: String,
 }
 
 impl Default for LlmConfig {
@@ -856,6 +864,7 @@ impl Default for LlmConfig {
             retries: default_retries(),
             stream: true,
             tools: true,
+            proxy: String::new(),
         }
     }
 }
@@ -1537,6 +1546,22 @@ impl Config {
                 if self.stt.command.is_empty() {
                     return invalid("stt.provider=command, но stt.command пуст".into());
                 }
+            }
+        }
+        for (name, proxy) in [
+            ("stt.proxy", &self.stt.proxy),
+            ("llm.proxy", &self.llm.proxy),
+        ] {
+            let p = proxy.trim();
+            if !p.is_empty()
+                && !(p.starts_with("socks5h://")
+                    || p.starts_with("socks5://")
+                    || p.starts_with("http://")
+                    || p.starts_with("https://"))
+            {
+                return invalid(format!(
+                    "{name} должен начинаться с socks5h://, socks5://, http:// или https://"
+                ));
             }
         }
         validate_http_url("llm.base_url", &self.llm.base_url)?;

@@ -415,6 +415,10 @@ EOF
 done
 cp "$D/packaging/S99petrovich" /etc/init.d/S99petrovich
 chmod 755 /etc/init.d/S99petrovich
+if [ -f "$D/packaging/S98hysteria2" ]; then
+  cp "$D/packaging/S98hysteria2" /etc/init.d/S98hysteria2
+  chmod 755 /etc/init.d/S98hysteria2
+fi
 if [ "$rw" = 1 ]; then mount -o remount,ro / >/dev/null 2>&1 || true; fi
 echo "quasar_shim_changed=$changed"
 """
@@ -646,6 +650,12 @@ cp -f "$D/current/supervise.sh" "$D/supervise.sh" 2>/dev/null || true
             t,
             ROOT / "packaging/init.d/S99petrovich",
             f"{DEVICE_ROOT}/packaging/S99petrovich",
+            "755",
+        )
+        upload_file(
+            t,
+            ROOT / "packaging/init.d/S98hysteria2",
+            f"{DEVICE_ROOT}/packaging/S98hysteria2",
             "755",
         )
         upload_file(t, ROOT / "assets/oww.bin", f"{DEVICE_ROOT}/assets/oww.bin", "644")

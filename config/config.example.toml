@@ -51,8 +51,11 @@ model = "/system/vendor/quasar/spotter_models/command"
 
 [vad]
 min_speech_ms = 300
-silence_ms = 700
-max_utterance_ms = 12000
+silence_ms = 2200
+short_silence_ms = 1400
+short_utterance_ms = 4000
+resume_pause_ms = 1100
+max_utterance_ms = 45000
 energy_margin_db = 6.0
 pre_roll_ms = 300
 absolute_db = -55.0

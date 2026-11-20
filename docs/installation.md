@@ -140,6 +140,24 @@ python3 installer/petrovich_install.py --ssh-host station privacy --revert
 DHCP/NetworkManager может перезаписать `resolv.conf` после перезагрузки —
 проверьте через `petrovichctl doctor`.
 
+## Hysteria 2 для STT/LLM
+
+Если провайдер блокирует `api.groq.com` по IP, клиент Hysteria 2 поднимает
+локальный SOCKS5 только для STT/LLM:
+
+```toml
+[stt]
+proxy = "socks5h://127.0.0.1:1080"
+
+[llm]
+proxy = "socks5h://127.0.0.1:1080"
+```
+
+Бинарник и конфиг лежат в `/data/petrovich/opt/hysteria2/` и
+`/data/petrovich/hysteria.yaml` (права 600, в репозиторий не попадают).
+`/etc/init.d/S98hysteria2` распаковывает сжатый бинарник в `/tmp` и запускает
+его до `petrovichd`. Остальной трафик колонки идёт напрямую.
+
 ## Проверка
 
 ```bash

@@ -13,7 +13,7 @@ use reqwest::multipart::{Form, Part};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::http::{check_status, client, client_with_ca, endpoint, redact, retryable};
+use crate::http::{check_status, client_with_ca_proxy, endpoint, redact, retryable};
 
 #[async_trait]
 pub trait Stt: Send + Sync {
@@ -44,7 +44,7 @@ pub struct FishStt {
 impl FishStt {
     pub fn new(cfg: &SttConfig, secrets: &Secrets) -> Result<Self> {
         Ok(Self {
-            http: client_with_ca(cfg.timeout_ms, cfg.tls_ca_file.as_deref())?,
+            http: client_with_ca_proxy(cfg.timeout_ms, cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/asr"),
             model: cfg.model.clone(),
             language: cfg.language.clone(),
@@ -139,7 +139,7 @@ pub struct OpenAiStt {
 impl OpenAiStt {
     pub fn new(cfg: &SttConfig, secrets: &Secrets) -> Result<Self> {
         Ok(Self {
-            http: client(cfg.timeout_ms)?,
+            http: client_with_ca_proxy(cfg.timeout_ms, cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/audio/transcriptions"),
             model: cfg.model.clone(),
             language: cfg.language.clone(),
@@ -224,7 +224,7 @@ pub struct ChatAudioStt {
 impl ChatAudioStt {
     pub fn new(cfg: &SttConfig, secrets: &Secrets) -> Result<Self> {
         Ok(Self {
-            http: client_with_ca(cfg.timeout_ms, cfg.tls_ca_file.as_deref())?,
+            http: client_with_ca_proxy(cfg.timeout_ms, cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/chat/completions"),
             model: cfg.model.clone(),
             language: cfg.language.clone(),
