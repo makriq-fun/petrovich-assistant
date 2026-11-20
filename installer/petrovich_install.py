@@ -542,6 +542,8 @@ pid=$(cat /run/petrovichd.pid 2>/dev/null || true)
 if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then echo "pid: нет" >&2; exit 1; fi
 "$D/current/petrovichd" --config "$D/config.toml" --check-config >/tmp/petrovich-check.out 2>&1 || {
   echo "check-config:" >&2; cat /tmp/petrovich-check.out >&2; exit 1; }
+"$D/current/petrovichctl" --config "$D/config.toml" doctor >/tmp/petrovich-doctor.out 2>&1 || {
+  echo "doctor:" >&2; cat /tmp/petrovich-doctor.out >&2; exit 1; }
 echo "ok pid=$pid"
 """,
             check=False,
