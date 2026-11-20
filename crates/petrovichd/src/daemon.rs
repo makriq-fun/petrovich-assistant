@@ -50,6 +50,10 @@ enum StopTarget {
     None,
 }
 
+fn accept_fast_command(command: Command, speaker_playing: bool, aec: bool) -> bool {
+    matches!(command, Command::Stop) || !speaker_playing || aec
+}
+
 fn stop_target(mode: Mode, media_playing: bool) -> StopTarget {
     match mode {
         Mode::Thinking => StopTarget::Assistant,
@@ -181,7 +185,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     );
     timers.restore().await;
     alarms.restore().await;
-    let chime = Arc::new(LocalChime::new(playback.clone()));
+    let chime = Arc::new(LocalChime::new(playback.clone(), volume.clone()));
     let search_key = if cfg.modules.web_search {
         loaded
             .secrets
@@ -677,6 +681,8 @@ impl App {
         let _ = self.ui.send(UiEvent::Notice(notice));
         if self.dialog.state_chimes {
             let _ = self.chime.play(sound);
+            // Свой сигнал не должен распознаваться как быстрая команда.
+            self.command_ignore_until = tokio::time::Instant::now() + Duration::from_millis(700);
         }
     }
 
@@ -758,16 +764,21 @@ impl App {
                 Vec::new()
             };
             for command in commands {
-                // Во время TTS/сигналов не даём озвучке самой переключать
-                // трек или громкость. «Стоп» остаётся доступен — им и
-                // останавливают ассистента.
-                let always = matches!(
+                // «Стоп» работает всегда: иначе ассистента не остановить
+                // голосом. Громкость и переключение из собственной озвучки
+                // или музыки без AEC — ложное срабатывание, их не пускаем.
+                let media_playing = self
+                    .music
+                    .as_ref()
+                    .is_some_and(|m| m.is_playing().unwrap_or(false))
+                    || self.youtube.as_ref().is_some_and(|y| y.is_playing());
+                if !accept_fast_command(
                     command,
-                    Command::Stop | Command::VolumeUp | Command::VolumeDown
-                );
-                if self.playback.is_playing() && !always && !self.frontend.echo_cancelled() {
+                    self.playback.is_playing() || media_playing,
+                    self.frontend.echo_cancelled(),
+                ) {
                     tracing::debug!(
-                        "быстрая команда {command:?}: нет AEC, пропускаю во время речи"
+                        "быстрая команда {command:?}: нет AEC, пропускаю во время звука"
                     );
                     continue;
                 }
@@ -955,6 +966,8 @@ impl App {
                 let _ = self.ui.send(UiEvent::Error(e.clone()));
                 let _ = self.ui.send(UiEvent::Notice(UiNotice::Error));
                 let _ = self.chime.play(ChimeSound::Error);
+                self.command_ignore_until =
+                    tokio::time::Instant::now() + Duration::from_millis(700);
                 if let Some(yt) = &self.youtube {
                     yt.unduck();
                 }
@@ -1302,6 +1315,15 @@ mod deadline_tests {
     fn no_speech_keeps_existing_deadline() {
         let now = tokio::time::Instant::now();
         assert!(listen_deadline(now, false, false, None, 12_000, 5_000).is_none());
+    }
+
+    #[test]
+    fn fast_volume_needs_aec_while_speaker_plays_but_stop_always_works() {
+        assert!(!accept_fast_command(Command::VolumeUp, true, false));
+        assert!(!accept_fast_command(Command::Next, true, false));
+        assert!(accept_fast_command(Command::VolumeUp, true, true));
+        assert!(accept_fast_command(Command::Stop, true, false));
+        assert!(accept_fast_command(Command::Next, false, false));
     }
 
     #[test]

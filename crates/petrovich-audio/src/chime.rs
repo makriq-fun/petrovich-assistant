@@ -2,9 +2,11 @@
 //! лишние зависимости. Тоны мягкие: колокольная атака, экспоненциальный
 //! спад и длинный release, чтобы сигналы не резали слух.
 
+use std::sync::Arc;
+
 use petrovich_core::errors::Result;
 use petrovich_core::events::Emotion;
-use petrovich_core::ports::{Chime, ChimeSound};
+use petrovich_core::ports::{Chime, ChimeSound, VolumeControl};
 
 use crate::frontend::PlaybackHandle;
 
@@ -12,19 +14,51 @@ const RATE: u32 = 24_000;
 
 pub struct LocalChime {
     playback: PlaybackHandle,
+    volume: Arc<dyn VolumeControl>,
 }
 
 impl LocalChime {
-    pub fn new(playback: PlaybackHandle) -> Self {
-        Self { playback }
+    pub fn new(playback: PlaybackHandle, volume: Arc<dyn VolumeControl>) -> Self {
+        Self { playback, volume }
+    }
+
+    fn gain(&self) -> f32 {
+        let percent = self
+            .volume
+            .get()
+            .map(|v| v.percent)
+            .unwrap_or(100)
+            .clamp(1, 100);
+        volume_gain(percent)
     }
 }
 
 impl Chime for LocalChime {
     fn play(&self, sound: ChimeSound) -> Result<()> {
-        self.playback.play_pcm(samples(sound), RATE);
+        let gain = self.gain();
+        let samples = apply_gain(samples(sound), gain);
+        self.playback.play_pcm(samples, RATE);
         Ok(())
     }
+}
+
+/// Тихая колонка не должна «съедать» служебный сигнал: до +6 дБ цифровой
+/// компенсации при низком Master. Выше 70% усиления нет, поэтому сигнал не
+/// становится громче речи на нормальной громкости.
+pub fn volume_gain(percent: i32) -> f32 {
+    let percent = percent.clamp(1, 100) as f32;
+    (100.0 / percent).sqrt().clamp(1.0, 2.0)
+}
+
+fn apply_gain(mut samples: Vec<i16>, gain: f32) -> Vec<i16> {
+    if (gain - 1.0).abs() < f32::EPSILON {
+        return samples;
+    }
+    for sample in &mut samples {
+        let scaled = f32::from(*sample) * gain;
+        *sample = scaled.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+    }
+    samples
 }
 
 /// Одна нота: частота, длительность, амплитуда и скорость затухания.
@@ -174,6 +208,15 @@ mod tests {
         assert_eq!(t[0], 0);
         assert_eq!(*t.last().unwrap(), 0);
         assert!(t.iter().map(|v| v.unsigned_abs()).max().unwrap() > 8_000);
+    }
+
+    #[test]
+    fn low_master_compensates_chime_but_not_above_full_scale() {
+        assert!((volume_gain(100) - 1.0).abs() < 0.001);
+        assert!(volume_gain(25) > volume_gain(60));
+        assert!(volume_gain(25) <= 2.0);
+        let scaled = apply_gain(vec![20_000, -20_000], 2.0);
+        assert_eq!(scaled, vec![i16::MAX, i16::MIN]);
     }
 
     #[test]
