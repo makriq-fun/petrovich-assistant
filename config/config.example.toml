@@ -51,9 +51,9 @@ model = "/system/vendor/quasar/spotter_models/command"
 min_speech_ms = 300
 silence_ms = 700
 max_utterance_ms = 12000
-energy_margin_db = 9.0
+energy_margin_db = 6.0
 pre_roll_ms = 300
-absolute_db = -18.0
+absolute_db = -36.0
 
 [dialog]
 follow_up_ms = 5000
@@ -194,6 +194,7 @@ search_limit = 10
 listen_port = 0
 # Пресеты в формате ByeByeDPI: -d split, -f fake, -o OOB, -s split.
 strategies = [
+  "-d1 -s1+s -s3+s -s6+s -s12+s -s14+s -s20+s -s24+s -s30+s -a1",
   "-d 1 -s 1",
   "-d 2 -s 2",
   "-d 4 -s 4",

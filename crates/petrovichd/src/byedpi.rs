@@ -22,12 +22,24 @@ use petrovich_core::config::ByeDpiConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SplitPos {
+    Absolute(usize),
+    Sni(usize),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     Split(usize),
     Disorder(usize),
     Oob(usize),
     FakeTtl(usize),
+    /// Несколько разрезов ClientHello подряд: пресеты ByeByeDPI вида
+    /// `-d1 -s1+s -s3+s ...`.
+    Chain {
+        parts: Vec<SplitPos>,
+        delay_first: bool,
+    },
     Passthrough,
 }
 
@@ -110,7 +122,7 @@ impl ByeDpi {
     fn current_mode(&self) -> Mode {
         self.strategies
             .get(self.active.load(Ordering::Acquire))
-            .map(|s| s.mode)
+            .map(|s| s.mode.clone())
             .unwrap_or(Mode::Passthrough)
     }
 
@@ -243,42 +255,107 @@ fn parse_strategy(raw: &str) -> Strategy {
             };
         }
     }
-    // Строка ByeByeDPI: -d <n> [-f] [-o] [-s].
-    let mut split = 0usize;
-    let mut fake = false;
-    let mut oob = false;
-    let mut disorder = false;
-    let mut it = label.split_whitespace();
-    while let Some(tok) = it.next() {
-        match tok {
-            "-d" | "--split-pos" => {
-                if let Some(n) = it.next().and_then(|s| s.parse::<i32>().ok()) {
-                    if n < 0 {
-                        disorder = true;
-                        split = n.unsigned_abs() as usize;
-                    } else {
-                        split = n as usize;
-                    }
-                }
+
+    // Полный синтаксис ciadpi: -d <pos_t> и -s <pos_t>, допускается
+    // несколько директив. pos_t: offset[+s], где +s — смещение от SNI.
+    let tokens: Vec<&str> = label.split_whitespace().collect();
+    let mut parts = Vec::new();
+    let mut delay_first = false;
+    let mut simple = (0usize, false, false, false); // split, fake, oob, disorder
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i];
+        let (kind, value) = if tok == "-d" || tok == "--disorder" {
+            i += 1;
+            ("d", tokens.get(i).copied())
+        } else if tok == "-s" || tok == "--split" {
+            i += 1;
+            ("s", tokens.get(i).copied())
+        } else if let Some(v) = tok.strip_prefix("-d") {
+            if v.is_empty() {
+                ("d", None)
+            } else {
+                ("d", Some(v))
             }
-            "-f" | "--fake" => fake = true,
-            "-o" | "--oob" => oob = true,
-            "-s" | "--split" => split = split.max(1),
-            _ => {}
+        } else if let Some(v) = tok.strip_prefix("-s") {
+            if v.is_empty() {
+                ("s", None)
+            } else {
+                ("s", Some(v))
+            }
+        } else if tok == "-f" || tok == "--fake" {
+            ("f", None)
+        } else if tok == "-o" || tok == "--oob" {
+            ("o", None)
+        } else {
+            i += 1;
+            continue;
+        };
+        if kind == "f" {
+            simple.1 = true;
+            i += 1;
+            continue;
         }
+        if kind == "o" {
+            simple.2 = true;
+            i += 1;
+            continue;
+        }
+        let Some(v) = value else {
+            simple.0 = simple.0.max(1);
+            i += 1;
+            continue;
+        };
+        let (num, from_sni) = split_pos(v);
+        if kind == "d" {
+            if v.starts_with('-') {
+                simple.3 = true;
+                simple.0 = num;
+            } else if parts.is_empty() && simple.0 == 0 {
+                simple.0 = num;
+                delay_first = true;
+            } else {
+                delay_first = true;
+                parts.push(SplitPos::Absolute(num));
+            }
+        } else if from_sni || !parts.is_empty() {
+            parts.push(if from_sni {
+                SplitPos::Sni(num)
+            } else {
+                SplitPos::Absolute(num)
+            });
+        } else {
+            simple.0 = simple.0.max(num.max(1));
+        }
+        i += 1;
     }
-    let mode = if disorder {
-        Mode::Disorder(split.max(1))
-    } else if oob {
-        Mode::Oob(split)
-    } else if fake {
-        Mode::FakeTtl(split)
-    } else if split > 0 {
-        Mode::Split(split)
+
+    let mode = if parts.len() >= 2 {
+        Mode::Chain { parts, delay_first }
+    } else if simple.3 {
+        Mode::Disorder(simple.0.max(1))
+    } else if simple.2 {
+        Mode::Oob(simple.0)
+    } else if simple.1 {
+        Mode::FakeTtl(simple.0)
+    } else if simple.0 > 0 {
+        Mode::Split(simple.0)
     } else {
         Mode::Split(0)
     };
     Strategy { label, mode }
+}
+
+fn split_pos(value: &str) -> (usize, bool) {
+    let value = value.trim();
+    let from_sni = value.ends_with("+s");
+    let base = value.split('+').next().unwrap_or("0");
+    let n = base
+        .parse::<i32>()
+        .ok()
+        .map(|n| n.unsigned_abs() as usize)
+        .unwrap_or(0);
+    (n, from_sni)
 }
 
 async fn handle_client(mut client: TcpStream, app: Arc<ByeDpi>) -> Result<()> {
@@ -331,6 +408,9 @@ async fn handle_client(mut client: TcpStream, app: Arc<ByeDpi>) -> Result<()> {
         }
     };
     client.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+    // Без TCP_NODELAY мелкие части ClientHello склеиваются в один сегмент,
+    // и DPI видит целый hello, как при passthrough.
+    let _ = remote.set_nodelay(true);
     let mode = if is_youtube(&host) {
         app.current_mode()
     } else {
@@ -464,6 +544,29 @@ async fn send_desync(remote: &mut TcpStream, first: &[u8], mode: Mode) -> Result
             remote.flush().await?;
             remote.write_all(&first[at..]).await?;
         }
+        Mode::Chain { parts, delay_first } => {
+            let mut cuts: Vec<usize> = parts
+                .iter()
+                .map(|p| match p {
+                    SplitPos::Absolute(n) => *n,
+                    SplitPos::Sni(n) => sni.saturating_add(*n),
+                })
+                .filter(|n| *n > 0 && *n < first.len())
+                .collect();
+            cuts.sort_unstable();
+            cuts.dedup();
+            let mut prev = 0usize;
+            for (idx, cut) in cuts.iter().copied().enumerate() {
+                remote.write_all(&first[prev..cut]).await?;
+                remote.flush().await?;
+                prev = cut;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                if delay_first && idx == 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+            remote.write_all(&first[prev..]).await?;
+        }
         Mode::Passthrough => remote.write_all(first).await?,
     }
     Ok(())
@@ -529,6 +632,10 @@ mod tests {
         assert_eq!(parse_strategy("-d 1 -o 1").mode, Mode::Oob(1));
         assert_eq!(parse_strategy("split_sni").mode, Mode::Split(0));
         assert_eq!(parse_strategy("split_16").mode, Mode::Split(16));
+        assert!(matches!(
+            parse_strategy("-d1 -s1+s -s3+s -s6+s -s12+s -s14+s -s20+s -s24+s -s30+s -a1").mode,
+            Mode::Chain { parts, delay_first: true } if parts.len() == 8
+        ));
     }
 
     #[test]

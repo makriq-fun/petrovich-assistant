@@ -74,6 +74,7 @@ struct App {
     /// продлевать сессию бесконечно.
     hard_deadline: Option<tokio::time::Instant>,
     ignore_until: tokio::time::Instant,
+    command_ignore_until: tokio::time::Instant,
     max_utterance_ms: u64,
     generation: u64,
     task: Option<JoinHandle<()>>,
@@ -414,6 +415,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         follow_deadline: None,
         hard_deadline: None,
         ignore_until: tokio::time::Instant::now(),
+        command_ignore_until: tokio::time::Instant::now(),
         max_utterance_ms: cfg.vad.max_utterance_ms.max(1_000),
         generation: 0,
         task: None,
@@ -661,6 +663,8 @@ impl App {
             let _ = self.chime.play(ChimeSound::Listening);
             // Сигнал короткий; не отрезаем первые слоги сразу после «Петрович».
             self.ignore_until = tokio::time::Instant::now() + Duration::from_millis(40);
+            // Свой сигнал не должен распознаваться как «громче»/«стоп».
+            self.command_ignore_until = tokio::time::Instant::now() + Duration::from_millis(700);
         }
         let buffered: Vec<Vec<i16>> = self.pre_roll.drain(..).collect();
         self.enter_listening(false);
@@ -707,9 +711,13 @@ impl App {
             if self.muted || tokio::time::Instant::now() < self.ignore_until {
                 continue;
             }
-            let commands = match self.commands.as_mut() {
-                Some(spotter) => spotter.feed(&frame.samples),
-                None => Vec::new(),
+            let commands = if tokio::time::Instant::now() >= self.command_ignore_until {
+                match self.commands.as_mut() {
+                    Some(spotter) => spotter.feed(&frame.samples),
+                    None => Vec::new(),
+                }
+            } else {
+                Vec::new()
             };
             for command in commands {
                 // Во время TTS/сигналов не даём озвучке самой переключать
@@ -752,6 +760,11 @@ impl App {
                         self.dialog.follow_up_ms,
                     ) {
                         self.follow_deadline = Some(d);
+                    }
+                    if !was_in_speech && self.vad.in_speech() {
+                        tracing::info!("VAD: речь пошла");
+                    } else if was_in_speech && !self.vad.in_speech() {
+                        tracing::info!("VAD: речь закончилась");
                     }
                     if let Some(u) = utts.into_iter().next() {
                         tracing::info!(
