@@ -16,7 +16,7 @@ version = "0.2.5"
 edition = "2021"
 rust-version = "1.85"
 license = "AGPL-3.0-only"
-repository = "https://github.com/makriq/petrovich-assistant"
+repository = "https://github.com/makriq-fun/petrovich-assistant"
 authors = ["Petrovich Assistant contributors"]
 
 [workspace.dependencies]
