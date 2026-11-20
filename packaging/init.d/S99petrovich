@@ -11,9 +11,10 @@ mkdir -p "$D/log" "$D/state" /run
 # Сеть и DNS после загрузки поднимаются позже rootfs: без ожидания
 # Spotify/YouTube стартуют с «Temporary failure in name resolution».
 i=0
-while [ "$i" -lt 30 ]; do
+while [ "$i" -lt 60 ]; do
     ip route 2>/dev/null | grep -q '^default ' &&
-        nslookup accounts.spotify.com >/dev/null 2>&1 && break
+        nslookup accounts.spotify.com >/dev/null 2>&1 &&
+        [ "$(date +%Y)" -ge 2025 ] && break
     sleep 2
     i=$((i + 1))
 done
