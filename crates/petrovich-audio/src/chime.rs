@@ -42,12 +42,12 @@ impl Chime for LocalChime {
     }
 }
 
-/// Тихая колонка не должна «съедать» служебный сигнал: до +6 дБ цифровой
+/// Тихая колонка не должна «съедать» служебный сигнал: до +12 дБ цифровой
 /// компенсации при низком Master. Выше 70% усиления нет, поэтому сигнал не
 /// становится громче речи на нормальной громкости.
 pub fn volume_gain(percent: i32) -> f32 {
     let percent = percent.clamp(1, 100) as f32;
-    (100.0 / percent).sqrt().clamp(1.0, 2.0)
+    (100.0 / percent).sqrt().clamp(1.0, 4.0)
 }
 
 fn apply_gain(mut samples: Vec<i16>, gain: f32) -> Vec<i16> {
@@ -214,7 +214,8 @@ mod tests {
     fn low_master_compensates_chime_but_not_above_full_scale() {
         assert!((volume_gain(100) - 1.0).abs() < 0.001);
         assert!(volume_gain(25) > volume_gain(60));
-        assert!(volume_gain(25) <= 2.0);
+        assert!(volume_gain(25) <= 4.0);
+        assert!(volume_gain(7) > 3.0);
         let scaled = apply_gain(vec![20_000, -20_000], 2.0);
         assert_eq!(scaled, vec![i16::MAX, i16::MIN]);
     }
