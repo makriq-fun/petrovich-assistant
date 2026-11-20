@@ -38,7 +38,7 @@ pub enum Mode {
     /// `-d1 -s1+s -s3+s ...`.
     Chain {
         parts: Vec<SplitPos>,
-        /// Первый разрез делается в обратном порядке (ciadpi `-d`).
+        /// Первый разрез уходит с TTL 1, как disorder в ciadpi.
         disorder_first: bool,
     },
     Passthrough,
