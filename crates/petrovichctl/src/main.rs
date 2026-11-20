@@ -217,6 +217,10 @@ fn doctor(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
         if p.is_empty() {
             continue;
         }
+        if name == "Spotify" && (p.starts_with("socks5h://") || p.starts_with("socks5://")) {
+            warn("Spotify: librespot не поддерживает SOCKS5, используется прямое подключение");
+            continue;
+        }
         let Some(rest) = p
             .strip_prefix("socks5h://")
             .or_else(|| p.strip_prefix("socks5://"))
