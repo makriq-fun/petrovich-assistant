@@ -32,6 +32,11 @@ pub trait MusicControl: Send + Sync {
     }
     fn pause(&self) -> Result<()>;
     fn resume(&self) -> Result<()>;
+    /// Продолжить воспроизведение и убедиться, что оно реально пошло:
+    /// «Продолжаю» нельзя произносить после молча проигнорированной команды.
+    async fn resume_checked(&self) -> Result<()> {
+        self.resume()
+    }
     fn next(&self) -> Result<()>;
     fn previous(&self) -> Result<()>;
     fn status(&self) -> Result<String>;
@@ -72,7 +77,7 @@ pub trait MusicControl: Send + Sync {
     /// Приглушить на время ответа ассистента, не меняя паузу пользователя.
     fn duck(&self) {}
     fn unduck(&self) {}
-    /// Текущая позиция и длительность, миллисекунды.
+    /// Текущая позиция и длительность, секунды (как в `UiEvent::Playback`).
     fn position(&self) -> Result<Option<(u64, u64)>> {
         Ok(None)
     }

@@ -123,6 +123,25 @@ impl ToolContext {
         self
     }
 
+    /// Переключение источника. Spotify и YouTube не должны звучать
+    /// одновременно: в микрофон попадают оба, STT слышит кашу, а экран
+    /// прыгает между двумя позициями.
+    fn switch_to_music(&self) {
+        if let Some(yt) = &self.youtube {
+            if yt.is_playing() {
+                let _ = yt.stop();
+            }
+        }
+    }
+
+    fn switch_to_video(&self) {
+        if let Some(music) = &self.music {
+            if music.is_playing().unwrap_or(false) {
+                let _ = music.pause();
+            }
+        }
+    }
+
     /// Отправляет на экран факт начала воспроизведения. Точную позицию
     /// присылает плеер отдельными событиями; здесь важен сам факт и название.
     fn media_event(&self, text: String) {
@@ -618,20 +637,30 @@ impl ToolContext {
                     .and_then(Value::as_str)
                     .unwrap_or("status");
                 match action {
-                    "play" => match args.get("query").and_then(Value::as_str) {
-                        Some(q) if !q.trim().is_empty() => {
-                            let text = music.play_search(q.trim()).await?;
-                            self.media_event(text.clone());
-                            Ok(ToolResult::text(text))
+                    "play" => {
+                        self.switch_to_music();
+                        match args.get("query").and_then(Value::as_str) {
+                            Some(q) if !q.trim().is_empty() => {
+                                let text = music.play_search(q.trim()).await?;
+                                self.media_event(text.clone());
+                                Ok(ToolResult::text(text))
+                            }
+                            _ => {
+                                let text = match music.resume_saved().await {
+                                    Ok(text) => text,
+                                    Err(_) => {
+                                        music.resume_checked().await?;
+                                        "Продолжаю.".to_owned()
+                                    }
+                                };
+                                self.media_event(text.clone());
+                                Ok(ToolResult::text(text))
+                            }
                         }
-                        _ => {
-                            music.resume()?;
-                            self.media_event("Продолжаю Spotify.".into());
-                            Ok(ToolResult::text("Продолжаю."))
-                        }
-                    },
+                    }
                     "resume" => {
-                        music.resume()?;
+                        self.switch_to_music();
+                        music.resume_checked().await?;
                         Ok(ToolResult::text("Продолжаю."))
                     }
                     "pause" => {
@@ -687,6 +716,7 @@ impl ToolContext {
                         Ok(ToolResult::text("Позиция сохранена, пауза."))
                     }
                     "continue" => {
+                        self.switch_to_music();
                         let text = music.resume_saved().await?;
                         self.media_event(text.clone());
                         Ok(ToolResult::text(text))
@@ -711,6 +741,7 @@ impl ToolContext {
                             .map(str::trim)
                             .filter(|q| !q.is_empty())
                             .ok_or_else(|| anyhow::anyhow!("youtube: для play нужен query"))?;
+                        self.switch_to_video();
                         let text = yt.play(query).await?;
                         self.media_event(text.clone());
                         Ok(ToolResult::text(text))
@@ -808,6 +839,7 @@ impl ToolContext {
                         Ok(ToolResult::text("Пауза."))
                     }
                     "resume" => {
+                        self.switch_to_video();
                         yt.resume()?;
                         Ok(ToolResult::text("Продолжаю."))
                     }
@@ -853,6 +885,7 @@ impl ToolContext {
                         )))
                     }
                     "continue" => {
+                        self.switch_to_video();
                         let text = yt.resume_saved().await?;
                         self.media_event(text.clone());
                         Ok(ToolResult::text(text))
@@ -1105,6 +1138,30 @@ mod tests {
         }
     }
 
+    struct EmptyMusic;
+    impl MusicControl for EmptyMusic {
+        fn play(&self) -> petrovich_core::Result<()> {
+            Err(petrovich_core::Error::Unsupported(
+                "Spotify: нет выбранного трека".into(),
+            ))
+        }
+        fn pause(&self) -> petrovich_core::Result<()> {
+            Ok(())
+        }
+        fn resume(&self) -> petrovich_core::Result<()> {
+            self.play()
+        }
+        fn next(&self) -> petrovich_core::Result<()> {
+            Ok(())
+        }
+        fn previous(&self) -> petrovich_core::Result<()> {
+            Ok(())
+        }
+        fn status(&self) -> petrovich_core::Result<String> {
+            Ok("Spotify: ничего не играет".into())
+        }
+    }
+
     struct FakeChime;
     impl Chime for FakeChime {
         fn play(&self, _sound: ChimeSound) -> petrovich_core::Result<()> {
@@ -1133,6 +1190,13 @@ mod tests {
     }
 
     fn ctx_ui(enabled: &[&str]) -> (ToolContext, mpsc::UnboundedReceiver<UiEvent>) {
+        ctx_ui_with_music(enabled, Arc::new(FakeMusic))
+    }
+
+    fn ctx_ui_with_music(
+        enabled: &[&str],
+        music: Arc<dyn MusicControl>,
+    ) -> (ToolContext, mpsc::UnboundedReceiver<UiEvent>) {
         let (ui, ui_rx) = mpsc::unbounded_channel();
         let (ann, _) = mpsc::channel(4);
         let (alarm_ann, _) = mpsc::channel(4);
@@ -1142,7 +1206,7 @@ mod tests {
         };
         let ctx = ToolContext::new(
             Arc::new(FakeVolume),
-            Some(Arc::new(FakeMusic)),
+            Some(music),
             TimerManager::new(ui.clone(), ann),
             AlarmManager::new(ui.clone(), alarm_ann),
             Web::new(5000, 100_000, true).unwrap(),
@@ -1178,6 +1242,16 @@ mod tests {
         assert!(v.content.contains("55%"));
         let v = c.execute("volume", r#"{"action":"up"}"#).await.unwrap();
         assert!(v.content.contains("45%"));
+    }
+
+    #[tokio::test]
+    async fn music_play_without_query_does_not_lie() {
+        let (c, _) = ctx_ui_with_music(&["music"], Arc::new(EmptyMusic));
+        let err = c
+            .execute("music", r#"{"action":"play"}"#)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("нет выбранного трека"), "{err}");
     }
 
     #[tokio::test]

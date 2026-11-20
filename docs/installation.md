@@ -53,7 +53,8 @@ $EDITOR config.toml secrets.env
 - `[tools] nightscout_url` — Nightscout для вопроса о сахаре; при закрытом
   чтении `nightscout_token_env` — имя токена в `secrets.env`;
 - `[spotify]`/`[modules] spotify` — встроенный Spotify Connect; без логина
-  или access token модуль не запускается;
+  или access token модуль не запускается. Для голосового поиска при входе
+  по access token нужен Tavily-ключ или `spotify.client_id` + secret;
 - `[tools] sandbox_command` — только если действительно нужен `run_code`;
 - `[hardware] model = "auto"`.
 

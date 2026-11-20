@@ -3,8 +3,9 @@
 //! Устройство постоянно зарегистрировано в Spotify Connect, даже когда
 //! музыка не играет. Звук идёт в тот же ALSA-вывод, что и TTS, через
 //! собственный sink без промежуточных процессов. Поиск — через Spotify Web
-//! API (client credentials), потому что librespot умеет проигрывать контекст,
-//! но не искать.
+//! API (токен Connect-сессии или client credentials); для сессий, вошедших
+//! только access token, есть резервный поиск Tavily по ссылкам open.spotify.com.
+//! librespot умеет проигрывать контекст, но не искать.
 
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -23,7 +24,6 @@ use librespot::playback::mixer::{self, Mixer, MixerConfig};
 use librespot::playback::player::{Player, PlayerEvent};
 use petrovich_audio::alsa::Pcm;
 use petrovich_core::config::{Secrets, SpotifyConfig};
-use petrovich_core::events::UiEvent;
 use petrovich_core::ports::MusicControl;
 
 /// librespot создаёт sink через свободную функцию без захвата, поэтому
@@ -114,10 +114,16 @@ struct Api {
     market: String,
     limit: usize,
     token: Mutex<Option<(String, Instant)>>,
+    tavily_key: String,
 }
 
 impl Api {
-    fn new(session: librespot::core::Session, cfg: &SpotifyConfig, secret: String) -> Result<Self> {
+    fn new(
+        session: librespot::core::Session,
+        cfg: &SpotifyConfig,
+        secret: String,
+        tavily_key: String,
+    ) -> Result<Self> {
         Ok(Self {
             client: {
                 let mut b = reqwest::Client::builder().timeout(Duration::from_secs(12));
@@ -135,6 +141,7 @@ impl Api {
             market: cfg.market.clone(),
             limit: cfg.search_limit.clamp(1, 20),
             token: Mutex::new(None),
+            tavily_key,
         })
     }
 
@@ -155,7 +162,11 @@ impl Api {
             }
         }
         if self.client_id.trim().is_empty() || self.client_secret.is_empty() {
-            bail!("Spotify: нет токена сессии и не задан client_id");
+            bail!(
+                "Spotify: поиск недоступен. Вход по старому токену не даёт Web API токен; \
+                 добавьте spotify.client_id и client_secret в secrets.env \
+                 (Spotify Developer Dashboard → Create app)."
+            );
         }
         let resp = self
             .client
@@ -185,6 +196,16 @@ impl Api {
     }
 
     async fn search(&self, query: &str, want_episode: bool) -> Result<Vec<Item>> {
+        match self.search_api(query, want_episode).await {
+            Ok(items) if !items.is_empty() => return Ok(items),
+            Ok(_) => {}
+            Err(e) if self.tavily_key.is_empty() => return Err(e),
+            Err(e) => tracing::warn!("Spotify Web API: {e:#}; ищу через Tavily"),
+        }
+        self.search_tavily(query).await
+    }
+
+    async fn search_api(&self, query: &str, want_episode: bool) -> Result<Vec<Item>> {
         let token = self.token().await?;
         let types = if want_episode {
             "episode,show,track,album,playlist"
@@ -247,6 +268,123 @@ impl Api {
         }
         Ok(items)
     }
+
+    /// Резервный поиск, если вход по старому токену не даёт Web API-токен.
+    /// Tavily отдаёт ссылки open.spotify.com, из которых мы берём URI.
+    async fn search_tavily(&self, query: &str) -> Result<Vec<Item>> {
+        if self.tavily_key.is_empty() {
+            bail!("Spotify: нет ключа Tavily для резервного поиска");
+        }
+        let body = serde_json::json!({
+            "query": format!("site:open.spotify.com {query}"),
+            "search_depth": "basic",
+            "max_results": self.limit.max(10),
+            "include_answer": false,
+            "include_raw_content": false,
+        });
+        let resp = self
+            .client
+            .post("https://api.tavily.com/search")
+            .bearer_auth(&self.tavily_key)
+            .json(&body)
+            .send()
+            .await
+            .context("Spotify: Tavily")?;
+        if !resp.status().is_success() {
+            bail!("Spotify: Tavily HTTP {}", resp.status());
+        }
+        let v: serde_json::Value = resp.json().await.context("Spotify: Tavily JSON")?;
+        let mut items = Vec::new();
+        if let Some(arr) = v.get("results").and_then(|x| x.as_array()) {
+            for r in arr {
+                let Some(url) = r.get("url").and_then(|x| x.as_str()) else {
+                    continue;
+                };
+                let Some(item) =
+                    item_from_web_url(url, r.get("title").and_then(|x| x.as_str()).unwrap_or(""))
+                else {
+                    continue;
+                };
+                if !items.iter().any(|i: &Item| i.uri == item.uri) {
+                    items.push(item);
+                }
+            }
+        }
+        Ok(items)
+    }
+}
+
+fn item_from_web_url(url: &str, raw_title: &str) -> Option<Item> {
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.host_str() != Some("open.spotify.com") {
+        return None;
+    }
+    let mut segments = parsed.path_segments()?.filter(|s| !s.is_empty());
+    let mut kind = None;
+    let mut id = None;
+    for segment in segments.by_ref() {
+        let candidate = match segment {
+            "track" => Some("трек"),
+            "episode" => Some("выпуск"),
+            "album" => Some("альбом"),
+            "playlist" => Some("плейлист"),
+            "show" => Some("подкаст"),
+            _ => None,
+        };
+        if let Some(candidate) = candidate {
+            kind = Some(candidate);
+            id = segments.next();
+            break;
+        }
+    }
+    let kind = kind?;
+    let id = id?;
+    if id.len() < 10 || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let name = clean_web_title(raw_title);
+    if name.is_empty() {
+        return None;
+    }
+    let subtitle = raw_title
+        .split(" by ")
+        .nth(1)
+        .map(|s| s.split(" | ").next().unwrap_or(s).trim().to_owned())
+        .unwrap_or_default();
+    Some(Item {
+        uri: format!(
+            "spotify:{kind_id}:{id}",
+            kind_id = match kind {
+                "трек" => "track",
+                "выпуск" => "episode",
+                "альбом" => "album",
+                "плейлист" => "playlist",
+                _ => "show",
+            }
+        ),
+        name,
+        subtitle,
+        kind,
+        release: String::new(),
+    })
+}
+
+fn clean_web_title(raw: &str) -> String {
+    let mut s = raw.trim();
+    if let Some((head, _)) = s.split_once(" | Spotify") {
+        s = head;
+    }
+    for marker in [
+        " - song and lyrics by ",
+        " - Song, Lyrics, and Music Video by ",
+    ] {
+        if let Some((head, _)) = s.split_once(marker) {
+            s = head;
+        }
+    }
+    s = s.trim_start_matches("Listen to ").trim();
+    s = s.strip_suffix(" Songs").unwrap_or(s);
+    s.trim().to_owned()
 }
 
 fn parse_item(
@@ -308,11 +446,18 @@ fn parse_item(
 fn choose(items: &[Item], want_episode: bool) -> Option<&Item> {
     if want_episode {
         // «Последний выпуск»: сортируем по дате публикации, свежие первыми.
-        if let Some(ep) = items
+        // Tavily-ссылки даты не содержат; тогда сохраняем порядок выдачи,
+        // а не берём случайный последний элемент.
+        let episodes: Vec<&Item> = items.iter().filter(|i| i.kind == "выпуск").collect();
+        if let Some(ep) = episodes
             .iter()
-            .filter(|i| i.kind == "выпуск")
+            .copied()
+            .filter(|i| !i.release.is_empty())
             .max_by(|a, b| a.release.cmp(&b.release))
         {
+            return Some(ep);
+        }
+        if let Some(ep) = episodes.first() {
             return Some(ep);
         }
     }
@@ -332,8 +477,9 @@ pub struct Spotify {
     mixer: Arc<dyn Mixer>,
     queue: Mutex<Vec<Item>>,
     saved_volume: AtomicU16,
-    ducked: Arc<Mutex<bool>>,
-    ui: tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    /// Глубина приглушения: демон глушит музыку на время слушания,
+    /// ход диалога — на время речи. Возвращаем громкость только на нуле.
+    duck_depth: Arc<Mutex<u32>>,
     saved: Arc<Mutex<Option<SavedSession>>>,
     saved_path: Option<std::path::PathBuf>,
 }
@@ -345,8 +491,8 @@ impl Spotify {
         cfg: &SpotifyConfig,
         secrets: &Secrets,
         playback_pcm: String,
-        ui: tokio::sync::mpsc::UnboundedSender<UiEvent>,
         saved_path: Option<std::path::PathBuf>,
+        tavily_key: String,
     ) -> Result<Option<Arc<Self>>> {
         let token = secrets.get(&cfg.access_token_env).unwrap_or("");
         let password = secrets.get(&cfg.password_env).unwrap_or("");
@@ -432,6 +578,7 @@ impl Spotify {
                 .get(&cfg.client_secret_env)
                 .unwrap_or_default()
                 .to_owned(),
+            tavily_key,
         )?;
         let saved = saved_path
             .as_ref()
@@ -444,15 +591,13 @@ impl Spotify {
             mixer: mixer.clone(),
             queue: Mutex::new(Vec::new()),
             saved_volume: AtomicU16::new(mixer.volume()),
-            ducked: Arc::new(Mutex::new(false)),
-            ui,
+            duck_depth: Arc::new(Mutex::new(0)),
             saved: Arc::new(Mutex::new(saved)),
             saved_path,
         });
         // События плеера: название, позиция, длительность.
         let mut events = player.get_player_event_channel();
         let state_events = state.clone();
-        let ui_events = app.ui.clone();
         let saved_events = app.saved.clone();
         let saved_path_events = app.saved_path.clone();
         tokio::spawn(async move {
@@ -492,16 +637,8 @@ impl Spotify {
                     save_snapshot(&snapshot, &saved_events, &saved_path_events);
                     last_saved = Instant::now();
                 }
-                let _ = ui_events.send(UiEvent::Playback {
-                    playing: snapshot.playing,
-                    title: if snapshot.title.is_empty() {
-                        "Spotify".into()
-                    } else {
-                        snapshot.title.clone()
-                    },
-                    position_s: snapshot.position_ms / 1000,
-                    duration_s: snapshot.duration_ms / 1000,
-                });
+                // Экран обновляет демон раз в секунду (`tick`): иначе события
+                // Spotify перебивают позицию YouTube и цифры прыгают.
             }
         });
         tracing::info!("Spotify Connect: «{}» готов", cfg.device_name);
@@ -524,8 +661,13 @@ impl Spotify {
         } else {
             LoadRequest::from_context_uri(item.uri.clone(), opts)
         };
-        self.spirc.load(req)?;
+        // librespot молча игнорирует Load и Play, пока устройство не активно
+        // (после перезапуска демона, простоя или передачи на телефон).
+        // Активация идёт в той же очереди команд, поэтому Load выполнится
+        // уже на активном устройстве.
+        self.clear_duck();
         self.spirc.activate()?;
+        self.spirc.load(req)?;
         self.spirc.play()?;
         Ok(())
     }
@@ -536,15 +678,64 @@ impl Spotify {
         self.api.search(query, want_episode).await
     }
 
+    /// Ждёт реального события от плеера, а не только успешной отправки
+    /// команды Spirc. Иначе «Включаю» звучит при проигнорированной команде.
+    async fn wait_started(&self, before: &PlaybackState) -> Result<()> {
+        for _ in 0..50 {
+            let st = self.state();
+            if st.uri != before.uri || (st.playing && !before.playing) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        bail!("Spotify: команда принята, но воспроизведение не началось")
+    }
+
     fn state(&self) -> PlaybackState {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Снять приглушение целиком: запуск музыки сам по себе означает, что её
+    /// должно быть слышно, кто бы её ни приглушил до этого.
+    fn clear_duck(&self) {
+        let mut depth = self.duck_depth.lock().unwrap_or_else(|e| e.into_inner());
+        if *depth == 0 {
+            return;
+        }
+        *depth = 0;
+        let v = self.saved_volume.load(Ordering::Relaxed);
+        self.mixer.set_volume(v);
     }
 }
 
 #[async_trait::async_trait]
 impl MusicControl for Spotify {
     fn play(&self) -> petrovich_core::Result<()> {
+        let st = self.state();
+        if st.uri.is_empty() {
+            return Err(core_err(anyhow::anyhow!(
+                "Spotify: нет выбранного трека. Скажите название, исполнителя или «включи сохранённое»."
+            )));
+        }
+        self.clear_duck();
+        self.spirc.activate().map_err(|e| core_err(e.into()))?;
         self.spirc.play().map_err(|e| core_err(e.into()))
+    }
+
+    async fn resume_checked(&self) -> petrovich_core::Result<()> {
+        let before = self.state();
+        if before.uri.is_empty() {
+            return Err(core_err(anyhow::anyhow!(
+                "Spotify: нечего продолжать. Скажите название или «включи сохранённое»."
+            )));
+        }
+        if before.playing {
+            return Ok(());
+        }
+        self.clear_duck();
+        self.spirc.activate().map_err(|e| core_err(e.into()))?;
+        self.spirc.play().map_err(|e| core_err(e.into()))?;
+        self.wait_started(&before).await.map_err(core_err)
     }
 
     async fn play_search(&self, query: &str) -> petrovich_core::Result<String> {
@@ -553,7 +744,9 @@ impl MusicControl for Spotify {
         let item = choose(&items, want_episode)
             .cloned()
             .ok_or_else(|| core_err(anyhow::anyhow!("Spotify: ничего не найдено")))?;
+        let before = self.state();
         self.load_uri(&item, 0).map_err(core_err)?;
+        self.wait_started(&before).await.map_err(core_err)?;
         let mut text = format!("Включаю: {} — {}", item.name, item.subtitle);
         if item.kind != "трек" {
             text.push_str(&format!(" ({})", item.kind));
@@ -568,7 +761,7 @@ impl MusicControl for Spotify {
     }
 
     fn resume(&self) -> petrovich_core::Result<()> {
-        self.spirc.play().map_err(|e| core_err(e.into()))
+        self.play()
     }
 
     fn next(&self) -> petrovich_core::Result<()> {
@@ -681,8 +874,10 @@ impl MusicControl for Spotify {
             kind,
             release: String::new(),
         };
+        let before = self.state();
         self.load_uri(&item, saved.position_ms.min(u64::from(u32::MAX)) as u32)
             .map_err(core_err)?;
+        self.wait_started(&before).await.map_err(core_err)?;
         Ok(format!(
             "Продолжаю: {} с {}:{:02}.",
             saved.title,
@@ -703,22 +898,25 @@ impl MusicControl for Spotify {
     }
 
     fn duck(&self) {
-        if *self.ducked.lock().unwrap_or_else(|e| e.into_inner()) {
-            return;
+        let mut depth = self.duck_depth.lock().unwrap_or_else(|e| e.into_inner());
+        if *depth == 0 {
+            self.saved_volume
+                .store(self.mixer.volume(), Ordering::Relaxed);
+            self.mixer.set_volume(0);
         }
-        *self.ducked.lock().unwrap_or_else(|e| e.into_inner()) = true;
-        self.saved_volume
-            .store(self.mixer.volume(), Ordering::Relaxed);
-        self.mixer.set_volume(0);
+        *depth += 1;
     }
 
     fn unduck(&self) {
-        if !*self.ducked.lock().unwrap_or_else(|e| e.into_inner()) {
+        let mut depth = self.duck_depth.lock().unwrap_or_else(|e| e.into_inner());
+        if *depth == 0 {
             return;
         }
-        *self.ducked.lock().unwrap_or_else(|e| e.into_inner()) = false;
-        let v = self.saved_volume.load(Ordering::Relaxed);
-        self.mixer.set_volume(v);
+        *depth -= 1;
+        if *depth == 0 {
+            let v = self.saved_volume.load(Ordering::Relaxed);
+            self.mixer.set_volume(v);
+        }
     }
 
     fn position(&self) -> petrovich_core::Result<Option<(u64, u64)>> {
@@ -797,6 +995,27 @@ mod tests {
     }
 
     #[test]
+    fn keeps_search_order_for_undated_episodes() {
+        let items = vec![
+            Item {
+                uri: "spotify:episode:first".into(),
+                name: "Первый в выдаче".into(),
+                subtitle: String::new(),
+                kind: "выпуск",
+                release: String::new(),
+            },
+            Item {
+                uri: "spotify:episode:second".into(),
+                name: "Второй в выдаче".into(),
+                subtitle: String::new(),
+                kind: "выпуск",
+                release: String::new(),
+            },
+        ];
+        assert_eq!(choose(&items, true).unwrap().uri, "spotify:episode:first");
+    }
+
+    #[test]
     fn saves_and_loads_position() {
         let dir = std::env::temp_dir().join(format!("petrovich-spotify-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -816,6 +1035,29 @@ mod tests {
         assert_eq!(loaded.position_ms, 123_000);
         assert_eq!(saved.lock().unwrap().as_ref().unwrap().title, "Выпуск");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parses_tavily_spotify_urls() {
+        let track = item_from_web_url(
+            "https://open.spotify.com/track/0dEIca2nhcxDUV8C5QkPYb?si=x",
+            "Give Life Back to Music - song and lyrics by Daft Punk",
+        )
+        .unwrap();
+        assert_eq!(track.uri, "spotify:track:0dEIca2nhcxDUV8C5QkPYb");
+        assert_eq!(track.name, "Give Life Back to Music");
+        assert_eq!(track.kind, "трек");
+
+        let episode = item_from_web_url(
+            "https://open.spotify.com/intl-ru/episode/abc123def456",
+            "Выпуск 42 | Spotify",
+        )
+        .unwrap();
+        assert_eq!(episode.uri, "spotify:episode:abc123def456");
+        assert_eq!(episode.kind, "выпуск");
+
+        assert!(item_from_web_url("https://example.com/track/abc", "x").is_none());
+        assert!(item_from_web_url("https://open.spotify.com/artist/abc", "x").is_none());
     }
 
     #[test]

@@ -239,7 +239,11 @@ Connect-устройство регистрируется сразу после 
 даже когда музыка не играет. Пароль/токен и client secret кладутся только
 в `secrets.env`; без них модуль не запускается и ничего не занимает.
 Управление: play/pause/next/previous, seek и seek_to, очередь, sleep,
-сохранение позиции (librespot/Spotify Connect).
+сохранение позиции (librespot/Spotify Connect). Для поиска нужен Web API-токен:
+Connect-сессия с паролем/многоразовыми credentials получает его через keymaster,
+а сессия, импортированная access token, — нет. В этом случае поиск идёт через
+Tavily по `site:open.spotify.com` (ключ `[tools] search_api_key_env`), либо
+нужно задать `client_id` и client secret приложения Spotify.
 
 ## `[byedpi]`
 

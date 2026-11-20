@@ -205,7 +205,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         search_proxy,
     )?
     .with_fetch_client_proxy(cfg.tools.web_timeout_ms, cfg.network.proxy.trim())?
-    .with_search_api(search_key);
+    .with_search_api(search_key.clone());
     let mut spotify_bridge = None;
     let spotify = if cfg.modules.spotify {
         let mut scfg = cfg.spotify.clone();
@@ -234,8 +234,8 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
             &scfg,
             &loaded.secrets,
             cfg.audio.playback_pcm.clone(),
-            ui_tx.clone(),
             Some(cfg.daemon.state_dir.join("spotify.json")),
+            search_key.clone(),
         )
         .await
         {
@@ -635,35 +635,70 @@ impl App {
     /// Раз в секунду обновляет экран позицией воспроизведения. Событие
     /// держится `indication.hold_s`, поэтому без обновления индикатор
     /// вернулся бы к часам во время фильма.
+    ///
+    /// Экран ведёт ровно один источник. Spotify и YouTube раньше присылали
+    /// позицию каждый сам по себе, и при переключении с одного на другой
+    /// цифры прыгали между двумя треками.
+    ///
+    /// Приоритет у того, что реально звучит. Когда не играет ничего, события
+    /// не шлём: индикатор сам вернётся к часам по `indication.hold_s`.
     fn tick(&self) {
         if self.playback.is_playing() {
             return;
         }
         if let Some(yt) = &self.youtube {
-            if let Some((pos, dur)) = yt.position_now() {
-                let status = yt.status_text().unwrap_or_default();
-                let title = status
-                    .split_once(':')
-                    .map(|(_, t)| t.trim())
-                    .unwrap_or(status.as_str())
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .to_owned();
-                let _ = self.ui.send(UiEvent::Playback {
-                    playing: yt.is_playing(),
-                    title,
-                    position_s: pos,
-                    duration_s: dur,
-                });
+            if yt.is_playing() {
+                if let Some((pos, dur)) = yt.position_now() {
+                    self.show_playback(yt, pos, dur);
+                    return;
+                }
             }
         }
+        if let Some(music) = &self.music {
+            // position() дешёвый и у командной музыки сразу None: иначе
+            // is_playing() дёргал бы внешнюю команду каждую секунду.
+            if let Ok(Some((pos, dur))) = music.position() {
+                if music.is_playing().unwrap_or(false) {
+                    self.show_music(pos, dur);
+                }
+            }
+        }
+    }
+
+    fn show_playback(&self, yt: &YouTubePlayer, pos: u64, dur: u64) {
+        let status = yt.status_text().unwrap_or_default();
+        let title = status
+            .split_once(':')
+            .map(|(_, t)| t.trim())
+            .unwrap_or(status.as_str())
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .to_owned();
+        let _ = self.ui.send(UiEvent::Playback {
+            playing: yt.is_playing(),
+            title,
+            position_s: pos,
+            duration_s: dur,
+        });
+    }
+
+    fn show_music(&self, pos: u64, dur: u64) {
+        let _ = self.ui.send(UiEvent::Playback {
+            playing: true,
+            title: String::new(),
+            position_s: pos,
+            duration_s: dur,
+        });
     }
 
     fn enter_idle(&mut self) {
         self.mode = Mode::Idle;
         if let Some(yt) = &self.youtube {
             yt.unduck();
+        }
+        if let Some(music) = &self.music {
+            music.unduck();
         }
         self.follow_deadline = None;
         self.hard_deadline = None;
@@ -713,6 +748,11 @@ impl App {
         tracing::info!("активация: начинаю слушать");
         if let Some(yt) = &self.youtube {
             yt.duck();
+        }
+        // Музыка идёт мимо AEC-референса, поэтому без приглушения STT
+        // слышит её вместо пользователя и превращает в мусорный запрос.
+        if let Some(music) = &self.music {
+            music.duck();
         }
         let _ = self.ui.send(UiEvent::Notice(UiNotice::Listening));
         if self.dialog.wake_chime {
@@ -1037,7 +1077,22 @@ impl App {
         match command {
             Command::Next => self.music_call(|m| m.next()),
             Command::Previous => self.music_call(|m| m.previous()),
-            Command::Play => self.music_call(|m| m.resume()),
+            Command::Play => {
+                if let Some(yt) = &self.youtube {
+                    if yt.is_playing() {
+                        yt.stop_playback();
+                    }
+                }
+                let Some(music) = self.music.clone() else {
+                    tracing::debug!("быстрая команда: музыка не настроена");
+                    return;
+                };
+                tokio::spawn(async move {
+                    if let Err(e) = music.resume_checked().await {
+                        tracing::warn!("быстрая команда: музыка: {e:#}");
+                    }
+                });
+            }
             Command::Stop => self.global_stop(),
             Command::VolumeUp => self.change_volume(self.volume_step),
             Command::VolumeDown => self.change_volume(-self.volume_step),
