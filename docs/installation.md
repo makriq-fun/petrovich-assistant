@@ -169,10 +169,9 @@ python3 installer/petrovich_install.py --ssh-host station privacy --revert
 DHCP/NetworkManager может перезаписать `resolv.conf` после перезагрузки —
 проверьте через `petrovichctl doctor`.
 
-## Hysteria 2 для STT/LLM
+## Внешний SOCKS5 для STT/LLM
 
-Если провайдер блокирует `api.groq.com` по IP, клиент Hysteria 2 поднимает
-локальный SOCKS5 только для STT/LLM:
+Если провайдер блокирует `api.groq.com` по IP, укажите прокси в конфиге:
 
 ```toml
 [stt]
@@ -182,10 +181,8 @@ proxy = "socks5h://127.0.0.1:1080"
 proxy = "socks5h://127.0.0.1:1080"
 ```
 
-Бинарник и конфиг лежат в `/data/petrovich/opt/hysteria2/` и
-`/data/petrovich/hysteria.yaml` (права 600, в репозиторий не попадают).
-`/etc/init.d/S98hysteria2` распаковывает сжатый бинарник в `/tmp` и запускает
-его до `petrovichd`. Остальной трафик колонки идёт напрямую.
+Прокси — внешний компонент: Петрович его не устанавливает, не запускает и не
+следит за ним. Остальной трафик колонки идёт напрямую.
 
 ## Проверка
 
@@ -224,6 +221,7 @@ GPIO мута, отсутствие `maind`/`quasar_launcher2`, разрешен
 | нет активации | модель/backbone, `wake-test`, порог, усиление, мут |
 | нет звука | `amixer`, `aplay`/`speaker-test`, `[audio] playback_pcm` |
 | нет ответа LLM | ключ, URL, сертификат, журнал провайдера |
+| `SOCKS error` в журнале, STT/LLM молчат | внешний SOCKS5 на `127.0.0.1:1080` и его журнал |
 | Quasar всё ещё работает | шим init-скрипта, `ps`, `petrovichctl doctor` |
 | мало места | удалить старые `releases/` после успешной проверки |
 
