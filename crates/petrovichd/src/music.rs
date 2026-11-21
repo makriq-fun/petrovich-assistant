@@ -139,6 +139,13 @@ impl MusicControl for DeferredMusic {
         }
     }
 
+    async fn liked(&self) -> petrovich_core::Result<String> {
+        match self.backend() {
+            Some(music) => music.liked().await,
+            None => Err(self.not_ready()),
+        }
+    }
+
     fn pause(&self) -> petrovich_core::Result<()> {
         self.call(|m| m.pause())
     }

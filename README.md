@@ -41,8 +41,8 @@
   `<state_dir>/memory.json` и переживают сброс диалога и перезапуск;
   ассистент добавляет их в промпт и умеет забывать по просьбе;
 - инструменты: время, таймеры и будильники, громкость, Spotify Connect
-  (librespot в процессе: поиск, альбомы, плейлисты, подкасты, очередь,
-  перемотка, таймер сна), звук YouTube без картинки (поиск с метаданными,
+  (librespot в процессе: поиск, альбомы, плейлисты, коллекция «Мне нравится»,
+  подкасты, очередь, перемотка, таймер сна), звук YouTube без картинки (поиск с метаданными,
   субтитры и комментарии, seek, очередь, сохранение позиции), встроенный
   обход блокировок ByeDPI, эмоции, погода по городу из памяти, сахар из
   Nightscout, управление домашним ПК (включение по WOL, выключение, сон,
@@ -119,7 +119,7 @@ LLM, TTS, Tavily, `web_fetch`, погоде, Nightscout, Spotify API и librespo
 # На ПК: собрать релиз под ARMv7
 cargo install cross --git https://github.com/cross-rs/cross
 scripts/build.sh
-# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.7-armv7.tar.gz
+# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.8-armv7.tar.gz
 
 # Установка по SSH (ключ root уже настроен)
 python3 installer/petrovich_install.py --ssh-host station install \

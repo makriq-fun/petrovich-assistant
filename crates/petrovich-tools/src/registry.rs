@@ -275,10 +275,10 @@ impl ToolContext {
             ),
             "music" => ToolDefinition::new(
                 "music",
-                "Spotify: play (поиск по названию), pause, resume, next, previous, status, seek (секунды, ±), seek_to (секунды), queue, sleep (минуты), save (пауза), continue (сохранённая позиция)",
+                "Spotify: liked — коллекция «Мне нравится» без названия (любимые, залайканные треки); play (поиск по названию), pause, resume, next, previous, status, seek (секунды, ±), seek_to (секунды), queue, sleep (минуты), save (пауза), continue (сохранённая позиция)",
                 obj(
                     json!({
-                        "action":{"type":"string","enum":["play","pause","resume","next","previous","status","seek","seek_to","queue","sleep","save","continue"]},
+                        "action":{"type":"string","enum":["play","liked","pause","resume","next","previous","status","seek","seek_to","queue","sleep","save","continue"]},
                         "query":{"type":"string","minLength":1,"maxLength":200},
                         "seconds":{"type":"integer","minimum":-86400,"maximum":86400},
                         "minutes":{"type":"integer","minimum":1,"maximum":1440}
@@ -667,6 +667,11 @@ impl ToolContext {
                     "play" => {
                         self.switch_to_music();
                         match args.get("query").and_then(Value::as_str) {
+                            Some(q) if is_liked_query(q) => {
+                                let text = music.liked().await?;
+                                self.media_event(text.clone());
+                                Ok(ToolResult::text(text))
+                            }
                             Some(q) if !q.trim().is_empty() => {
                                 let text = music.play_search(q.trim()).await?;
                                 self.media_event(text.clone());
@@ -684,6 +689,12 @@ impl ToolContext {
                                 Ok(ToolResult::text(text))
                             }
                         }
+                    }
+                    "liked" => {
+                        self.switch_to_music();
+                        let text = music.liked().await?;
+                        self.media_event(text.clone());
+                        Ok(ToolResult::text(text))
                     }
                     "resume" => {
                         self.switch_to_music();
@@ -1094,6 +1105,28 @@ impl ToolContext {
     }
 }
 
+/// «Мои любимые треки» — не название плейлиста, а специальная коллекция
+/// Spotify «Мне нравится». Такие просьбы нельзя отправлять в поиск: там
+/// найдётся случайный трек с похожим названием.
+fn is_liked_query(text: &str) -> bool {
+    let q = text.to_lowercase();
+    if q.contains("подкаст") || q.contains("выпуск") || q.contains("podcast") {
+        return false;
+    }
+    let music_word = q.contains("трек")
+        || q.contains("песн")
+        || q.contains("музык")
+        || q.contains("songs")
+        || q.contains("collection");
+    let direct = q.contains("мне нравится")
+        || q.contains("мои любимые")
+        || q.contains("залайкан")
+        || q.contains("лайкну")
+        || q.contains("liked songs")
+        || q.contains("my likes");
+    direct || (music_word && (q.contains("любим") || q.contains("лайк") || q.contains("liked")))
+}
+
 fn is_generic_place(text: &str) -> bool {
     crate::weather::is_generic_place(text)
 }
@@ -1292,6 +1325,71 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("нет выбранного трека"), "{err}");
+    }
+
+    #[test]
+    fn recognizes_liked_phrases() {
+        for q in [
+            "плейлист с моими любимыми треками",
+            "включи залайканные треки",
+            "мои любимые",
+            "liked songs",
+            "мне нравится",
+        ] {
+            assert!(is_liked_query(q), "{q}");
+        }
+        for q in ["любимый подкаст", "Metallica", "мои любимые выпуски"]
+        {
+            assert!(!is_liked_query(q), "{q}");
+        }
+    }
+
+    #[tokio::test]
+    async fn liked_phrases_use_collection_instead_of_search() {
+        struct Liked(std::sync::atomic::AtomicUsize);
+
+        #[async_trait::async_trait]
+        impl MusicControl for Liked {
+            async fn liked(&self) -> petrovich_core::Result<String> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok("Включаю любимые треки.".into())
+            }
+            async fn play_search(&self, _: &str) -> petrovich_core::Result<String> {
+                panic!("поиск не должен вызываться для любимых треков");
+            }
+            fn play(&self) -> petrovich_core::Result<()> {
+                Ok(())
+            }
+            fn pause(&self) -> petrovich_core::Result<()> {
+                Ok(())
+            }
+            fn resume(&self) -> petrovich_core::Result<()> {
+                Ok(())
+            }
+            fn next(&self) -> petrovich_core::Result<()> {
+                Ok(())
+            }
+            fn previous(&self) -> petrovich_core::Result<()> {
+                Ok(())
+            }
+            fn status(&self) -> petrovich_core::Result<String> {
+                Ok("играет".into())
+            }
+        }
+
+        let liked = Arc::new(Liked(0.into()));
+        let (c, _) = ctx_ui_with_music(&["music"], liked.clone());
+        let r = c
+            .execute(
+                "music",
+                r#"{"action":"play","query":"плейлист с моими любимыми треками"}"#,
+            )
+            .await
+            .unwrap();
+        assert!(r.content.contains("любимые"), "{}", r.content);
+        let r = c.execute("music", r#"{"action":"liked"}"#).await.unwrap();
+        assert!(r.content.contains("любимые"), "{}", r.content);
+        assert_eq!(liked.0.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

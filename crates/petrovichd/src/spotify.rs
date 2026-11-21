@@ -472,11 +472,28 @@ fn choose(items: &[Item], want_episode: bool) -> Option<&Item> {
         .or_else(|| items.first())
 }
 
+/// Специальный контекст Spotify Connect для коллекции «Мне нравится».
+/// У неё нет id плейлиста — только URI с каноническим именем пользователя.
+fn liked_item(username: &str) -> Option<Item> {
+    if username.is_empty() {
+        return None;
+    }
+    Some(Item {
+        uri: format!("spotify:user:{username}:collection"),
+        name: "Любимые треки".into(),
+        subtitle: "Мне нравится".into(),
+        kind: "плейлист",
+        release: String::new(),
+    })
+}
+
 pub struct Spotify {
     spirc: Arc<Spirc>,
     state: Arc<Mutex<PlaybackState>>,
     api: Api,
     mixer: Arc<dyn Mixer>,
+    /// Канонический пользователь сессии: нужен для `spotify:user:<id>:collection`.
+    username: String,
     queue: Mutex<Vec<Item>>,
     saved_volume: AtomicU16,
     /// Глубина приглушения: демон глушит музыку на время слушания,
@@ -556,8 +573,13 @@ impl Spotify {
         let player = Player::new(player_cfg, session.clone(), mixer.get_soft_volume(), || {
             Box::new(PetrovichSink::open(None, AudioFormat::S16))
         });
+        // `ConnectConfig` по умолчанию стартует с 50% (`u16::MAX / 2`), а TTS
+        // идёт в ALSA напрямую. Из-за этого музыка звучала заметно тише речи.
+        // Громкость колонки должен задавать только ALSA, поэтому softmixer
+        // стартует на полной шкале.
         let connect_cfg = ConnectConfig {
             name: cfg.device_name.clone(),
+            initial_volume: u16::MAX,
             ..ConnectConfig::default()
         };
         let api_session = session.clone();
@@ -573,6 +595,7 @@ impl Spotify {
         tokio::spawn(task);
         let spirc = Arc::new(spirc);
         let state = Arc::new(Mutex::new(PlaybackState::default()));
+        let username = api_session.username();
         let api = Api::new(
             api_session,
             cfg,
@@ -591,6 +614,7 @@ impl Spotify {
             state: state.clone(),
             api,
             mixer: mixer.clone(),
+            username,
             queue: Mutex::new(Vec::new()),
             saved_volume: AtomicU16::new(mixer.volume()),
             duck_depth: Arc::new(Mutex::new(0)),
@@ -754,6 +778,18 @@ impl MusicControl for Spotify {
             text.push_str(&format!(" ({})", item.kind));
         }
         Ok(text)
+    }
+
+    async fn liked(&self) -> petrovich_core::Result<String> {
+        let item = liked_item(&self.username).ok_or_else(|| {
+            core_err(anyhow::anyhow!(
+                "Spotify: не знаю пользователя, коллекция «Мне нравится» недоступна"
+            ))
+        })?;
+        let before = self.state();
+        self.load_uri(&item, 0).map_err(core_err)?;
+        self.wait_started(&before).await.map_err(core_err)?;
+        Ok("Включаю любимые треки из «Мне нравится».".into())
     }
 
     fn pause(&self) -> petrovich_core::Result<()> {
@@ -1032,6 +1068,17 @@ fn core_err(e: anyhow::Error) -> petrovich_core::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_liked_collection_uri() {
+        let item = liked_item("31hensidfy3hxflkgpjduzuztiey").unwrap();
+        assert_eq!(
+            item.uri,
+            "spotify:user:31hensidfy3hxflkgpjduzuztiey:collection"
+        );
+        assert_eq!(item.kind, "плейлист");
+        assert!(liked_item("").is_none());
+    }
 
     #[test]
     fn picks_latest_episode_for_podcast_query() {

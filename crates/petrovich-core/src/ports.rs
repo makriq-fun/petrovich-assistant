@@ -30,6 +30,13 @@ pub trait MusicControl: Send + Sync {
         self.play_query(query)?;
         Ok(format!("Включаю: {query}"))
     }
+    /// Включить коллекцию «Мне нравится» (liked songs). У неё нет названия
+    /// плейлиста, поэтому поиск по строке тут не подходит.
+    async fn liked(&self) -> Result<String> {
+        Err(crate::Error::Unsupported(
+            "любимые треки не поддерживаются".into(),
+        ))
+    }
     fn pause(&self) -> Result<()>;
     fn resume(&self) -> Result<()>;
     /// Продолжить воспроизведение и убедиться, что оно реально пошло:
