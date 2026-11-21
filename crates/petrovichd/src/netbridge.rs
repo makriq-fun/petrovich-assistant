@@ -36,7 +36,7 @@ impl HttpConnectBridge {
                         let proxy = proxy.clone();
                         tokio::spawn(async move {
                             if let Err(e) = handle(socket, &proxy).await {
-                                tracing::debug!("HTTP CONNECT мост: {e:#}");
+                                tracing::warn!("HTTP CONNECT мост: {e:#}");
                             }
                         });
                     }

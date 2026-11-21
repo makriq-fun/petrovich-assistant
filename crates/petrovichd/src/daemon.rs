@@ -29,7 +29,7 @@ use tokio::task::JoinHandle;
 use crate::byedpi::ByeDpi;
 use crate::music::CommandMusic;
 use crate::netbridge::HttpConnectBridge;
-use crate::spotify::Spotify;
+use crate::spotify::start_resilient;
 use crate::turn::{run_turn, speak_text, TurnContext, TurnOutcome};
 use crate::youtube::YouTubePlayer;
 
@@ -207,7 +207,11 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     .with_fetch_client_proxy(cfg.tools.web_timeout_ms, cfg.network.proxy.trim())?
     .with_search_api(search_key.clone());
     let mut spotify_bridge = None;
-    let spotify = if cfg.modules.spotify {
+    let command_music = || {
+        CommandMusic::new(cfg.tools.music_command.clone())
+            .map(|m| Arc::new(m) as Arc<dyn MusicControl>)
+    };
+    let music: Option<Arc<dyn MusicControl>> = if cfg.modules.spotify {
         let mut scfg = cfg.spotify.clone();
         if scfg.cache_dir.is_none() {
             scfg.cache_dir = Some(cfg.spotify_cache_dir());
@@ -230,40 +234,30 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
                 Err(e) => tracing::warn!("Spotify: SOCKS5-мост не запущен: {e:#}"),
             }
         }
-        match Spotify::start(
-            &scfg,
-            &loaded.secrets,
+        // Демон стартует раньше hysteria2: первая попытка может не пройти.
+        // Тогда музыкальный backend остаётся доступен и подключается в фоне.
+        match start_resilient(
+            scfg,
+            loaded.secrets.clone(),
             cfg.audio.playback_pcm.clone(),
             Some(cfg.daemon.state_dir.join("spotify.json")),
             search_key.clone(),
         )
         .await
         {
-            Ok(Some(s)) => {
-                tracing::info!("Spotify Connect: «{}»", scfg.device_name);
-                Some(s)
-            }
-            Ok(None) => {
+            Some(spotify) => Some(spotify),
+            None => {
                 tracing::warn!("Spotify включён, но нет учётных данных; модуль не запущен");
-                None
-            }
-            Err(e) => {
-                tracing::warn!("Spotify недоступен: {e:#}");
-                None
+                command_music()
             }
         }
     } else {
         tracing::info!("Spotify выключен в конфигурации");
-        None
+        command_music()
     };
     // Мост должен жить столько же, сколько демон: librespot держит
     // постоянные TCP-соединения к Spotify.
     let _spotify_bridge = spotify_bridge;
-    let music: Option<Arc<dyn MusicControl>> = match &spotify {
-        Some(s) => Some(s.clone() as Arc<dyn MusicControl>),
-        None => CommandMusic::new(cfg.tools.music_command.clone())
-            .map(|m| Arc::new(m) as Arc<dyn MusicControl>),
-    };
     let app_music = music.clone();
     let commands = if cfg.commands.enabled {
         match CommandSpotter::open(&cfg.commands.model) {

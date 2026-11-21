@@ -26,6 +26,8 @@ use petrovich_audio::alsa::Pcm;
 use petrovich_core::config::{Secrets, SpotifyConfig};
 use petrovich_core::ports::MusicControl;
 
+use crate::music::DeferredMusic;
+
 /// librespot создаёт sink через свободную функцию без захвата, поэтому
 /// имя ALSA-устройства хранится в глобальной ячейке, установленной при
 /// старте. Она пишется один раз до создания плеера.
@@ -496,8 +498,8 @@ impl Spotify {
     ) -> Result<Option<Arc<Self>>> {
         let token = secrets.get(&cfg.access_token_env).unwrap_or("");
         let password = secrets.get(&cfg.password_env).unwrap_or("");
-        if SPOTIFY_PCM.set(playback_pcm).is_err() {
-            tracing::warn!("spotify: ALSA-устройство уже задано");
+        if SPOTIFY_PCM.get().is_none() {
+            let _ = SPOTIFY_PCM.set(playback_pcm);
         }
         let cache_dir = cfg.cache_dir.clone().unwrap_or_default();
         let cache = Cache::new(
@@ -926,6 +928,74 @@ impl MusicControl for Spotify {
         }
         Ok(Some((st.position_ms / 1000, st.duration_ms / 1000)))
     }
+}
+
+/// Запускает Spotify и, если первая попытка не удалась, повторяет её в фоне.
+///
+/// На холодном старте демон может опередить hysteria2: SOCKS5 на 1080 ещё не
+/// слушает, librespot получает `unexpected EOF while tunnel reading`, и без
+/// повтора Spotify остаётся выключенным до следующего перезапуска демона.
+pub async fn start_resilient(
+    cfg: SpotifyConfig,
+    secrets: Secrets,
+    playback_pcm: String,
+    saved_path: Option<std::path::PathBuf>,
+    tavily_key: String,
+) -> Option<Arc<dyn MusicControl>> {
+    match Spotify::start(
+        &cfg,
+        &secrets,
+        playback_pcm.clone(),
+        saved_path.clone(),
+        tavily_key.clone(),
+    )
+    .await
+    {
+        Ok(Some(spotify)) => {
+            tracing::info!("Spotify Connect: «{}»", cfg.device_name);
+            return Some(spotify);
+        }
+        Ok(None) => return None,
+        Err(e) => tracing::warn!("Spotify недоступен: {e:#}; повторяю в фоне"),
+    }
+    let slot = DeferredMusic::new(
+        "Spotify: подключение ещё не готово, прокси не отвечает. Повторите через полминуты.",
+    );
+    let retry = slot.clone();
+    let name = cfg.device_name.clone();
+    tokio::spawn(async move {
+        let mut delay = Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(delay).await;
+            match Spotify::start(
+                &cfg,
+                &secrets,
+                playback_pcm.clone(),
+                saved_path.clone(),
+                tavily_key.clone(),
+            )
+            .await
+            {
+                Ok(Some(spotify)) => {
+                    retry.install(spotify);
+                    tracing::info!("Spotify Connect: «{name}» подключён после повтора");
+                    return;
+                }
+                Ok(None) => {
+                    tracing::warn!("Spotify: учётные данные пропали, повтор остановлен");
+                    return;
+                }
+                Err(e) => {
+                    delay = (delay * 2).min(Duration::from_secs(60));
+                    tracing::warn!(
+                        "Spotify: повтор не удался: {e:#}; следующий через {} с",
+                        delay.as_secs()
+                    );
+                }
+            }
+        }
+    });
+    Some(slot)
 }
 
 fn save_snapshot(
