@@ -210,7 +210,7 @@ access_token_env = "PETROVICH_SPOTIFY_TOKEN"
 client_id = ""
 client_secret_env = "PETROVICH_SPOTIFY_CLIENT_SECRET"
 market = "RU"
-# Пусто — <state_dir>/spotify. Кэш librespot ограничен 64 МБ.
+# Пусто — <state_dir>/spotify. Кэш librespot ограничен 16 МБ.
 # cache_dir = "/data/petrovich/state/spotify"
 bitrate = 160
 search_limit = 10

@@ -519,11 +519,14 @@ impl Spotify {
             let _ = SPOTIFY_PCM.set(playback_pcm);
         }
         let cache_dir = cfg.cache_dir.clone().unwrap_or_default();
+        // /data на колонке — около 90 МБ. 64 МБ кэша вместе с двумя
+        // релизами и резервными копиями занимали весь раздел; 16 МБ
+        // хватает на несколько минут вперёд, остальное evict-ится.
         let cache = Cache::new(
             Some(cache_dir.as_path()),
             Some(cache_dir.as_path()),
             Some(cache_dir.join("files").as_path()),
-            Some(64 * 1024 * 1024),
+            Some(16 * 1024 * 1024),
         )
         .context("Spotify: кэш")?;
         let cached = cache.credentials();

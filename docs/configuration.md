@@ -249,7 +249,7 @@ Nightscout; для публичного чтения токен не нужен.
 | `client_id` | `""` | резервный client id, если нет токена Connect-сессии |
 | `client_secret_env` | `PETROVICH_SPOTIFY_CLIENT_SECRET` | секрет резервного client id |
 | `market` | `RU` | рынок поиска |
-| `cache_dir` | `<state_dir>/spotify` | кэш librespot, предел 64 МБ |
+| `cache_dir` | `<state_dir>/spotify` | кэш librespot, предел 16 МБ |
 | `bitrate` | `160` | 96, 160 или 320 кбит/с |
 | `search_limit` | `10` | результатов на тип поиска |
 
