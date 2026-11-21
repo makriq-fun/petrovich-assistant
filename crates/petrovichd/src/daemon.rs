@@ -1,7 +1,7 @@
 //! Жизненный цикл демона и голосовой автомат.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -102,6 +102,9 @@ struct App {
     turn: TurnContext,
     task_tx: mpsc::Sender<TurnEvent>,
     started: Instant,
+    /// Файл в /run, который обновляется на каждом тике. Супервизор по его
+    /// возрасту отличает занятый демон от зависшего.
+    heartbeat: PathBuf,
     volume_step: i32,
     /// Будильник, который сейчас звонит: «стоп» его выключает.
     ringing_alarm: Option<u64>,
@@ -109,6 +112,12 @@ struct App {
 
 pub async fn run(loaded: LoadedConfig) -> Result<()> {
     let cfg = loaded.config;
+    // Демон часто запускают из SSH или руками. Закрытие терминала не должно
+    // выключать помощника: штатная остановка — SIGTERM/SIGINT.
+    // SAFETY: SIG_IGN не разыменовывает указатели и действует на весь процесс.
+    unsafe {
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+    }
     if let Some(tz) = &cfg.daemon.timezone {
         std::env::set_var("TZ", tz);
     }
@@ -464,6 +473,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         Duration::from_secs(cfg.dialog.history_ttl_s),
     );
     let (task_tx, mut task_rx) = mpsc::channel(4);
+    let heartbeat = heartbeat_path(&cfg.daemon.pid_file);
     let mut app = App {
         dialog: cfg.dialog.clone(),
         mode: Mode::Idle,
@@ -494,6 +504,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         turn,
         task_tx,
         started: Instant::now(),
+        heartbeat: heartbeat.clone(),
         volume_step: cfg.hardware.volume_step,
         ringing_alarm: None,
     };
@@ -512,6 +523,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     tokio::pin!(shutdown);
     let pid = cfg.daemon.pid_file.clone();
     write_pid(&pid)?;
+    write_heartbeat(&heartbeat);
     tracing::info!("petrovichd {} готов", petrovich_core::VERSION);
     loop {
         let deadline = match (app.follow_deadline, app.hard_deadline) {
@@ -630,6 +642,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         }
     }
     let _ = std::fs::remove_file(&pid);
+    let _ = std::fs::remove_file(&heartbeat);
     Ok(())
 }
 
@@ -645,6 +658,7 @@ impl App {
     /// Приоритет у того, что реально звучит. Когда не играет ничего, события
     /// не шлём: индикатор сам вернётся к часам по `indication.hold_s`.
     fn tick(&self) {
+        write_heartbeat(&self.heartbeat);
         if self.playback.is_playing() {
             return;
         }
@@ -1203,6 +1217,22 @@ impl App {
                 self.enter_idle();
             }
         }
+    }
+}
+
+fn heartbeat_path(pid_file: &Path) -> PathBuf {
+    pid_file.with_extension("heartbeat")
+}
+
+/// Обновляет heartbeat. Пишет в /run (tmpfs), поэтому флеш не изнашивается.
+/// Ошибку не считаем фатальной: супервизор просто не увидит свежий файл.
+fn write_heartbeat(path: &Path) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Err(e) = std::fs::write(path, now.to_string()) {
+        tracing::debug!("heartbeat {}: {e}", path.display());
     }
 }
 
