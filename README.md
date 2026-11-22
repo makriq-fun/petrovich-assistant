@@ -121,7 +121,7 @@ LLM, TTS, Tavily, `web_fetch`, погоде, Nightscout, Spotify API и librespo
 # На ПК: собрать релиз под ARMv7
 cargo install cross --git https://github.com/cross-rs/cross
 scripts/build.sh
-# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.9-armv7.tar.gz
+# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.3.0-armv7.tar.gz
 
 # Установка по SSH (ключ root уже настроен)
 python3 installer/petrovich_install.py --ssh-host station install \
