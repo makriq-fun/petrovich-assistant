@@ -216,7 +216,7 @@ DNS/NTP задаются отдельно; см. [docs/security.md](docs/securit
 ## Разработка
 
 ```bash
-cargo test --workspace          # 268 тестов (4 сетевых игнорируются)
+cargo test --workspace          # 281 тест (4 сетевых игнорируются)
 cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```
