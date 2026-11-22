@@ -6,7 +6,11 @@
 pub struct Decimator {
     factor: usize,
     taps: Vec<f32>,
+    /// Кольцевой буфер истории: `idx` — позиция следующей записи, она же
+    /// самый старый сэмпл. Раньше `remove(0)` сдвигал 63 элемента на каждом
+    /// входном сэмпле (48 000 × 6 в секунду на ARMv7).
     history: Vec<f32>,
+    idx: usize,
     pos: usize,
 }
 
@@ -39,6 +43,7 @@ impl Decimator {
             factor,
             taps,
             history: vec![0.0; len],
+            idx: 0,
             pos: 0,
         }
     }
@@ -50,19 +55,29 @@ impl Decimator {
     /// Фильтрует и прореживает; длина результата — ceil(len/factor).
     pub fn process(&mut self, input: &[i16]) -> Vec<i16> {
         let mut out = Vec::with_capacity(input.len() / self.factor + 1);
+        let len = self.history.len();
         for &s in input {
-            self.history.remove(0);
-            self.history.push(f32::from(s) / 32768.0);
-            if self.pos % self.factor == 0 {
-                let y: f32 = self
-                    .history
-                    .iter()
-                    .zip(&self.taps)
-                    .map(|(x, t)| x * t)
-                    .sum();
+            self.history[self.idx] = f32::from(s) / 32768.0;
+            self.idx += 1;
+            if self.idx == len {
+                self.idx = 0;
+            }
+            if self.pos == 0 {
+                let mut y = 0.0f32;
+                let mut j = self.idx;
+                for t in &self.taps {
+                    y += self.history[j] * t;
+                    j += 1;
+                    if j == len {
+                        j = 0;
+                    }
+                }
                 out.push((y.clamp(-1.0, 1.0) * 32767.0).round() as i16);
             }
-            self.pos = (self.pos + 1) % self.factor;
+            self.pos += 1;
+            if self.pos == self.factor {
+                self.pos = 0;
+            }
         }
         out
     }

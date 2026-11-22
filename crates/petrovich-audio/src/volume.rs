@@ -2,6 +2,7 @@
 //! Команда фиксированная: это не доступ LLM к оболочке.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{bail, Context, Result};
 use petrovich_core::ports::{VolumeControl, VolumeStatus};
@@ -10,11 +11,13 @@ fn core_err(e: anyhow::Error) -> petrovich_core::Error {
     petrovich_core::Error::Hardware(format!("{e:#}"))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AmixerVolume {
     pcm: String,
     control: String,
     step: i32,
+    /// -1 — значение ещё не известно.
+    cached: AtomicI32,
 }
 
 impl AmixerVolume {
@@ -23,6 +26,7 @@ impl AmixerVolume {
             pcm: pcm.into(),
             control: "Master".into(),
             step: step.clamp(1, 50),
+            cached: AtomicI32::new(-1),
         }
     }
 
@@ -94,8 +98,10 @@ pub fn parse_volume(text: &str) -> Option<VolumeStatus> {
 impl VolumeControl for AmixerVolume {
     fn get(&self) -> petrovich_core::Result<VolumeStatus> {
         let text = self.run(&["sget", &self.control]).map_err(core_err)?;
-        parse_volume(&text)
-            .ok_or_else(|| petrovich_core::Error::Hardware("amixer: не найден уровень".into()))
+        let status = parse_volume(&text)
+            .ok_or_else(|| petrovich_core::Error::Hardware("amixer: не найден уровень".into()))?;
+        self.cached.store(status.percent, Ordering::Relaxed);
+        Ok(status)
     }
 
     fn set_percent(&self, percent: i32) -> petrovich_core::Result<VolumeStatus> {
@@ -112,6 +118,13 @@ impl VolumeControl for AmixerVolume {
             return Ok(cur);
         }
         self.set_percent(next)
+    }
+
+    fn cached_percent(&self) -> Option<i32> {
+        match self.cached.load(Ordering::Relaxed) {
+            -1 => None,
+            v => Some(v.clamp(0, 100)),
+        }
     }
 }
 

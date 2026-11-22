@@ -17,6 +17,18 @@ class Tests(unittest.TestCase):
         self.assertEqual(ji.previous_release(["0.9.0", "0.10.0"], "0.10.0"), "0.9.0")
         self.assertIsNone(ji.previous_release(["1.0.0"], "1.0.0"))
 
+    def test_previous_release_mixed_suffix(self):
+        # Сравнение не должно падать на смеси числовых и текстовых сегментов.
+        self.assertEqual(
+            ji.previous_release(["1.0.0a", "1.0.2"], "1.0.3"), "1.0.2"
+        )
+        self.assertEqual(
+            ji.previous_release(["0.2.9", "0.1.10"], "0.2.10"), "0.2.9"
+        )
+        self.assertEqual(
+            ji.previous_release(["1.0.0a", "1.0.0b"], "1.0.1"), "1.0.0b"
+        )
+
     def test_shim_keeps_original_and_marker(self):
         text = ji.shim_for("S97quasar")
         self.assertIn(ji.MARKER, text)

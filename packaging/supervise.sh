@@ -20,18 +20,35 @@ mkdir -p "$D/log" "$D/state" /run
 # часто запускают вручную. Штатная остановка — SIGTERM/SIGINT.
 trap '' HUP
 # На колонке мало места: держим текущий журнал и один предыдущий.
-if [ -f "$LOG" ]; then
+# copytruncate работает и во время работы демона: он пишет с O_APPEND,
+# поэтому после обнуления следующие строки идут с начала файла.
+rotate_log() {
+  [ -f "$LOG" ] || return 0
   size=$(wc -c <"$LOG" 2>/dev/null || echo 0)
   if [ "$size" -gt 2097152 ]; then
-    mv -f "$LOG" "$LOG.1"
+    cp -f "$LOG" "$LOG.1" 2>/dev/null || true
+    : >"$LOG"
   fi
-fi
+}
+rotate_log
 if [ -f "$PID" ]; then
   old=$(cat "$PID" 2>/dev/null || true)
   if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
     exit 0
   fi
 fi
+# Атомарный замок: init и ручной запуск по SSH не должны поднять двух
+# супервизоров, которые начнут драться за ALSA.
+LOCK=$D/supervise.lock
+if ! mkdir "$LOCK" 2>/dev/null; then
+  owner=$(cat "$LOCK/pid" 2>/dev/null || true)
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    exit 0
+  fi
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || exit 0
+fi
+echo $$ >"$LOCK/pid"
 echo $$ >"$PID"
 child=
 cleanup() {
@@ -41,6 +58,7 @@ cleanup() {
     alive "$child" && kill -9 "$child" 2>/dev/null || true
   fi
   [ "$(cat "$PID" 2>/dev/null || true)" = "$$" ] && rm -f "$PID"
+  [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$$" ] && rm -rf "$LOCK"
   rm -f "$HB"
   exit 0
 }
@@ -53,6 +71,7 @@ alive() {
 trap cleanup TERM INT
 
 fails=0
+ticks=0
 while [ -f "$D/enabled" ]; do
   rm -f "$HB" "$DPID"
   started=$(date +%s)
@@ -60,6 +79,12 @@ while [ -f "$D/enabled" ]; do
   child=$!
   while alive "$child"; do
     sleep 5
+    ticks=$((ticks + 1))
+    # Раз в минуту проверяем размер: один долгий запуск не должен съесть
+    # всю флешку, даже если демон работает неделями.
+    if [ $((ticks % 12)) -eq 0 ]; then
+      rotate_log
+    fi
     if [ -f "$HB" ]; then
       hb=$(cat "$HB" 2>/dev/null || echo 0)
       case "$hb" in
@@ -80,6 +105,7 @@ while [ -f "$D/enabled" ]; do
   wait "$child" 2>/dev/null
   code=$?
   child=
+  rotate_log
   ran=$(( $(date +%s) - started ))
   # Остановка супервизора — только его собственный SIGTERM/SIGINT или
   # удаление enabled. Любой выход демона, включая штатный, поднимаем заново:
@@ -95,3 +121,4 @@ while [ -f "$D/enabled" ]; do
   sleep "$delay"
 done
 rm -f "$PID" "$HB"
+rm -rf "$LOCK"

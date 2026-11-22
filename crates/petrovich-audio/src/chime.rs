@@ -4,11 +4,10 @@
 
 use std::sync::Arc;
 
+use crate::frontend::PlaybackHandle;
 use petrovich_core::errors::Result;
 use petrovich_core::events::Emotion;
 use petrovich_core::ports::{Chime, ChimeSound, VolumeControl};
-
-use crate::frontend::PlaybackHandle;
 
 const RATE: u32 = 24_000;
 
@@ -25,8 +24,8 @@ impl LocalChime {
     fn gain(&self) -> f32 {
         let percent = self
             .volume
-            .get()
-            .map(|v| v.percent)
+            .cached_percent()
+            .or_else(|| self.volume.get().ok().map(|v| v.percent))
             .unwrap_or(100)
             .clamp(1, 100);
         volume_gain(percent)

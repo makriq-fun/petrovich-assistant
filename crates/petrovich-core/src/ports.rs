@@ -14,6 +14,12 @@ pub trait VolumeControl: Send + Sync {
     fn get(&self) -> Result<VolumeStatus>;
     fn set_percent(&self, percent: i32) -> Result<VolumeStatus>;
     fn step(&self, delta: i32) -> Result<VolumeStatus>;
+    /// Последняя известная громкость без обращения к оборудованию.
+    /// Служебные звуки не должны запускать `amixer` на каждый сигнал:
+    /// на слабой колонке это заметная задержка в обработке звука.
+    fn cached_percent(&self) -> Option<i32> {
+        None
+    }
 }
 
 #[async_trait::async_trait]

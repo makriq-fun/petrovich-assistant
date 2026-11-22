@@ -15,13 +15,98 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::http::{client_with_ca_proxy, endpoint, read_limited, redact};
+use crate::http::{
+    backoff, client_with_ca_proxy, endpoint, read_limited, read_prefix, redact, retry_after,
+};
 
 pub struct AudioStream {
     pub format: TtsFormat,
     pub sample_rate: u32,
     pub channels: u16,
     pub stream: BoxStream<'static, Result<Bytes>>,
+}
+
+/// Состояние потоковой проверки ответа TTS.
+struct GuardedStream {
+    stream: BoxStream<'static, Result<Bytes>>,
+    timeout: Duration,
+    max_bytes: usize,
+    left: usize,
+    first: bool,
+    failed: bool,
+    expect_pcm: bool,
+}
+
+/// Оборачивает поток TTS проверками, которых не делает HTTP-клиент:
+/// тайм-аут простоя (сервер замолчал), лимит размера (защита RAM) и
+/// отказ от WAV-заголовка там, где обещан сырой PCM.
+fn guarded_stream(
+    resp: Response,
+    timeout: Duration,
+    max_bytes: usize,
+    expect_pcm: bool,
+) -> BoxStream<'static, Result<Bytes>> {
+    let state = GuardedStream {
+        stream: resp
+            .bytes_stream()
+            .map(|r| r.map_err(anyhow::Error::from))
+            .boxed(),
+        timeout,
+        max_bytes,
+        left: max_bytes,
+        first: true,
+        failed: false,
+        expect_pcm,
+    };
+    futures_util::stream::unfold(state, |mut st| async move {
+        if st.failed {
+            return None;
+        }
+        match tokio::time::timeout(st.timeout, st.stream.next()).await {
+            Ok(None) => None,
+            Ok(Some(Err(e))) => {
+                st.failed = true;
+                Some((Err(anyhow::anyhow!("TTS: чтение потока: {e}")), st))
+            }
+            Ok(Some(Ok(chunk))) => {
+                if st.first {
+                    st.first = false;
+                    if st.expect_pcm && chunk.starts_with(b"RIFF") {
+                        st.failed = true;
+                        return Some((
+                            Err(anyhow::anyhow!(
+                                "TTS: сервер вернул WAV вместо PCM (проверьте tts.format)"
+                            )),
+                            st,
+                        ));
+                    }
+                }
+                if chunk.len() > st.left {
+                    st.failed = true;
+                    return Some((
+                        Err(anyhow::anyhow!(
+                            "TTS: ответ больше {} байт (tts.max_bytes)",
+                            st.max_bytes
+                        )),
+                        st,
+                    ));
+                }
+                st.left -= chunk.len();
+                Some((Ok(chunk), st))
+            }
+            Err(_) => {
+                st.failed = true;
+                Some((
+                    Err(anyhow::anyhow!(
+                        "TTS: поток молчит дольше {} мс",
+                        st.timeout.as_millis()
+                    )),
+                    st,
+                ))
+            }
+        }
+    })
+    .boxed()
 }
 
 #[async_trait]
@@ -48,6 +133,7 @@ pub struct FishTts {
     sample_rate: u32,
     timeout: Duration,
     retries: u8,
+    max_bytes: usize,
 }
 
 impl FishTts {
@@ -56,7 +142,7 @@ impl FishTts {
             bail!("Fish TTS: пустой reference_id (tts.voice)");
         }
         Ok(Self {
-            http: client_with_ca_proxy(cfg.timeout_ms, None, &cfg.proxy)?,
+            http: client_with_ca_proxy(cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/tts"),
             model: cfg.model.clone(),
             reference_id: cfg.voice.clone(),
@@ -67,6 +153,7 @@ impl FishTts {
             sample_rate: cfg.sample_rate,
             timeout: Duration::from_millis(cfg.timeout_ms),
             retries: cfg.retries,
+            max_bytes: cfg.max_bytes,
         })
     }
 
@@ -80,6 +167,7 @@ impl FishTts {
         });
         let mut last: Option<anyhow::Error> = None;
         for attempt in 0..=self.retries {
+            let mut retry_hint = None;
             let mut req = self
                 .http
                 .post(&self.url)
@@ -92,7 +180,8 @@ impl FishTts {
                 Ok(Ok(resp)) if resp.status().is_success() => return Ok(resp),
                 Ok(Ok(resp)) => {
                     let status = resp.status();
-                    let text = redact(&resp.text().await.unwrap_or_default());
+                    retry_hint = retry_after(&resp);
+                    let text = read_prefix(resp, 16 * 1024).await;
                     let err = anyhow::anyhow!("Fish TTS: HTTP {status}: {text}");
                     if !(status == reqwest::StatusCode::TOO_MANY_REQUESTS
                         || status.is_server_error())
@@ -110,7 +199,7 @@ impl FishTts {
                 Err(_) => last = Some(anyhow::anyhow!("Fish TTS: тайм-аут")),
             }
             tracing::warn!("Fish TTS: повтор {}/{}", attempt + 1, self.retries);
-            tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(attempt as u32))).await;
+            tokio::time::sleep(retry_hint.unwrap_or_else(|| backoff(attempt))).await;
         }
         Err(last.unwrap_or_else(|| anyhow::anyhow!("Fish TTS: нет ответа")))
     }
@@ -123,10 +212,7 @@ impl Tts for FishTts {
             bail!("Fish TTS: пустой текст");
         }
         let resp = self.request(text).await?;
-        let stream = resp
-            .bytes_stream()
-            .map(|r| r.map_err(anyhow::Error::from))
-            .boxed();
+        let stream = guarded_stream(resp, self.timeout, self.max_bytes, true);
         Ok(AudioStream {
             format: TtsFormat::Pcm,
             sample_rate: self.sample_rate,
@@ -160,7 +246,7 @@ pub struct OpenAiTts {
 impl OpenAiTts {
     pub fn new(cfg: &TtsConfig, secrets: &Secrets) -> Result<Self> {
         Ok(Self {
-            http: client_with_ca_proxy(cfg.timeout_ms, None, &cfg.proxy)?,
+            http: client_with_ca_proxy(cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/audio/speech"),
             model: cfg.model.clone(),
             voice: cfg.voice.clone(),
@@ -185,6 +271,7 @@ impl OpenAiTts {
         });
         let mut last: Option<anyhow::Error> = None;
         for attempt in 0..=self.retries {
+            let mut retry_hint = None;
             let mut req = self.http.post(&self.url).json(&body);
             if let Some(key) = &self.key {
                 req = req.bearer_auth(key);
@@ -193,7 +280,8 @@ impl OpenAiTts {
                 Ok(Ok(resp)) if resp.status().is_success() => return Ok(resp),
                 Ok(Ok(resp)) => {
                     let status = resp.status();
-                    let text = redact(&resp.text().await.unwrap_or_default());
+                    retry_hint = retry_after(&resp);
+                    let text = read_prefix(resp, 16 * 1024).await;
                     let err = anyhow::anyhow!("TTS: HTTP {status}: {text}");
                     if !(status == reqwest::StatusCode::TOO_MANY_REQUESTS
                         || status.is_server_error())
@@ -211,7 +299,7 @@ impl OpenAiTts {
                 Err(_) => last = Some(anyhow::anyhow!("TTS: тайм-аут")),
             }
             tracing::warn!("TTS: повтор {}/{}", attempt + 1, self.retries);
-            tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(attempt as u32))).await;
+            tokio::time::sleep(retry_hint.unwrap_or_else(|| backoff(attempt))).await;
         }
         Err(last.unwrap_or_else(|| anyhow::anyhow!("TTS: нет ответа")))
     }
@@ -226,10 +314,7 @@ impl Tts for OpenAiTts {
         let resp = self.request(text).await?;
         match self.format {
             TtsFormat::Pcm => {
-                let stream = resp
-                    .bytes_stream()
-                    .map(|r| r.map_err(anyhow::Error::from))
-                    .boxed();
+                let stream = guarded_stream(resp, self.timeout, self.max_bytes, true);
                 Ok(AudioStream {
                     format: TtsFormat::Pcm,
                     sample_rate: self.sample_rate,
@@ -238,7 +323,10 @@ impl Tts for OpenAiTts {
                 })
             }
             TtsFormat::Wav => {
-                let bytes = read_limited(resp, self.max_bytes).await?;
+                let bytes = tokio::time::timeout(self.timeout, read_limited(resp, self.max_bytes))
+                    .await
+                    .context("TTS: тайм-аут ответа")?
+                    .context("TTS: чтение ответа")?;
                 let (rate, channels, offset) = petrovich_core::wav::probe(&bytes)?;
                 let body = Bytes::copy_from_slice(&bytes[offset..]);
                 Ok(AudioStream {
@@ -313,15 +401,29 @@ impl Tts for CommandTts {
             TtsFormat::Pcm => {
                 let mut stdout = child.stdout.take().context("TTS: нет stdout")?;
                 let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes>>(8);
+                let timeout = self.timeout;
+                let max_bytes = self.max_bytes;
                 // Дочерний процесс живёт в задаче чтения: kill_on_drop не
                 // оборвёт поток, пока он нужен.
                 tokio::spawn(async move {
                     use tokio::io::AsyncReadExt as _;
                     let mut buf = vec![0u8; 8192];
+                    let mut total = 0usize;
                     loop {
-                        match stdout.read(&mut buf).await {
-                            Ok(0) => break,
-                            Ok(n) => {
+                        let read = tokio::time::timeout(timeout, stdout.read(&mut buf)).await;
+                        match read {
+                            Ok(Ok(0)) => break,
+                            Ok(Ok(n)) => {
+                                total = total.saturating_add(n);
+                                if total > max_bytes {
+                                    let _ = tx
+                                        .send(Err(anyhow::anyhow!(
+                                            "TTS: ответ больше {max_bytes} байт"
+                                        )))
+                                        .await;
+                                    let _ = child.kill().await;
+                                    break;
+                                }
                                 if tx
                                     .send(Ok(Bytes::copy_from_slice(&buf[..n])))
                                     .await
@@ -330,8 +432,18 @@ impl Tts for CommandTts {
                                     break;
                                 }
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 let _ = tx.send(Err(anyhow::Error::from(e))).await;
+                                break;
+                            }
+                            Err(_) => {
+                                let _ = tx
+                                    .send(Err(anyhow::anyhow!(
+                                        "TTS: команда молчит дольше {} мс",
+                                        timeout.as_millis()
+                                    )))
+                                    .await;
+                                let _ = child.kill().await;
                                 break;
                             }
                         }
@@ -447,6 +559,35 @@ mod tests {
         assert_eq!(s.sample_rate, 16_000);
         let body = collect(s).await;
         assert_eq!(body, &wav[44..]);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn openai_pcm_rejects_wav_header() {
+        let (url, handle) = serve_once(200, "audio/pcm", "RIFFxxxxWAVE").await;
+        let t = OpenAiTts::new(&cfg(&url, TtsFormat::Pcm), &Secrets::default()).unwrap();
+        let mut s = t.synthesize("привет").await.unwrap();
+        let err = s.stream.next().await.unwrap().unwrap_err().to_string();
+        assert!(err.contains("WAV вместо PCM"), "{err}");
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn openai_pcm_respects_max_bytes() {
+        let (url, handle) = serve_once(200, "audio/pcm", "0123456789").await;
+        let mut c = cfg(&url, TtsFormat::Pcm);
+        c.max_bytes = 4;
+        let t = OpenAiTts::new(&c, &Secrets::default()).unwrap();
+        let mut s = t.synthesize("привет").await.unwrap();
+        let mut err = None;
+        while let Some(item) = s.stream.next().await {
+            if let Err(e) = item {
+                err = Some(e.to_string());
+                break;
+            }
+        }
+        let err = err.expect("должна быть ошибка лимита");
+        assert!(err.contains("больше 4 байт"), "{err}");
         handle.await.unwrap();
     }
 

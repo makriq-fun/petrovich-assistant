@@ -149,6 +149,11 @@ personal/non-commercial использования; не добавляйте и
 ## `[stt]`, `[llm]`, `[tts]`
 
 Общие поля: `base_url`, `model`, `api_key_env`, `timeout_ms`, `retries`.
+`timeout_ms` ограничивает ожидание ответа: у потоковых LLM и TTS это тайм-аут
+очередного фрагмента, поэтому длинный, но живой ответ не обрывается на
+середине. Для STT это предел одного запроса целиком. `tls_ca_file` —
+дополнительный корневой сертификат (PEM) для self-hosted HTTPS; поддерживается
+у STT, LLM и TTS.
 У LLM есть `fallback_models`: список моделей того же API, которые берутся по
 порядку при 429, 404 и при отказе провайдера разобрать вызов инструмента.
 `api_key_envs` — дополнительные переменные с ключами того же провайдера: при
@@ -161,9 +166,8 @@ HTTP CONNECT-мостом в процессе `petrovichd`; отдельный �
 `chat_audio`, `command`; LLM —
 OpenAI-совместимый HTTP. `chat_audio` отправляет WAV в мультимодальную
 chat-модель (например, Gemini через VoidAI), когда отдельного Whisper-эндпоинта
-у провайдера нет. У STT есть `tls_ca_file` для self-hosted HTTPS. Для `command`-
-провайдеров — `command` (argv, без оболочки). Полные схемы и примеры —
-[providers.md](providers.md).
+у провайдера нет. Для `command`-провайдеров — `command` (argv, без оболочки).
+Полные схемы и примеры — [providers.md](providers.md).
 
 ## `[tools]`
 

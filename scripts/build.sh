@@ -20,5 +20,15 @@ fi
 mkdir -p dist
 install -m755 "$bin/petrovichd" dist/petrovichd
 install -m755 "$bin/petrovichctl" dist/petrovichctl
-arch=armv7; [[ $target == host ]] && arch=host
+arch=armv7
+if [[ $target == host ]]; then
+  arch=host
+else
+  case "$target" in
+    armv7-*) arch=armv7 ;;
+    aarch64-*) arch=aarch64 ;;
+    arm-*) arch=arm ;;
+    *) arch=${target%%-*} ;;
+  esac
+fi
 "$root/scripts/package.sh" "$version" "$arch"

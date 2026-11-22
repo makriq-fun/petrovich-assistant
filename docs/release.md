@@ -22,6 +22,10 @@ Workflow [.github/workflows/ci.yml](../.github/workflows/ci.yml) запуска�
 - `petrovich-assistant-<версия>-host.tar.gz` — для проверки на ПК;
 - `SHA256SUMS` — обе суммы в одном файле.
 
+Архивы собираются воспроизводимо (`tar --sort=name`, фиксированные владелец
+и mtime), поэтому повторная сборка из того же коммита должна совпасть по
+SHA256 и её можно сверить с опубликованной.
+
 ## Порядок выпуска
 
 Версия живёт в `Cargo.toml` (`[workspace.package] version`); все crates

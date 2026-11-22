@@ -876,6 +876,9 @@ pub struct LlmConfig {
     pub stream: bool,
     #[serde(default = "default_true")]
     pub tools: bool,
+    /// Дополнительный корневой сертификат для self-hosted HTTPS.
+    #[serde(default)]
+    pub tls_ca_file: Option<PathBuf>,
     /// Прокси только для LLM, например socks5h://127.0.0.1:1080.
     #[serde(default)]
     pub proxy: String,
@@ -896,6 +899,7 @@ impl Default for LlmConfig {
             retries: default_retries(),
             stream: true,
             tools: true,
+            tls_ca_file: None,
             proxy: String::new(),
         }
     }
@@ -1004,6 +1008,9 @@ pub struct TtsConfig {
     /// Для локального TTS: argv команды; текст подаётся на stdin, PCM/WAV — на stdout.
     #[serde(default)]
     pub command: Vec<String>,
+    /// Дополнительный корневой сертификат для self-hosted HTTPS.
+    #[serde(default)]
+    pub tls_ca_file: Option<PathBuf>,
     /// Прокси TTS; пусто — общий `[network] proxy`.
     #[serde(default)]
     pub proxy: String,
@@ -1023,6 +1030,7 @@ impl Default for TtsConfig {
             retries: default_retries(),
             max_bytes: default_tts_limit(),
             command: Vec::new(),
+            tls_ca_file: None,
             proxy: String::new(),
         }
     }
@@ -1593,6 +1601,15 @@ impl Config {
         if self.audio.mic_channels.is_empty() {
             return invalid("audio.mic_channels пуст".into());
         }
+        for (field, list) in [
+            ("audio.mic_channels", &self.audio.mic_channels),
+            ("audio.reference_channels", &self.audio.reference_channels),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            if let Some(dup) = list.iter().find(|ch| !seen.insert(**ch)) {
+                return invalid(format!("{field}: канал {dup} указан дважды"));
+            }
+        }
         for ch in self
             .audio
             .mic_channels
@@ -1608,6 +1625,37 @@ impl Config {
         }
         if self.audio.period_ms == 0 || self.audio.period_ms > 100 {
             return invalid("audio.period_ms должен быть 1..100".into());
+        }
+        // Нулевой тайм-аут означал бы мгновенный отказ каждого запроса, а
+        // чрезмерный — зависание ответа на минуты. Границы проверяются при
+        // загрузке, чтобы ошибку было видно в --check-config, а не в бою.
+        for (field, ms, min, max) in [
+            ("stt.timeout_ms", self.stt.timeout_ms, 1_000, 600_000),
+            ("llm.timeout_ms", self.llm.timeout_ms, 1_000, 600_000),
+            ("tts.timeout_ms", self.tts.timeout_ms, 1_000, 600_000),
+            (
+                "dialog.response_timeout_ms",
+                self.dialog.response_timeout_ms,
+                5_000,
+                900_000,
+            ),
+            ("tools.timeout_ms", self.tools.timeout_ms, 1_000, 600_000),
+            (
+                "tools.web_timeout_ms",
+                self.tools.web_timeout_ms,
+                1_000,
+                600_000,
+            ),
+            (
+                "tools.sandbox_timeout_ms",
+                self.tools.sandbox_timeout_ms,
+                1_000,
+                600_000,
+            ),
+        ] {
+            if !(min..=max).contains(&ms) {
+                return invalid(format!("{field} должен быть {min}..{max}"));
+            }
         }
         if self.wakeword.enabled && self.wakeword.gain > 64 {
             return invalid("wakeword.gain не должен превышать 64 (клиппинг)".into());
@@ -1633,9 +1681,26 @@ impl Config {
             || self.vad.activation_pre_roll_ms > 10_000
         {
             return invalid(
-                "vad: short_silence_ms должен быть 1..silence_ms, short_utterance_ms > 0,                  resume_pause_ms < silence_ms, activation_pre_roll_ms <= 10000"
+                "vad: short_silence_ms должен быть 1..silence_ms, short_utterance_ms > 0, \
+                 resume_pause_ms < silence_ms, activation_pre_roll_ms <= 10000"
                     .into(),
             );
+        }
+        if !(3.0..=40.0).contains(&self.vad.energy_margin_db) {
+            return invalid("vad.energy_margin_db должен быть 3..40".into());
+        }
+        if self.wakeword.enabled {
+            if let Some(t) = self.wakeword.threshold {
+                if !(0.01..=0.999).contains(&t) {
+                    return invalid("wakeword.threshold должен быть 0.01..0.999".into());
+                }
+            }
+            if !(-0.9..=0.9).contains(&self.wakeword.sensitivity) {
+                return invalid("wakeword.sensitivity должен быть -0.9..0.9".into());
+            }
+        }
+        if self.dialog.follow_up_ms < 500 {
+            return invalid("dialog.follow_up_ms должен быть не меньше 500".into());
         }
         if self.dialog.listen_timeout_ms < 1_000 {
             return invalid("dialog.listen_timeout_ms должен быть не меньше 1000".into());
@@ -1846,8 +1911,16 @@ impl Config {
         if self.llm.model.is_empty() {
             return invalid("llm.model пуст".into());
         }
+        if let Some(ca) = &self.llm.tls_ca_file {
+            if !ca.is_file() {
+                return invalid(format!("llm.tls_ca_file не найден: {}", ca.display()));
+            }
+        }
         if self.llm.temperature < 0.0 || self.llm.temperature > 2.0 {
             return invalid("llm.temperature должен быть 0..2".into());
+        }
+        if self.llm.max_tokens == 0 || self.llm.max_tokens > 32_768 {
+            return invalid("llm.max_tokens должен быть 1..32768".into());
         }
         if self
             .llm
@@ -1863,12 +1936,20 @@ impl Config {
                 if self.tts.model.is_empty() || self.tts.voice.is_empty() {
                     return invalid("tts.model/voice пусты".into());
                 }
+                if let Some(ca) = &self.tts.tls_ca_file {
+                    if !ca.is_file() {
+                        return invalid(format!("tts.tls_ca_file не найден: {}", ca.display()));
+                    }
+                }
             }
             TtsProvider::Command => {
                 if self.tts.command.is_empty() {
                     return invalid("tts.provider=command, но tts.command пуст".into());
                 }
             }
+        }
+        if !(8_000..=48_000).contains(&self.tts.sample_rate) {
+            return invalid("tts.sample_rate должен быть 8000..48000".into());
         }
         if !self.tools.search_proxy.trim().is_empty() {
             let p = self.tools.search_proxy.trim();
@@ -2075,6 +2156,45 @@ mod tests {
         cfg.tts.provider = TtsProvider::Command;
         assert!(cfg.validate().is_err());
         cfg.tts.command = vec!["rhvoice-client".into(), "-v".into(), "anna".into()];
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn zero_network_timeouts_are_rejected() {
+        for field in 0..3 {
+            let mut cfg = example();
+            match field {
+                0 => cfg.stt.timeout_ms = 0,
+                1 => cfg.llm.timeout_ms = 0,
+                _ => cfg.tts.timeout_ms = 0,
+            }
+            assert!(cfg.validate().is_err(), "поле {field}");
+        }
+    }
+
+    #[test]
+    fn duplicate_mic_channel_is_rejected() {
+        let mut cfg = example();
+        cfg.audio.mic_channels = vec![0, 0, 1, 2];
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("дважды"), "{err}");
+    }
+
+    #[test]
+    fn llm_tls_ca_must_exist() {
+        let mut cfg = example();
+        cfg.llm.tls_ca_file = Some("/nonexistent/ca.pem".into());
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn llm_max_tokens_is_bounded() {
+        let mut cfg = example();
+        cfg.llm.max_tokens = 0;
+        assert!(cfg.validate().is_err());
+        cfg.llm.max_tokens = 32_769;
+        assert!(cfg.validate().is_err());
+        cfg.llm.max_tokens = 800;
         assert!(cfg.validate().is_ok());
     }
 

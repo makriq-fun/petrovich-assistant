@@ -392,6 +392,19 @@ impl MicroWakeWord {
             }
             bail!("TFLite: нет input/output");
         }
+        let in_bytes = unsafe { (tflite.tensor_bytes)(input) };
+        let out_bytes = unsafe { (tflite.tensor_bytes)(output) };
+        // Молчаливый отказ copy_in означал бы «модель не срабатывает
+        // никогда» без единой строки в журнале.
+        if in_bytes != 120 || out_bytes != 4 {
+            unsafe {
+                (tflite.interp_delete)(interp);
+                (tflite.model_delete)(model);
+            }
+            bail!(
+                "microWakeWord: вход {in_bytes} байт (нужно 120), выход {out_bytes} байт (нужно 4)"
+            );
+        }
         // SAFETY: фронтенд C API, состояние создаётся один раз.
         let frontend = unsafe { mf_create() };
         if frontend.is_null() {

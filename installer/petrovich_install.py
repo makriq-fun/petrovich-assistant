@@ -264,7 +264,16 @@ def validate_version(v: str) -> str:
 def version_key(v: str):
     import re
 
-    return [int(x) if x.isdigit() else x for x in re.split(r"([0-9]+)", v)]
+    # Сегменты сравниваются как кортежи одного типа: иначе `max()` падает
+    # на смеси int и str («1.0.0a» против «1.0.2»).
+    key = []
+    for part in re.split(r"[._-]", v):
+        match = re.match(r"(\d+)(.*)$", part)
+        if match:
+            key.append((0, int(match.group(1)), match.group(2)))
+        else:
+            key.append((1, 0, part))
+    return key
 
 
 def previous_release(releases: list[str], current: str) -> str | None:
@@ -276,12 +285,17 @@ def previous_release(releases: list[str], current: str) -> str | None:
 
 
 def upload_secret(t: Transport, local: Path, remote: str):
-    tmp = remote + ".tmp"
+    # Секрет сначала попадает в каталог 0700: до chmod файл не должен быть
+    # доступен другим пользователям устройства.
+    stage = f"{DEVICE_ROOT}/.staging"
+    t.script(f"set -eu\nrm -rf {stage}\nmkdir -p {stage}\nchmod 700 {stage}\n")
+    tmp = f"{stage}/{Path(remote).name}"
     t.push(local, tmp)
     t.script(
         "set -eu\n"
         f"chmod 600 {shlex.quote(tmp)}\n"
         f"mv -f {shlex.quote(tmp)} {shlex.quote(remote)}\n"
+        f"rmdir {stage} 2>/dev/null || true\n"
     )
 
 
@@ -377,8 +391,9 @@ def backup(t: Transport, host_dir: Path, label: str = "install") -> tuple[str, P
     try:
         os.chmod(local, 0o600)
         os.chmod(meta, 0o600)
-    except OSError:
-        pass
+    except OSError as e:
+        # В backup лежит secrets.env: права важнее удобства.
+        print(f"предупреждение: не удалось ограничить права backup: {e}", file=sys.stderr)
     print(f"backup: {local} ({digest[:12]}…)")
     return digest, local
 
@@ -562,6 +577,12 @@ def set_current(t: Transport, version: str):
         f"ln -s releases/{shlex.quote(version)} {DEVICE_ROOT}/current.next\n"
         f"rm -f {DEVICE_ROOT}/current\n"
         f"mv {DEVICE_ROOT}/current.next {DEVICE_ROOT}/current\n"
+        # Супервизор переключается вместе с релизом. Старые релизы его не
+        # содержат — тогда остаётся текущий верхнеуровневый скрипт.
+        f"if [ -f {DEVICE_ROOT}/current/supervise.sh ]; then\n"
+        f"  cp -f {DEVICE_ROOT}/current/supervise.sh {DEVICE_ROOT}/supervise.sh\n"
+        f"  chmod 755 {DEVICE_ROOT}/supervise.sh\n"
+        f"fi\n"
         f"readlink {DEVICE_ROOT}/current\n"
     )
 
@@ -583,6 +604,20 @@ def deploy_release(t: Transport, artifact: Path, ctl: Path, version: str, dry: b
     t.script(f"set -eu\nmkdir -p {remote_dir}\n")
     upload_file(t, artifact, f"{remote_dir}/petrovichd", "755", verify=True)
     upload_file(t, ctl, f"{remote_dir}/petrovichctl", "755", verify=True)
+    # Супервизор живёт внутри релиза: при откате на предыдущий релиз
+    # запускается совместимая с ним версия, а не скрипт нового выпуска.
+    upload_file(t, ROOT / "packaging/supervise.sh", f"{remote_dir}/supervise.sh", "755")
+    # Артефакт мог быть собран из другой версии: имя каталога релиза должно
+    # совпадать с тем, что реально умеет бинарь, иначе откат выберет не то.
+    probe = t.script(f'"{remote_dir}/petrovichd" --version', check=False)
+    reported = probe.stdout.decode("utf-8", "replace").strip()
+    if probe.returncode != 0 or version not in reported:
+        # Не оставляем каталог-призрак: следующий `previous_release` не
+        # должен предлагать откат на нерабочий бинарь.
+        t.script(f"rm -rf {remote_dir}", check=False)
+        raise InstallError(
+            f"артефакт не подтвердил версию {version}: {reported or 'нет вывода'}"
+        )
     # TFLite C API не входит в релиз (бинарь прошивки/лицензия), но нужен
     # рядом с petrovichd. Иначе загрузчик уходит на старый
     # /system/vendor/quasar/libs/libtflite.so и падает на модели OWW.
@@ -751,7 +786,13 @@ def prune(t: Transport) -> None:
         "  b=$(basename \"$r\")\n"
         "  [ \"$b\" = \"$cur\" ] || echo \"$b\"\n"
         "done | tail -n +2 | while read -r old; do rm -rf \"$D/releases/$old\"; done\n"
-        "ls -1dt \"$D\"/backups/install-*.tar.gz 2>/dev/null | tail -n +4 | while read -r old; do rm -f \"$old\"; done\n"
+        # Ручные backup раньше не чистились вовсе и могли занять всю флешку.
+        "i=0\n"
+        "ls -1t \"$D\"/backups/*-*.tar.gz 2>/dev/null | while read -r old; do\n"
+        "  i=$((i + 1))\n"
+        "  [ \"$i\" -le 3 ] && continue\n"
+        "  rm -f \"$old\" \"${old%.tar.gz}.json\"\n"
+        "done\n"
     )
 
 

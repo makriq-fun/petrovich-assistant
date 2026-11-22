@@ -42,6 +42,9 @@ pub struct TurnOutcome {
     pub messages: Vec<ChatMessage>,
     pub spoken: String,
     pub control: Option<ControlAction>,
+    /// STT не расслышал речь. Это не ошибка: демон тихо возвращается к
+    /// прослушиванию вместо красной индикации и звука ошибки.
+    pub not_heard: bool,
 }
 
 /// Отменяет оставшиеся инструменты при разрушении хода.
@@ -66,7 +69,13 @@ pub async fn run_turn(
     let heard = ctx.stt.transcribe(wav).await.context("распознавание")?;
     let text = strip_wake_word(&heard);
     if text.is_empty() || is_stt_artifact(&text) {
-        bail!("не расслышал");
+        tracing::info!("STT: речь не распознана");
+        return Ok(TurnOutcome {
+            messages: Vec::new(),
+            spoken: String::new(),
+            control: None,
+            not_heard: true,
+        });
     }
     tracing::info!("запрос: {text}");
     let mut new_messages = vec![ChatMessage::user(text.clone())];
@@ -76,6 +85,16 @@ pub async fn run_turn(
             messages: new_messages,
             spoken: String::new(),
             control: Some(ControlAction::StopSpeaking),
+            not_heard: false,
+        });
+    }
+    if is_repeat_phrase(&text) {
+        tracing::info!("локальная команда повтора");
+        return Ok(TurnOutcome {
+            messages: Vec::new(),
+            spoken: String::new(),
+            control: Some(ControlAction::RepeatLast),
+            not_heard: false,
         });
     }
     if ctx.cancelled.load(Ordering::Acquire) {
@@ -112,10 +131,14 @@ pub async fn run_turn(
         } else {
             tools.clone()
         };
-        let round_messages = if force_final {
-            final_round_messages(&messages)
-        } else {
-            messages.clone()
+        let round_messages = {
+            let mut snapshot = messages.clone();
+            trim_tool_history(&mut snapshot);
+            if force_final {
+                final_round_messages(&snapshot)
+            } else {
+                snapshot
+            }
         };
         let mut rx = ctx
             .llm
@@ -200,10 +223,10 @@ pub async fn run_turn(
                 };
                 messages.push(assistant.clone());
                 new_messages.push(assistant);
-                // Независимые вызовы выполняются параллельно: поиск,
-                // погода, таймер и будильник не должны ждать друг друга.
-                // Ошибка одного не мешает остальным; результат каждого
-                // возвращается модели отдельным сообщением.
+                // Независимые вызовы выполняются параллельно, но не более
+                // четырёх сразу: на одной CPU и 512 МБ RAM десяток
+                // одновременных сетевых инструментов отнимает эфир у звука.
+                let limit = Arc::new(tokio::sync::Semaphore::new(4));
                 let mut jobs: Vec<
                     Option<tokio::task::JoinHandle<Result<petrovich_tools::ToolResult>>>,
                 > = Vec::with_capacity(calls.len());
@@ -220,8 +243,12 @@ pub async fn run_turn(
                         let tools = ctx.tools.clone();
                         let name = call.function.name.clone();
                         let args = call.function.arguments.clone();
+                        let limit = limit.clone();
                         jobs.push(Some(tokio::spawn(async move {
-                            tools.execute(&name, &args).await
+                            let permit = limit.acquire().await;
+                            let result = tools.execute(&name, &args).await;
+                            drop(permit);
+                            result
                         })));
                         skipped.push(None);
                     } else {
@@ -296,7 +323,37 @@ pub async fn run_turn(
         messages: new_messages,
         spoken: spoken.trim().to_owned(),
         control,
+        not_heard: false,
     })
+}
+
+/// Ограничивает суммарный размер результатов инструментов в контексте.
+/// Двадцать раундов по несколько результатов иначе превышают контекст
+/// модели и память колонки; старые результаты заменяются заглушкой, свежие
+/// остаются целиком.
+fn trim_tool_history(messages: &mut [ChatMessage]) {
+    const MAX_TOOL_CHARS: usize = 24_000;
+    let mut total: usize = messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_deref().unwrap_or_default().chars().count())
+        .sum();
+    if total <= MAX_TOOL_CHARS {
+        return;
+    }
+    for msg in messages.iter_mut().filter(|m| m.role == Role::Tool) {
+        if total <= MAX_TOOL_CHARS {
+            break;
+        }
+        let len = msg.content.as_deref().unwrap_or_default().chars().count();
+        if len > 0 {
+            msg.content = Some(
+                "Результат инструмента опущен: контекст переполнен, используйте более свежие данные."
+                    .to_owned(),
+            );
+            total = total.saturating_sub(len);
+        }
+    }
 }
 
 /// История для финального раунда без схем инструментов. `tool_calls` и
@@ -466,20 +523,34 @@ async fn stream_audio_capture(
     Ok((format, total, captured, rate, ch as u16))
 }
 
-/// Убирает обращение «Петрович» в начале распознанной фразы.
+/// Убирает обращение «Петрович» в начале распознанной фразы. STT часто
+/// добавляет перед именем «эй» или «слушай» — их тоже убираем, но только
+/// если следом действительно идёт имя.
 pub fn strip_wake_word(text: &str) -> String {
     let t = text.trim();
-    let mut words = t.split_whitespace();
-    let Some(first) = words.next() else {
+    let words: Vec<&str> = t.split_whitespace().collect();
+    if words.is_empty() {
         return String::new();
+    }
+    let clean = |w: &str| {
+        w.trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase()
     };
-    let clean = first
-        .trim_matches(|c: char| !c.is_alphanumeric())
-        .to_lowercase();
-    if matches!(clean.as_str(), "петрович" | "petrovich") {
-        words.collect::<Vec<_>>().join(" ")
-    } else {
-        t.to_owned()
+    let is_wake = |w: &str| matches!(clean(w).as_str(), "петрович" | "petrovich");
+    let mut found = None;
+    for (i, w) in words.iter().take(3).enumerate() {
+        if is_wake(w) {
+            found = Some(i);
+            break;
+        }
+        let filler = clean(w);
+        if !matches!(filler.as_str(), "эй" | "слушай" | "окей" | "hey" | "okay") {
+            break;
+        }
+    }
+    match found {
+        Some(i) => words[i + 1..].join(" "),
+        None => t.to_owned(),
     }
 }
 
@@ -508,6 +579,29 @@ fn is_stop_phrase(text: &str) -> bool {
     )
 }
 
+/// Локальные команды повтора: реакция мгновенная и не тратит токены.
+fn is_repeat_phrase(text: &str) -> bool {
+    let t = text
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(
+        t.as_str(),
+        "повтори"
+            | "повтори пожалуйста"
+            | "повтори последнее"
+            | "скажи еще раз"
+            | "скажи ещё раз"
+            | "еще раз"
+            | "ещё раз"
+            | "что ты сказал"
+            | "что ты сказала"
+            | "repeat"
+    )
+}
+
 fn is_stt_artifact(text: &str) -> bool {
     let t = text.to_lowercase();
     [
@@ -533,8 +627,30 @@ mod tests {
         assert_eq!(strip_wake_word("petrovich what time"), "what time");
         assert_eq!(strip_wake_word("погода"), "погода");
         assert_eq!(strip_wake_word("Петрович"), "");
+        assert_eq!(
+            strip_wake_word("эй, Петрович, включи музыку"),
+            "включи музыку"
+        );
+        assert_eq!(strip_wake_word("Слушай, Петрович: громче"), "громче");
+        assert_eq!(strip_wake_word("слушай музыку"), "слушай музыку");
         assert!(is_stt_artifact("Продолжение следует..."));
         assert!(!is_stt_artifact("Какая сегодня погода?"));
+    }
+
+    #[test]
+    fn recognizes_repeat_phrases() {
+        for s in [
+            "Повтори",
+            "повтори, пожалуйста",
+            "Скажи ещё раз",
+            "что ты сказал",
+        ] {
+            assert!(is_repeat_phrase(s), "{s}");
+        }
+        for s in ["повтори за мной", "какая погода", "ещё раз включи"]
+        {
+            assert!(!is_repeat_phrase(s), "{s}");
+        }
     }
 
     #[test]
