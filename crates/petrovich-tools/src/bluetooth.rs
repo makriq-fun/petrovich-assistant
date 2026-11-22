@@ -30,12 +30,17 @@ impl BluetoothAction {
 }
 
 /// Управление адаптером через `bluetoothctl`. Программа вынесена в поле,
-/// чтобы тесты подменяли её скриптом и не трогали настоящий BlueZ.
-#[derive(Clone, Debug)]
+/// чтобы тесты подменяли её без запуска настоящего BlueZ.
+#[derive(Clone)]
 pub struct Bluetooth {
     program: PathBuf,
     timeout: Duration,
+    #[cfg(test)]
+    runner: Option<TestRunner>,
 }
+
+#[cfg(test)]
+type TestRunner = std::sync::Arc<dyn Fn(&[&str]) -> Result<String> + Send + Sync>;
 
 impl Default for Bluetooth {
     fn default() -> Self {
@@ -48,6 +53,17 @@ impl Bluetooth {
         Self {
             program: program.into(),
             timeout: Duration::from_secs(5),
+            #[cfg(test)]
+            runner: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fake(runner: impl Fn(&[&str]) -> Result<String> + Send + Sync + 'static) -> Self {
+        Self {
+            program: PathBuf::from("bluetoothctl"),
+            timeout: Duration::from_secs(5),
+            runner: Some(std::sync::Arc::new(runner)),
         }
     }
 
@@ -107,6 +123,10 @@ impl Bluetooth {
     }
 
     async fn run(&self, args: &[&str]) -> Result<String> {
+        #[cfg(test)]
+        if let Some(runner) = &self.runner {
+            return runner(args);
+        }
         let mut command = Command::new(&self.program);
         command.args(args).kill_on_drop(true);
         let output = tokio::time::timeout(self.timeout, command.output())
@@ -179,13 +199,44 @@ fn parse_show(output: &str) -> Option<AdapterState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex};
 
-    fn stub(dir: &std::path::Path, body: &str) -> Bluetooth {
-        let path = dir.join("bluetoothctl");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Bluetooth::new(path)
+    /// Подменяет bluetoothctl состоянием в памяти: без файлов и гонок
+    /// fork/exec с параллельными тестами.
+    fn adapter(powered: bool, discoverable: bool) -> (Bluetooth, Arc<Mutex<(bool, bool)>>) {
+        let state = Arc::new(Mutex::new((powered, discoverable)));
+        let shared = Arc::clone(&state);
+        let bluetooth = Bluetooth::fake(move |args| {
+            let mut state = shared.lock().unwrap();
+            match args {
+                ["show"] => {
+                    let (powered, discoverable) = *state;
+                    Ok(format!(
+                        "Controller 00:11 (public)\n\tAlias: Тест\n\tPowered: {}\n\tDiscoverable: {}\n",
+                        if powered { "yes" } else { "no" },
+                        if discoverable { "yes" } else { "no" }
+                    ))
+                }
+                ["power", "on"] => {
+                    state.0 = true;
+                    Ok("Changing power on succeeded".into())
+                }
+                ["power", "off"] => {
+                    state.0 = false;
+                    Ok("Changing power off succeeded".into())
+                }
+                ["discoverable", "on"] => {
+                    state.1 = true;
+                    Ok("Changing discoverable on succeeded".into())
+                }
+                ["discoverable", "off"] => {
+                    state.1 = false;
+                    Ok("Changing discoverable off succeeded".into())
+                }
+                _ => Ok(format!("Changing {} succeeded", args.join(" "))),
+            }
+        });
+        (bluetooth, state)
     }
 
     #[test]
@@ -206,57 +257,27 @@ mod tests {
 
     #[tokio::test]
     async fn on_enables_discoverable_and_reports_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("calls");
-        let b = stub(
-            dir.path(),
-            &format!(
-                "echo \"$*\" >> '{}'\n\
-                 if [ \"$1\" = show ]; then\n\
-                   printf 'Controller 00:11 (public)\\n\\tAlias: Тест\\n\\tPowered: yes\\n\\tDiscoverable: no\\n'\n\
-                 else\n\
-                   echo \"Changing $1 $2 succeeded\"\n\
-                 fi",
-                log.display()
-            ),
-        );
+        let (b, state) = adapter(false, false);
         let text = b.perform(BluetoothAction::On).await.unwrap();
         assert!(text.contains("включён"), "{text}");
+        assert!(text.contains("видна для сопряжения"), "{text}");
         assert!(text.contains("Тест"), "{text}");
-        let calls = std::fs::read_to_string(&log).unwrap();
-        assert!(calls.contains("power on"), "{calls}");
-        assert!(calls.contains("discoverable on"), "{calls}");
+        assert_eq!(*state.lock().unwrap(), (true, true));
     }
 
     #[tokio::test]
     async fn off_requires_powered_no() {
-        let dir = tempfile::tempdir().unwrap();
-        let b = stub(
-            dir.path(),
-            "if [ \"$1\" = show ]; then\n\
-               printf 'Controller 00:11 (public)\\n\\tPowered: no\\n\\tDiscoverable: no\\n'\n\
-             else\n\
-               echo \"Changing $1 $2 succeeded\"\n\
-             fi",
-        );
+        let (b, state) = adapter(true, true);
         let text = b.perform(BluetoothAction::Off).await.unwrap();
         assert_eq!(text, "Bluetooth выключен.");
+        assert_eq!(*state.lock().unwrap(), (false, false));
     }
 
     #[tokio::test]
     async fn status_does_not_change_power() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("calls");
-        let b = stub(
-            dir.path(),
-            &format!(
-                "echo \"$*\" >> '{}'\n\
-                 printf 'Controller 00:11 (public)\\n\\tAlias: Тест\\n\\tPowered: yes\\n\\tDiscoverable: yes\\n'",
-                log.display()
-            ),
-        );
+        let (b, state) = adapter(true, true);
         let text = b.perform(BluetoothAction::Status).await.unwrap();
         assert!(text.contains("видимость для сопряжения: да"), "{text}");
-        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "show");
+        assert_eq!(*state.lock().unwrap(), (true, true));
     }
 }

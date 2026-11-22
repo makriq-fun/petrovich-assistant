@@ -1571,17 +1571,12 @@ mod tests {
 
     #[tokio::test]
     async fn bluetooth_tool_is_wired_to_bluez() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let program = dir.path().join("bluetoothctl");
-        std::fs::write(
-            &program,
-            "#!/bin/sh\n\
-             printf 'Controller 00:11 (public)\\n\\tAlias: Тест\\n\\tPowered: yes\\n\\tDiscoverable: no\\n'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let c = ctx(&["bluetooth"]).with_bluetooth(Bluetooth::new(program));
+        let c =
+            ctx(&["bluetooth"]).with_bluetooth(Bluetooth::fake(|args| {
+                assert_eq!(args, ["show"]);
+                Ok("Controller 00:11 (public)\n\tAlias: Тест\n\tPowered: yes\n\tDiscoverable: no\n"
+                .into())
+            }));
         assert!(c
             .definitions()
             .iter()
