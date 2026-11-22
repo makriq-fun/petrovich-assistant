@@ -146,7 +146,7 @@ pub struct YouTubePlayer {
     proxy: String,
     /// Демон приглушает звук на время хода/объявления; новые сессии
     /// стартуют уже приглушёнными.
-    ducked: AtomicBool,
+    ducked: Arc<AtomicBool>,
     session: Mutex<Option<Session>>,
     queue: Mutex<VecDeque<String>>,
     state_path: Option<PathBuf>,
@@ -160,7 +160,7 @@ impl YouTubePlayer {
             tls12: build_client(cfg, true)?,
             playback_pcm,
             proxy: cfg.youtube_proxy.trim().to_owned(),
-            ducked: AtomicBool::new(false),
+            ducked: Arc::new(AtomicBool::new(false)),
             session: Mutex::new(None),
             queue: Mutex::new(VecDeque::new()),
             state_path: None,
