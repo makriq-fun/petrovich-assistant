@@ -483,7 +483,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         max_tool_rounds: cfg.dialog.max_tool_rounds,
         cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
-    let vad = petrovich_audio::vad::Vad::new(
+    let mut vad = petrovich_audio::vad::Vad::new(
         cfg.audio.sample_rate,
         cfg.vad.min_speech_ms,
         cfg.vad.silence_ms,
@@ -494,6 +494,12 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         cfg.vad.energy_margin_db,
         cfg.vad.pre_roll_ms,
         cfg.vad.absolute_db,
+    );
+    vad.set_activation_boost(cfg.vad.activation_boost_db, cfg.vad.activation_boost_ms);
+    tracing::info!(
+        "VAD: стартовый порог {:.1} dBFS, шумовая полка {:.1} dBFS",
+        vad.threshold_db(),
+        vad.noise_db()
     );
     let history = ConversationHistory::new(
         cfg.llm.system_prompt.clone(),
@@ -729,6 +735,12 @@ impl App {
     fn enter_listening(&mut self, follow_up: bool) {
         self.mode = Mode::Listening;
         self.vad.reset_utterance();
+        self.vad.arm_activation_boost();
+        tracing::info!(
+            "VAD: порог {:.1} dBFS (шум {:.1} dBFS)",
+            self.vad.threshold_db(),
+            self.vad.noise_db()
+        );
         if follow_up {
             // Хвост озвучки уже слит; 40 мс гасят щелчок, не съедая начало фразы.
             self.ignore_until = tokio::time::Instant::now() + Duration::from_millis(40);
@@ -843,15 +855,15 @@ impl App {
             } else {
                 Vec::new()
             };
+            let media_playing = self
+                .music
+                .as_ref()
+                .is_some_and(|m| m.is_playing().unwrap_or(false))
+                || self.youtube.as_ref().is_some_and(|y| y.is_playing());
             for command in commands {
                 // «Стоп» работает всегда: иначе ассистента не остановить
                 // голосом. Громкость и переключение из собственной озвучки
                 // или музыки без AEC — ложное срабатывание, их не пускаем.
-                let media_playing = self
-                    .music
-                    .as_ref()
-                    .is_some_and(|m| m.is_playing().unwrap_or(false))
-                    || self.youtube.as_ref().is_some_and(|y| y.is_playing());
                 if !accept_fast_command(
                     command,
                     self.playback.is_playing() || media_playing,
@@ -872,6 +884,11 @@ impl App {
             }
             match self.mode {
                 Mode::Idle => {
+                    // Фон обновляет шумовую полку всё время ожидания, чтобы
+                    // после активации не пришлось заново оценивать комнату.
+                    if !media_playing && !self.playback.is_playing() {
+                        self.vad.observe_background(&frame.samples);
+                    }
                     self.remember_pre_roll(&frame.samples);
                     let hits = self
                         .wake
@@ -927,6 +944,7 @@ impl App {
                             self.abort_turn();
                             self.playback.stop();
                             self.mode = Mode::Listening;
+                            self.vad.arm_activation_boost();
                             let now = tokio::time::Instant::now();
                             self.follow_deadline =
                                 Some(now + Duration::from_millis(self.dialog.follow_up_ms));

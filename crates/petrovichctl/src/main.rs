@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 use petrovich_core::config::{Config, DEFAULT_CONFIG};
 use petrovich_core::profile;
 use petrovich_core::text::SentenceChunker;
+use petrovich_tools::bluetooth::{Bluetooth, BluetoothAction};
 use petrovich_tools::smart_home::SmartHome;
 
 #[derive(Parser, Debug)]
@@ -63,6 +64,11 @@ enum Cmd {
     ComputerTest {
         #[arg(long)]
         wake: bool,
+    },
+    /// Проверить Bluetooth: on, off или status
+    BluetoothTest {
+        #[arg(default_value = "status")]
+        action: String,
     },
     /// Проверить веб-поиск
     SearchTest { query: String },
@@ -163,11 +169,19 @@ async fn main() -> Result<()> {
         Cmd::WeatherTest => weather_test(&loaded),
         Cmd::SugarTest { hours } => sugar_test(&loaded, hours),
         Cmd::ComputerTest { wake } => computer_test(&loaded, wake),
+        Cmd::BluetoothTest { action } => bluetooth_test(&action).await,
         Cmd::SearchTest { query } => search_test(&loaded, &query),
         Cmd::FetchTest { url, proxy } => fetch_test(&loaded, &url, proxy.as_deref()),
         Cmd::LightTest => light_test(&loaded),
         Cmd::SmartHome { cmd } => smart_home(&loaded, cmd).await,
     }
+}
+
+async fn bluetooth_test(action: &str) -> Result<()> {
+    let action = BluetoothAction::parse(action)
+        .ok_or_else(|| anyhow::anyhow!("bluetooth-test: неизвестное действие {action}"))?;
+    println!("{}", Bluetooth::default().perform(action).await?);
+    Ok(())
 }
 
 async fn smart_home(loaded: &petrovich_core::LoadedConfig, cmd: SmartHomeCmd) -> Result<()> {

@@ -598,6 +598,13 @@ pub struct VadConfig {
     /// Абсолютный потолок: более громкий звук считается речью даже в шуме.
     #[serde(default = "default_absolute_db")]
     pub absolute_db: f32,
+    /// Насколько снизить порог сразу после активации, дБ. Человек уже
+    /// стоит рядом с колонкой, поэтому первые секунды можно слушать тише.
+    #[serde(default = "default_activation_boost_db")]
+    pub activation_boost_db: f32,
+    /// Сколько миллисекунд действует снижение порога после активации.
+    #[serde(default = "default_activation_boost_ms")]
+    pub activation_boost_ms: u64,
 }
 
 impl Default for VadConfig {
@@ -613,6 +620,8 @@ impl Default for VadConfig {
             energy_margin_db: default_energy_margin_db(),
             pre_roll_ms: default_pre_roll_ms(),
             absolute_db: default_absolute_db(),
+            activation_boost_db: default_activation_boost_db(),
+            activation_boost_ms: default_activation_boost_ms(),
         }
     }
 }
@@ -641,7 +650,9 @@ fn default_max_utterance_ms() -> u64 {
     45_000
 }
 fn default_energy_margin_db() -> f32 {
-    9.0
+    // Запас над шумовой полкой. 9 дБ требовало заметно более громкой речи,
+    // чем обычный разговор в метре от колонки.
+    6.0
 }
 fn default_pre_roll_ms() -> u64 {
     300
@@ -649,7 +660,13 @@ fn default_pre_roll_ms() -> u64 {
 fn default_absolute_db() -> f32 {
     // Нижний предел порога: тихая речь не должна теряться в «абсолютной»
     // отсечке. Шум оценивается отдельно и поднимает порог при необходимости.
-    -55.0
+    -62.0
+}
+fn default_activation_boost_db() -> f32 {
+    6.0
+}
+fn default_activation_boost_ms() -> u64 {
+    4_000
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1286,6 +1303,7 @@ fn default_tools_enabled() -> Vec<String> {
         "reset_dialog",
         "stop",
         "computer",
+        "bluetooth",
         "smart_home",
     ]
     .into_iter()
@@ -1688,6 +1706,15 @@ impl Config {
         }
         if !(3.0..=40.0).contains(&self.vad.energy_margin_db) {
             return invalid("vad.energy_margin_db должен быть 3..40".into());
+        }
+        if !(-90.0..=-20.0).contains(&self.vad.absolute_db) {
+            return invalid("vad.absolute_db должен быть -90..-20".into());
+        }
+        if !(0.0..=20.0).contains(&self.vad.activation_boost_db) {
+            return invalid("vad.activation_boost_db должен быть 0..20".into());
+        }
+        if self.vad.activation_boost_ms > 10_000 {
+            return invalid("vad.activation_boost_ms не должен превышать 10000".into());
         }
         if self.wakeword.enabled {
             if let Some(t) = self.wakeword.threshold {

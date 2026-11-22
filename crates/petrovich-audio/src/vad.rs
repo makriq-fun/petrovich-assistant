@@ -6,6 +6,12 @@ use std::collections::VecDeque;
 
 pub const FRAME_MS: u64 = 20;
 
+/// Окно оценки шумовой полки. Две секунды покрывают паузы между словами,
+/// поэтому редкие громкие кадры не поднимают порог.
+const NOISE_WINDOW_MS: u64 = 2_000;
+/// Гистограмма уровня с шагом 1 дБ: -90..=0 dBFS.
+const NOISE_BINS: usize = 91;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Utterance {
     pub samples: Vec<i16>,
@@ -29,6 +35,13 @@ pub struct Vad {
     pre_roll_len: usize,
     pending: Vec<i16>,
     noise_db: f32,
+    noise_counts: [u16; NOISE_BINS],
+    noise_window: VecDeque<u8>,
+    noise_window_frames: usize,
+    activation_boost_db: f32,
+    activation_boost_ms: u64,
+    boost_db: f32,
+    boost_frames: u32,
     above: usize,
     below: usize,
     in_speech: bool,
@@ -69,6 +82,13 @@ impl Vad {
             pre_roll_len,
             pending: Vec::new(),
             noise_db: -60.0,
+            noise_counts: [0; NOISE_BINS],
+            noise_window: VecDeque::with_capacity((NOISE_WINDOW_MS / FRAME_MS) as usize),
+            noise_window_frames: (NOISE_WINDOW_MS / FRAME_MS) as usize,
+            activation_boost_db: 6.0,
+            activation_boost_ms: 4_000,
+            boost_db: 0.0,
+            boost_frames: 0,
             above: 0,
             below: 0,
             in_speech: false,
@@ -97,8 +117,41 @@ impl Vad {
 
     /// Фактический порог речи: шумовая полка с запасом, но не ниже
     /// абсолютного предела (он спасает от срабатывания на цифровой тишине).
+    /// После активации порог временно снижается на `activation_boost_db`:
+    /// человек уже стоит рядом с колонкой и не должен кричать.
     pub fn threshold_db(&self) -> f32 {
-        (self.noise_db + self.margin_db).max(self.absolute_db)
+        ((self.noise_db + self.margin_db).max(self.absolute_db) - self.boost_db).max(-90.0)
+    }
+
+    /// Текущее снижение порога, дБ; 0 — обычный режим.
+    pub fn boost_db(&self) -> f32 {
+        self.boost_db
+    }
+
+    /// Настраивает временное снижение порога после активации.
+    pub fn set_activation_boost(&mut self, db: f32, ms: u64) {
+        self.activation_boost_db = db.clamp(0.0, 20.0);
+        self.activation_boost_ms = ms.min(10_000);
+    }
+
+    /// Взводит снижение порога на настроенное время. Вызывается после
+    /// `reset_utterance`, когда начинается новая запись.
+    pub fn arm_activation_boost(&mut self) {
+        self.boost_db = self.activation_boost_db;
+        self.boost_frames = (self.activation_boost_ms / FRAME_MS) as u32;
+    }
+
+    /// Обновляет шумовую полку по фону, не запуская детектор речи. Нужно в
+    /// режиме ожидания: к моменту активации порог уже соответствует комнате.
+    pub fn observe_background(&mut self, samples: &[i16]) {
+        if samples.is_empty() {
+            return;
+        }
+        for frame in samples.chunks(self.frame_samples) {
+            if frame.len() == self.frame_samples {
+                self.observe_noise(dbfs(frame));
+            }
+        }
     }
 
     /// Сбрасывает текущую фразу, сохраняя оценку шума.
@@ -112,6 +165,8 @@ impl Vad {
         self.above = 0;
         self.below = 0;
         self.voiced = false;
+        self.boost_db = 0.0;
+        self.boost_frames = 0;
     }
 
     /// Полный сброс, например при смене источника звука.
@@ -136,7 +191,7 @@ impl Vad {
         let db = dbfs(frame);
         // Первые же кадры речи должны участвовать в фразе: прогрев,
         // съедавший 300 мс, обрезал короткие команды и начала фраз.
-        let threshold = (self.noise_db + self.margin_db).max(self.absolute_db);
+        let threshold = self.threshold_db();
         let loud = db > threshold;
         self.voiced = loud && self.in_speech;
 
@@ -155,8 +210,9 @@ impl Vad {
             } else {
                 self.above = 0;
                 self.push_pre_roll(frame);
-                self.noise_db = (self.noise_db * 0.995 + db * 0.005).clamp(-90.0, -20.0);
+                self.observe_noise(db);
             }
+            self.tick_boost();
             return None;
         }
 
@@ -187,6 +243,7 @@ impl Vad {
         let max_frames = self.max_utterance_ms.div_ceil(FRAME_MS);
         let done_silence = self.below as u64 >= silence_frames.max(1);
         let done_max = self.speech_frames >= max_frames.max(1);
+        self.tick_boost();
         if done_silence || done_max {
             self.in_speech = false;
             self.above = 0;
@@ -205,6 +262,52 @@ impl Vad {
             }
         }
         None
+    }
+
+    /// Учитывает уровень кадра в шумовой полке. Нижний дециль окна, а не
+    /// среднее: редкие громкие кадры и начало речи не задирают порог.
+    fn observe_noise(&mut self, db: f32) {
+        let bin = (((db.clamp(-90.0, 0.0) + 90.0).round()) as usize).min(NOISE_BINS - 1);
+        if self.noise_window.len() >= self.noise_window_frames {
+            if let Some(old) = self.noise_window.pop_front() {
+                let c = &mut self.noise_counts[old as usize];
+                *c = c.saturating_sub(1);
+            }
+        }
+        self.noise_window.push_back(bin as u8);
+        self.noise_counts[bin] = self.noise_counts[bin].saturating_add(1);
+        // Первые полсекунды окно слишком короткое для устойчивой оценки;
+        // начальное значение -60 дБ остаётся, пока не накопится история.
+        if self.noise_window.len() >= self.noise_window_frames / 4 {
+            self.noise_db = self.noise_percentile().clamp(-90.0, -20.0);
+        }
+    }
+
+    fn noise_percentile(&self) -> f32 {
+        let total: u32 = self.noise_counts.iter().map(|&c| u32::from(c)).sum();
+        if total == 0 {
+            return self.noise_db;
+        }
+        let target = (total / 10).max(1);
+        let mut seen = 0u32;
+        for (i, &c) in self.noise_counts.iter().enumerate() {
+            seen += u32::from(c);
+            if seen >= target {
+                return i as f32 - 90.0;
+            }
+        }
+        -90.0
+    }
+
+    fn tick_boost(&mut self) {
+        if self.boost_frames == 0 {
+            self.boost_db = 0.0;
+            return;
+        }
+        self.boost_frames -= 1;
+        if self.boost_frames == 0 {
+            self.boost_db = 0.0;
+        }
     }
 
     fn push_pre_roll(&mut self, frame: &[i16]) {
@@ -362,6 +465,56 @@ mod tests {
         assert!(!out.is_empty());
         assert!(out[0].samples.len() <= 16_000 / 2 + 100);
         assert!(out[0].speech_ms <= 500);
+    }
+
+    fn quiet_vad() -> Vad {
+        let mut v = Vad::new(16_000, 100, 300, 150, 800, 300, 4_000, 6.0, 0, -62.0);
+        let mut seed = 11;
+        v.observe_background(&noise(32_000, 0.0025, &mut seed));
+        v
+    }
+
+    /// Тихая речь на фоне комнаты: без временного снижения порога VAD её
+    /// пропускает, после активации — слышит.
+    #[test]
+    fn activation_boost_hears_quiet_speech() {
+        let mut v = quiet_vad();
+        assert!(v.threshold_db() < -38.0, "{}", v.threshold_db());
+        let mut out = Vec::new();
+        out.extend(v.push(&tone(12_800, 440.0, 0.008)));
+        out.extend(v.push(&vec![0; 12_800]));
+        assert!(out.is_empty(), "тихая речь не должна проходить без boost");
+
+        let mut v = quiet_vad();
+        v.arm_activation_boost();
+        assert!(v.threshold_db() < -44.0, "{}", v.threshold_db());
+        let mut out = Vec::new();
+        out.extend(v.push(&tone(12_800, 440.0, 0.008)));
+        out.extend(v.push(&vec![0; 12_800]));
+        assert_eq!(out.len(), 1, "boost должен поймать тихую речь");
+    }
+
+    #[test]
+    fn activation_boost_expires() {
+        let mut v = quiet_vad();
+        v.arm_activation_boost();
+        assert!(v.boost_db() > 0.0);
+        v.push(&vec![0; 16_000 * 4]);
+        assert_eq!(v.boost_db(), 0.0);
+    }
+
+    #[test]
+    fn short_loud_frames_do_not_raise_noise_floor() {
+        let mut v = Vad::new(16_000, 100, 300, 150, 800, 300, 4_000, 6.0, 0, -62.0);
+        let mut seed = 5;
+        v.observe_background(&noise(16_000, 0.01, &mut seed));
+        let floor = v.noise_db();
+        v.observe_background(&tone(3_200, 440.0, 0.5));
+        assert!(
+            v.noise_db() - floor < 2.0,
+            "громкий кадр загнал шумовую полку: {floor} -> {}",
+            v.noise_db()
+        );
     }
 
     #[test]

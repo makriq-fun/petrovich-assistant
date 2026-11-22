@@ -292,6 +292,18 @@ pub fn digit_mask(d: u8) -> u8 {
     DIGITS[(d as usize).min(9)]
 }
 
+/// Индикатор «слушаю»: «СЛУ» и бегущая шкала уровня на четвёртой цифре.
+/// `t` — секунды с начала прослушивания. Буквы собраны из сегментов,
+/// потому что отдельного знака микрофона на панели нет.
+pub fn listening_masks(t: f32) -> [u8; 4] {
+    const S: u8 = 0x6d; // «С» как цифра 5
+    const L: u8 = 0x38; // «Л»
+    const U: u8 = 0x3e; // «У»
+    const LEVEL: [u8; 4] = [0x08, 0x0c, 0x0e, 0x0f];
+    let level = LEVEL[((t / 0.2) as usize) % LEVEL.len()];
+    [S, L, U, level]
+}
+
 /// Один бегущий сегмент по всем четырём цифрам: индикатор «думаю».
 /// `t` — секунды, шаг — 120 мс.
 pub fn spinner_masks(t: f32) -> [u8; 4] {
@@ -496,6 +508,16 @@ mod tests {
             notice_masks(petrovich_core::events::UiNotice::Stopped, 0.0),
             [0x40; 4]
         );
+    }
+
+    #[test]
+    fn listening_indicator_is_visible_and_alive() {
+        let a = listening_masks(0.0);
+        assert_eq!(&a[..3], &[0x6d, 0x38, 0x3e]);
+        assert_ne!(a, [0; 4]);
+        assert_ne!(a[3], listening_masks(0.25)[3]);
+        // Шкала уровня не выходит за семь сегментов.
+        assert!(a.iter().all(|m| *m & 0x80 == 0));
     }
 
     #[test]

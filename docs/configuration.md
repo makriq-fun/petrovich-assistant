@@ -111,7 +111,16 @@ personal/non-commercial использования; не добавляйте и
 | `max_utterance_ms` | `45000` | принудительный конец |
 | `energy_margin_db` | `6.0` | порог над шумовой полкой |
 | `pre_roll_ms` | `300` | звук до начала речи |
-| `absolute_db` | `-55.0` | нижняя граница порога для тихой речи |
+| `absolute_db` | `-62.0` | нижняя граница порога для тихой речи |
+| `activation_boost_db` | `6.0` | насколько снизить порог сразу после активации |
+| `activation_boost_ms` | `4000` | сколько действует снижение порога |
+
+Шумовая полка считается по нижнему децилю двухсекундного окна, а не средним:
+короткие громкие звуки и начало речи не задирают порог. В режиме ожидания
+фон обновляется постоянно. После активации порог временно снижается на
+`activation_boost_db`, поэтому первые секунды не нужно говорить громче
+обычного. Диагностика пишет фактический порог и шумовую полку в журнал при
+активации: `VAD: порог … dBFS (шум … dBFS)`.
 
 ## `[dialog]`
 
@@ -173,7 +182,7 @@ chat-модель (например, Gemini через VoidAI), когда от�
 
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `enabled` | `time,timer,alarm,volume,music,youtube,web_search,emotion,web_fetch,weather,sugar,computer,remember,forget,reset_dialog,stop` | белый список |
+| `enabled` | `time,timer,alarm,volume,music,youtube,web_search,emotion,web_fetch,weather,sugar,computer,bluetooth,smart_home,remember,forget,reset_dialog,stop` | белый список |
 | `timeout_ms` | `10000` | обычные инструменты |
 | `web_timeout_ms` | `15000` | веб, погода и сахар |
 | `web_max_bytes` | `1048576` | предел ответа |
@@ -219,7 +228,13 @@ chat-модель (например, Gemini через VoidAI), когда от�
 `music` — Spotify или `music_command`; `youtube` — `youtube_proxy` или
 встроенный ByeDPI; `remember`/`forget` — `memory.enabled`;
 `sugar` — `nightscout_url`; `computer` — `[tools.computer]`;
+`bluetooth` — программа `bluetoothctl` из BlueZ на колонке;
 `smart_home` — сохранённая сессия после `petrovichctl smart-home login`.
+
+`bluetooth` управляет адаптером колонки: `on` включает его, разрешает
+сопряжение и делает колонку видимой с телефона, `off` выключает, `status`
+только читает состояние. Произвольных команд и оболочки нет. Проверка —
+`petrovichctl bluetooth-test on|off|status`.
 
 `computer` управляет домашним ПК закрытым набором действий: `power_on` и
 `wake` шлют magic packet (включение из выключенного состояния и пробуждение

@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use crate::bluetooth::{Bluetooth, BluetoothAction};
 use crate::computer::{Computer, ComputerAction};
 use crate::nightscout::Nightscout;
 use crate::smart_home::SmartHome;
@@ -56,6 +57,7 @@ pub struct ToolContext {
     weather: Option<Weather>,
     nightscout: Option<Nightscout>,
     computer: Option<Computer>,
+    bluetooth: Bluetooth,
     smart_home: Option<Arc<SmartHome>>,
     memory: Option<SharedMemory>,
     chime: Arc<dyn Chime>,
@@ -87,6 +89,7 @@ impl ToolContext {
             weather: None,
             nightscout: None,
             computer: None,
+            bluetooth: Bluetooth::default(),
             smart_home: None,
             memory: None,
             chime,
@@ -108,6 +111,12 @@ impl ToolContext {
 
     pub fn with_computer(mut self, computer: Computer) -> Self {
         self.computer = Some(computer);
+        self
+    }
+
+    /// Подменяет программу BlueZ: нужно для тестов и нестандартной прошивки.
+    pub fn with_bluetooth(mut self, bluetooth: Bluetooth) -> Self {
+        self.bluetooth = bluetooth;
         self
     }
 
@@ -199,6 +208,7 @@ impl ToolContext {
             "weather",
             "sugar",
             "computer",
+            "bluetooth",
             "smart_home",
             "remember",
             "forget",
@@ -352,6 +362,16 @@ impl ToolContext {
                 obj(
                     json!({
                         "action": {"type":"string","enum":["power_on","power_off","sleep","wake","lock","coffee_on","coffee_off","status"]}
+                    }),
+                    json!(["action"]),
+                ),
+            ),
+            "bluetooth" => ToolDefinition::new(
+                "bluetooth",
+                "Bluetooth колонки: on — включить и сделать видимой для сопряжения телефона, off — выключить, status — узнать состояние. Других возможностей Bluetooth нет",
+                obj(
+                    json!({
+                        "action": {"type":"string","enum":["on","off","status"]}
                     }),
                     json!(["action"]),
                 ),
@@ -1090,6 +1110,15 @@ impl ToolContext {
                     .ok_or_else(|| anyhow::anyhow!("computer: неизвестное действие {name}"))?;
                 Ok(ToolResult::text(computer.perform(action).await?))
             }
+            "bluetooth" => {
+                let name = args
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("bluetooth: нет action"))?;
+                let action = BluetoothAction::parse(name)
+                    .ok_or_else(|| anyhow::anyhow!("bluetooth: неизвестное действие {name}"))?;
+                Ok(ToolResult::text(self.bluetooth.perform(action).await?))
+            }
             "remember" => {
                 let memory = self
                     .memory
@@ -1538,6 +1567,34 @@ mod tests {
             ui.recv().await,
             Some(UiEvent::Emotion(Emotion::Calm))
         ));
+    }
+
+    #[tokio::test]
+    async fn bluetooth_tool_is_wired_to_bluez() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("bluetoothctl");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\n\
+             printf 'Controller 00:11 (public)\\n\\tAlias: Тест\\n\\tPowered: yes\\n\\tDiscoverable: no\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let c = ctx(&["bluetooth"]).with_bluetooth(Bluetooth::new(program));
+        assert!(c
+            .definitions()
+            .iter()
+            .any(|d| d.function.name == "bluetooth"));
+        let r = c
+            .execute("bluetooth", r#"{"action":"status"}"#)
+            .await
+            .unwrap();
+        assert!(r.content.contains("включён"), "{}", r.content);
+        assert!(c
+            .execute("bluetooth", r#"{"action":"лазер"}"#)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

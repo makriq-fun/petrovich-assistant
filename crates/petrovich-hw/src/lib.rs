@@ -324,6 +324,11 @@ async fn run_ui(
                     timer_deadline = None;
                     c.all_off()
                 }
+            } else if state == VoiceState::Listening {
+                // Пока идёт запись, экран должен однозначно показывать
+                // «слушаю», даже если на нём ещё висит погода или позиция.
+                let masks = clock::listening_masks(t);
+                c.set_levels(&masks, 0, c.level())
             } else if let Some((temp, _)) = weather {
                 c.show_temperature(temp)
             } else if let Some((mmol, _, _)) = &glucose {

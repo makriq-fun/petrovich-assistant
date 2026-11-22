@@ -1,5 +1,6 @@
 //! Инструменты ассистента и проверка разрешений.
 
+pub mod bluetooth;
 pub mod computer;
 pub mod html;
 pub mod nightscout;
@@ -12,6 +13,7 @@ pub mod web;
 #[cfg(test)]
 mod testutil;
 
+pub use bluetooth::{Bluetooth, BluetoothAction};
 pub use computer::{magic_packet, Computer, ComputerAction};
 pub use nightscout::Nightscout;
 pub use registry::{ControlAction, MusicDuck, ToolContext, ToolResult};
