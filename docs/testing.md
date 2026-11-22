@@ -8,7 +8,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```
 
-На момент написания: **299 тестов** в workspace (4 сетевых YouTube-теста
+На момент написания: **300 тестов** в workspace (4 сетевых YouTube-теста
 игнорируются) и 10 Python-тестов установщика.
 Что покрыто:
 

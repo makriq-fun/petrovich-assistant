@@ -130,6 +130,15 @@ impl Vad {
         (base - self.boost_db).max(floor).max(-90.0)
     }
 
+    /// Порог удержания уже начатой фразы. Ниже порога запуска на 3 дБ:
+    /// тихие слоги в середине слова не должны обрывать фразу, но фон сам
+    /// по себе по-прежнему не может её начать.
+    fn continue_threshold_db(&self) -> f32 {
+        (self.threshold_db() - 3.0)
+            .max(self.noise_db + 0.5)
+            .max(-90.0)
+    }
+
     /// Текущее снижение порога, дБ; 0 — обычный режим.
     pub fn boost_db(&self) -> f32 {
         self.boost_db
@@ -198,12 +207,12 @@ impl Vad {
         let db = dbfs(frame);
         // Первые же кадры речи должны участвовать в фразе: прогрев,
         // съедавший 300 мс, обрезал короткие команды и начала фраз.
-        let threshold = self.threshold_db();
-        let loud = db > threshold;
-        self.voiced = loud && self.in_speech;
+        let onset = self.threshold_db();
+        let onset_loud = db > onset;
+        self.voiced = false;
 
         if !self.in_speech {
-            if loud {
+            if onset_loud {
                 self.above += 1;
                 if self.above >= 2 {
                     self.in_speech = true;
@@ -223,6 +232,10 @@ impl Vad {
             return None;
         }
 
+        // Фраза уже началась: удерживаем её по более низкому порогу.
+        // Так тихий слог не рвёт слово, а шум не запускает новую фразу.
+        let loud = db > self.continue_threshold_db();
+        self.voiced = loud;
         self.speech.extend_from_slice(frame);
         self.speech_frames += 1;
         if loud {
@@ -521,6 +534,26 @@ mod tests {
             "порог {} ниже полки {} + 3",
             v.threshold_db(),
             v.noise_db()
+        );
+    }
+
+    /// Тихий хвост слова после громкого начала не должен обрывать фразу:
+    /// порог удержания ниже порога запуска. Без гистерезиса тихая часть
+    /// считалась бы паузой и STT получал бы обрывок.
+    #[test]
+    fn quiet_tail_after_onset_is_kept() {
+        let mut v = quiet_vad();
+        v.arm_activation_boost();
+        let mut out = Vec::new();
+        out.extend(v.push(&tone(3_200, 440.0, 0.05))); // 200 мс громко
+        assert!(v.in_speech());
+        out.extend(v.push(&tone(6_400, 440.0, 0.006))); // 400 мс тише порога запуска
+        out.extend(v.push(&vec![0; 16_000]));
+        assert_eq!(out.len(), 1, "тихий хвост потерян");
+        assert!(
+            out[0].voiced_ms >= 500,
+            "учтено только {} мс речи",
+            out[0].voiced_ms
         );
     }
 

@@ -451,6 +451,32 @@ done
 for p in /run/petrovichd.pid /run/skynetd.pid /run/jarvisd.pid; do
   if [ -f "$p" ]; then kill "$(cat "$p")" 2>/dev/null || true; fi
 done
+# Новый демон не должен упереться в занятый ALSA: ждём, пока старый
+# процесс действительно выйдет, а не фиксированные 1 с.
+i=0
+while [ "$i" -lt 15 ]; do
+  alive=0
+  for d in "$D" /data/skynet /data/jarvis; do
+    p=$(cat "$d/supervise.pid" 2>/dev/null || true)
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && alive=1
+  done
+  for p in /run/petrovichd.pid /run/skynetd.pid /run/jarvisd.pid; do
+    pid=$(cat "$p" 2>/dev/null || true)
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=1
+  done
+  [ "$alive" = 0 ] && break
+  sleep 1
+  i=$((i+1))
+done
+# Если процесс не ушёл по SIGTERM, снимаем его принудительно.
+for d in "$D" /data/skynet /data/jarvis; do
+  p=$(cat "$d/supervise.pid" 2>/dev/null || true)
+  [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true
+done
+for p in /run/petrovichd.pid /run/skynetd.pid /run/jarvisd.pid; do
+  pid=$(cat "$p" 2>/dev/null || true)
+  [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+done
 rm -f "$D/supervise.pid" /data/skynet/supervise.pid /data/jarvis/supervise.pid \
       /run/petrovichd.pid /run/skynetd.pid /run/jarvisd.pid
 sleep 1
@@ -464,8 +490,10 @@ def start_petrovich(t: Transport):
 set -eu
 [ -x /etc/init.d/S99petrovich ] || { echo "нет /etc/init.d/S99petrovich" >&2; exit 1; }
 /etc/init.d/S99petrovich
+# После падения демона супервизор отступает до 60 с; для установки
+# достаточно дождаться первого успешного запуска, не откатывая релиз.
 i=0
-while [ "$i" -lt 10 ]; do
+while [ "$i" -lt 30 ]; do
   pid=$(cat /run/petrovichd.pid 2>/dev/null || true)
   if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then echo "petrovichd pid=$pid"; exit 0; fi
   i=$((i+1)); sleep 1
