@@ -88,8 +88,10 @@ jobs:
       - name: Проверка запуска под ARM
         if: matrix.cross == true
         run: |
-          cross run --locked --release --target "${{ matrix.target }}" -p petrovichctl -- --version
-          cross run --locked --release --target "${{ matrix.target }}" -p petrovichd -- --version
+          # cross сам перехватывает --version/-V, поэтому бинарник проверяем
+          # через --help: он так же проходит загрузку, линковку и запуск.
+          cross run --locked --release --target "${{ matrix.target }}" -p petrovichctl -- --help
+          cross run --locked --release --target "${{ matrix.target }}" -p petrovichd -- --help
       - name: Проверка пакета
         run: |
           set -euo pipefail
