@@ -58,6 +58,9 @@ $EDITOR config.toml secrets.env
 - `[tools] sandbox_command` — только если действительно нужен `run_code`;
 - `[tools.computer]` — управление домашним ПК; без секции инструмент
   недоступен;
+- `[modules] smart_home` и `[tools.smart_home]` — локальное управление Tuya;
+  перед использованием один раз выполните `petrovichctl smart-home login`
+  (QR-код). Без сохранённой сессии инструмент не появляется;
 - `[hardware] model = "auto"`.
 
 Секреты не попадают в репозиторий и не печатаются в журнал. Файл с правами

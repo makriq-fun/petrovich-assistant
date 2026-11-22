@@ -10,7 +10,7 @@
 
 | Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `proxy` | `""` | общий прокси для STT, LLM, TTS, Tavily, `web_fetch`, погоды, Nightscout, Spotify API и librespot |
+| `proxy` | `""` | общий прокси для STT, LLM, TTS, Tavily, `web_fetch`, погоды, Nightscout, Spotify API, librespot и облачных запросов Tuya |
 
 Это SOCKS5/SOCKS5h/HTTP(S), например `socks5h://127.0.0.1:1080`. Явный
 `proxy` у STT, LLM, TTS или Spotify имеет приоритет над общим. Все компоненты,
@@ -196,6 +196,17 @@ chat-модель (например, Gemini через VoidAI), когда от�
 | `computer.key` | нет | приватный ключ endpoint'а |
 | `computer.home` | `/data/petrovich/pc` | HOME для `dbclient`; ключ хоста — в `<home>/.ssh/known_hosts` |
 | `computer.timeout_ms` | `12000` | предел одной команды ПК |
+| `smart_home.scan_subnet` | `""` | подсеть поиска Tuya; пусто — локальная подсеть |
+| `smart_home.scan_interval_s` | `300` | период поиска пропавших устройств; `0` — только по требованию |
+| `smart_home.timeout_ms` | `3000` | тайм-аут локального запроса к устройству |
+| `smart_home.cloud_timeout_ms` | `20000` | тайм-аут облака Tuya при входе/обновлении |
+| `smart_home.max_scan_hosts` | `254` | предел адресов за проход |
+| `smart_home.max_parallel` | `32` | одновременных проверок/команд |
+| `smart_home.allow_v31` | `true` | пробовать незашифрованный протокол 3.1 |
+| `smart_home.qr_timeout_s` | `180` | ожидание подтверждения QR |
+| `smart_home.proxy` | `""` | прокси только для облака Tuya; пусто — общий |
+| `smart_home.room_aliases` | `{}` | псевдонимы комнат для голоса |
+| `smart_home.aliases` | `{}` | псевдонимы устройств для голоса |
 
 Инструмент доступен, только если он одновременно в `enabled`, настроен и
 разрешён. `weather` требует `weather_url`, а без координат — названного
@@ -203,7 +214,8 @@ chat-модель (например, Gemini через VoidAI), когда от�
 `search_proxy` — отдельный прокси для него (иначе общий); `run_code` — `sandbox_command`;
 `music` — Spotify или `music_command`; `youtube` — `youtube_proxy` или
 встроенный ByeDPI; `remember`/`forget` — `memory.enabled`;
-`sugar` — `nightscout_url`; `computer` — `[tools.computer]`.
+`sugar` — `nightscout_url`; `computer` — `[tools.computer]`;
+`smart_home` — сохранённая сессия после `petrovichctl smart-home login`.
 
 `computer` управляет домашним ПК закрытым набором действий: `power_on` и
 `wake` шлют magic packet (включение из выключенного состояния и пробуждение
@@ -235,8 +247,11 @@ Nightscout; для публичного чтения токен не нужен.
 | `display` | `true` | экран и светодиоды |
 | `spotify` | `true` | встроенный Spotify Connect |
 | `byedpi` | `true` | встроенный обход YouTube |
+| `smart_home` | `true` | Tuya: QR-вход и локальное управление |
 
 Выключенный модуль не создаёт клиентов, потоков и фоновых задач.
+У `smart_home` без сохранённой сессии инструмент не появляется; после входа
+перезапустите демон.
 
 ## `[spotify]`
 

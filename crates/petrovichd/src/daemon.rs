@@ -19,7 +19,8 @@ use petrovich_hw::ButtonEvent;
 use petrovich_providers::llm::OpenAiLlm;
 use petrovich_providers::{stt_from_config, tts_from_config};
 use petrovich_tools::{
-    AlarmManager, Computer, ControlAction, Nightscout, TimerManager, ToolContext, Weather, Web,
+    AlarmManager, Computer, ControlAction, Nightscout, SmartHome, TimerManager, ToolContext,
+    Weather, Web,
 };
 use petrovich_wakeword::WakeWord;
 use tokio::signal::unix::{signal, SignalKind};
@@ -427,6 +428,28 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     }
     if let Some(memory) = &memory {
         tools = tools.with_memory(memory.clone());
+    }
+    if cfg.modules.smart_home
+        && cfg.tools.enabled.iter().any(|t| t == "smart_home")
+        && SmartHome::session_present(&cfg.daemon.state_dir)
+    {
+        match SmartHome::open(
+            cfg.tools.smart_home.clone(),
+            &cfg.daemon.state_dir,
+            cfg.proxy_for(&cfg.tools.smart_home.proxy),
+        )
+        .await
+        {
+            Ok(home) => {
+                let home = Arc::new(home);
+                home.spawn_discovery();
+                tracing::info!("умный дом Tuya: локальное управление готово");
+                tools = tools.with_smart_home(home);
+            }
+            Err(e) => tracing::warn!("умный дом Tuya: {e}"),
+        }
+    } else if cfg.modules.smart_home {
+        tracing::debug!("умный дом Tuya: нет сохранённой сессии");
     }
     let mut hw_cfg = cfg.hardware.clone();
     let mut indication = cfg.indication.clone();

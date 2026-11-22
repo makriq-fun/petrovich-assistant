@@ -8,7 +8,7 @@
 | `petrovich-audio` | ALSA через dlopen, VQE, AEC, VAD, ресемплинг, громкость, звуки |
 | `petrovich-wakeword` | microWakeWord/TFLite и openWakeWord-совместимый бэкенд |
 | `petrovich-providers` | STT, LLM (SSE, tool calls), TTS (PCM/WAV, поток) |
-| `petrovich-tools` | таймеры, громкость, Spotify/YouTube, погода, сахар, Tavily, песочница |
+| `petrovich-tools` | таймеры, громкость, Spotify/YouTube, погода, сахар, Tuya, Tavily, песочница |
 | `petrovich-hw` | светодиоды, часы, кнопки evdev, GPIO-мут, датчик света |
 | `petrovichd` | голосовой автомат, librespot, ByeDPI, декодер YouTube, жизненный цикл |
 | `petrovichctl` | диагностика без запуска аудио |

@@ -7,15 +7,24 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+aes = "0.8"
+aes-gcm = "0.10"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+base64 = "0.22"
 bytes = { workspace = true }
+crc32fast = "1"
 chrono = { workspace = true }
 futures-util = { workspace = true }
+hmac = "0.12"
+md-5 = "0.10"
 petrovich-core = { workspace = true }
+qrcode = { version = "0.14", default-features = false }
+rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

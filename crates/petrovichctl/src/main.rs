@@ -1,6 +1,8 @@
 //! Диагностика установки без запуска демона.
 
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -9,6 +11,7 @@ use clap::{Parser, Subcommand};
 use petrovich_core::config::{Config, DEFAULT_CONFIG};
 use petrovich_core::profile;
 use petrovich_core::text::SentenceChunker;
+use petrovich_tools::smart_home::SmartHome;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Диагностика petrovichd")]
@@ -71,9 +74,67 @@ enum Cmd {
     },
     /// Прочитать датчик освещённости (5 отсчётов)
     LightTest,
+    /// Умный дом Tuya: вход по QR, ключи, локальный поиск и проверка
+    SmartHome {
+        #[command(subcommand)]
+        cmd: SmartHomeCmd,
+    },
 }
 
-fn main() -> Result<()> {
+#[derive(Subcommand, Debug)]
+enum SmartHomeCmd {
+    /// Войти по QR-коду и получить устройства и локальные ключи
+    Login {
+        /// User Code из приложения Tuya Smart/Smart Life
+        #[arg(long)]
+        user_code: Option<String>,
+        /// smartlife (по умолчанию) или tuyaSmart
+        #[arg(long, default_value = "smartlife")]
+        scheme: String,
+        /// Записать QR-ссылку в файл (0600) для показа с другого устройства
+        #[arg(long)]
+        qr_file: Option<PathBuf>,
+    },
+    /// Повторно получить ключи и комнаты по сохранённой сессии
+    Refresh,
+    /// Показать сохранённые устройства без ключей
+    Devices,
+    /// Найти устройства в локальной сети
+    Discover,
+    /// Показать состояние устройств
+    Status {
+        target: Option<String>,
+        #[arg(long)]
+        room: Option<String>,
+    },
+    /// Отправить команду и проверить фактическое состояние
+    Set {
+        target: String,
+        #[arg(long)]
+        room: Option<String>,
+        #[arg(long)]
+        power: Option<bool>,
+        #[arg(long)]
+        brightness: Option<u8>,
+        #[arg(long)]
+        color: Option<String>,
+        #[arg(long)]
+        color_temp: Option<u8>,
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        temperature: Option<f32>,
+        #[arg(long)]
+        fan_speed: Option<String>,
+        #[arg(long)]
+        position: Option<u8>,
+    },
+    /// Удалить сессию и локальные ключи
+    Logout,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     let loaded = Config::load(&cli.config).map_err(|e| anyhow::anyhow!("{e}"))?;
     if matches!(
@@ -85,6 +146,7 @@ fn main() -> Result<()> {
             | Cmd::SugarTest { .. }
             | Cmd::SearchTest { .. }
             | Cmd::FetchTest { .. }
+            | Cmd::SmartHome { .. }
     ) {
         enter_network_gid(&loaded.config);
     }
@@ -104,7 +166,161 @@ fn main() -> Result<()> {
         Cmd::SearchTest { query } => search_test(&loaded, &query),
         Cmd::FetchTest { url, proxy } => fetch_test(&loaded, &url, proxy.as_deref()),
         Cmd::LightTest => light_test(&loaded),
+        Cmd::SmartHome { cmd } => smart_home(&loaded, cmd).await,
     }
+}
+
+async fn smart_home(loaded: &petrovich_core::LoadedConfig, cmd: SmartHomeCmd) -> Result<()> {
+    let cfg = &loaded.config.tools.smart_home;
+    let state_dir = &loaded.config.daemon.state_dir;
+    let proxy = loaded.config.proxy_for(&cfg.proxy);
+    match cmd {
+        SmartHomeCmd::Login {
+            user_code,
+            scheme,
+            qr_file,
+        } => {
+            if !matches!(scheme.as_str(), "smartlife" | "tuyaSmart") {
+                bail!("scheme должен быть smartlife или tuyaSmart");
+            }
+            let user_code = match user_code {
+                Some(code) if !code.trim().is_empty() => code,
+                _ => ask_user_code()?,
+            };
+            println!(
+                "Подключение Tuya через QR-код. Ключи будут сохранены в {}",
+                state_dir.display()
+            );
+            let result = SmartHome::login(
+                cfg,
+                state_dir,
+                &user_code,
+                &scheme,
+                |url| {
+                    if let Some(path) = qr_file.as_deref() {
+                        if let Err(e) = write_private(path, url) {
+                            eprintln!("QR-файл {}: {e}", path.display());
+                        }
+                    }
+                    if let Err(e) = petrovich_tools::smart_home::print_qr(url) {
+                        eprintln!("QR: {e}");
+                    }
+                },
+                proxy,
+            )
+            .await;
+            if let Some(path) = qr_file.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
+            let summary = result?;
+            if let Some(warning) = summary.warning {
+                eprintln!("{warning}");
+            }
+            println!(
+                "Вход выполнен: устройств {}, разрешено политикой {}.",
+                summary.devices, summary.allowed
+            );
+            println!("Дальше: petrovichctl smart-home discover, затем перезапустите petrovichd.");
+        }
+        SmartHomeCmd::Refresh => {
+            let home = SmartHome::open(cfg.clone(), state_dir, proxy).await?;
+            let count = home.refresh_cloud().await?;
+            println!("Обновлено устройств: {count}.");
+        }
+        SmartHomeCmd::Devices => {
+            let home = SmartHome::open(cfg.clone(), state_dir, proxy).await?;
+            println!(
+                "{}",
+                home.execute(&serde_json::json!({"action":"list"})).await?
+            );
+        }
+        SmartHomeCmd::Discover => {
+            let home = SmartHome::open(cfg.clone(), state_dir, proxy).await?;
+            let found = home.discover_missing().await;
+            println!("Найдено в локальной сети: {found}.");
+        }
+        SmartHomeCmd::Status { target, room } => {
+            let home = SmartHome::open(cfg.clone(), state_dir, proxy).await?;
+            let mut args = serde_json::json!({"action":"state"});
+            if let Some(target) = target {
+                args["target"] = serde_json::json!(target);
+            }
+            if let Some(room) = room {
+                args["room"] = serde_json::json!(room);
+            }
+            println!("{}", home.execute(&args).await?);
+        }
+        SmartHomeCmd::Set {
+            target,
+            room,
+            power,
+            brightness,
+            color,
+            color_temp,
+            mode,
+            temperature,
+            fan_speed,
+            position,
+        } => {
+            let mut args = serde_json::json!({"action":"set","target":target});
+            if let Some(room) = room {
+                args["room"] = serde_json::json!(room);
+            }
+            for (key, value) in [
+                ("power", power.map(serde_json::Value::from)),
+                ("brightness", brightness.map(serde_json::Value::from)),
+                ("color", color.map(serde_json::Value::from)),
+                ("color_temp", color_temp.map(serde_json::Value::from)),
+                ("mode", mode.map(serde_json::Value::from)),
+                ("temperature", temperature.map(serde_json::Value::from)),
+                ("fan_speed", fan_speed.map(serde_json::Value::from)),
+                ("position", position.map(serde_json::Value::from)),
+            ] {
+                if let Some(value) = value {
+                    args[key] = value;
+                }
+            }
+            if args.as_object().map(|o| o.len()).unwrap_or(0) <= 2 {
+                bail!("укажите хотя бы одно действие: --power, --brightness, --color, --color-temp, --mode, --temperature, --fan-speed или --position");
+            }
+            let home = SmartHome::open(cfg.clone(), state_dir, proxy).await?;
+            println!("{}", home.execute(&args).await?);
+        }
+        SmartHomeCmd::Logout => {
+            SmartHome::logout(state_dir)?;
+            println!(
+                "Сессия и локальные ключи Tuya удалены. Перезапустите petrovichd, чтобы освободить инструмент."
+            );
+        }
+    }
+    Ok(())
+}
+
+fn write_private(path: &Path, value: &str) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| path.display().to_string())?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(value.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn ask_user_code() -> Result<String> {
+    eprintln!(
+        "Нужен User Code из приложения Tuya Smart или Smart Life:\n         Me → шестерёнка → Account and Security → User Code (внизу).\n         Введите User Code:"
+    );
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let code = line.trim().to_owned();
+    if code.is_empty() {
+        bail!("User Code не указан");
+    }
+    Ok(code)
 }
 
 /// Демон работает с `run_gid` (например, 2200), чтобы его трафик попал в

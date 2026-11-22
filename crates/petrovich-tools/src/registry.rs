@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::computer::{Computer, ComputerAction};
 use crate::nightscout::Nightscout;
+use crate::smart_home::SmartHome;
 use crate::timers::{AlarmManager, TimerManager};
 use crate::weather::Weather;
 use crate::web::Web;
@@ -53,6 +54,7 @@ pub struct ToolContext {
     weather: Option<Weather>,
     nightscout: Option<Nightscout>,
     computer: Option<Computer>,
+    smart_home: Option<Arc<SmartHome>>,
     memory: Option<SharedMemory>,
     chime: Arc<dyn Chime>,
     ui: mpsc::UnboundedSender<UiEvent>,
@@ -83,6 +85,7 @@ impl ToolContext {
             weather: None,
             nightscout: None,
             computer: None,
+            smart_home: None,
             memory: None,
             chime,
             ui,
@@ -103,6 +106,11 @@ impl ToolContext {
 
     pub fn with_computer(mut self, computer: Computer) -> Self {
         self.computer = Some(computer);
+        self
+    }
+
+    pub fn with_smart_home(mut self, smart_home: Arc<SmartHome>) -> Self {
+        self.smart_home = Some(smart_home);
         self
     }
 
@@ -189,6 +197,7 @@ impl ToolContext {
             "weather",
             "sugar",
             "computer",
+            "smart_home",
             "remember",
             "forget",
             "run_code",
@@ -209,6 +218,7 @@ impl ToolContext {
             "weather" => self.weather.is_some(),
             "sugar" => self.nightscout.is_some(),
             "computer" => self.computer.is_some(),
+            "smart_home" => self.smart_home.is_some(),
             "remember" | "forget" => self.memory.is_some(),
             "run_code" => !self.cfg.sandbox_command.is_empty(),
             _ => true,
@@ -344,6 +354,7 @@ impl ToolContext {
                     json!(["action"]),
                 ),
             ),
+            "smart_home" => return self.smart_home.as_ref().map(|s| s.definition()),
             "remember" => ToolDefinition::new(
                 "remember",
                 "Запомнить факт о пользователе надолго: имя, город, предпочтения, договорённости. Не сохраняй пароли, ключи и другие секреты",
@@ -406,6 +417,13 @@ impl ToolContext {
                     + 1_000,
             ),
             "run_code" => Duration::from_millis(self.cfg.sandbox_timeout_ms),
+            "smart_home" => Duration::from_millis(
+                self.cfg
+                    .smart_home
+                    .timeout_ms
+                    .saturating_mul(4)
+                    .clamp(30_000, 120_000),
+            ),
             // Разрешение ссылки и проверка первого сегмента ходят в сеть;
             // при заблокированном googlevideo это занимает несколько секунд.
             "youtube" => Duration::from_millis(self.cfg.timeout_ms.max(20_000)),
@@ -1091,6 +1109,13 @@ impl ToolContext {
                     text = format!("Код {}.\n{text}", out.status);
                 }
                 Ok(ToolResult::text(text.trim().to_owned()))
+            }
+            "smart_home" => {
+                let smart_home = self
+                    .smart_home
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("умный дом не подключён"))?;
+                Ok(ToolResult::text(smart_home.execute(args).await?))
             }
             "reset_dialog" => Ok(ToolResult {
                 content: "История диалога очищена.".into(),

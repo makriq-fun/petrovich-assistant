@@ -46,8 +46,9 @@
   субтитры и комментарии, seek, очередь, сохранение позиции), встроенный
   обход блокировок ByeDPI, эмоции, погода по городу из памяти, сахар из
   Nightscout, управление домашним ПК (включение по WOL, выключение, сон,
-  пробуждение, блокировка, режим кофе), Tavily-поиск, чтение HTTPS-страниц,
-  сброс диалога, остановка;
+  пробуждение, блокировка, режим кофе), умный дом Tuya (QR-вход, локальное
+  управление светом, розетками, выключателями и климатом без облака и Home
+  Assistant), Tavily-поиск, чтение HTTPS-страниц, сброс диалога, остановка;
 - агент выполняет несколько инструментов за ход параллельно, продолжает
   цепочку после ошибки отдельного действия, умеет уточнять и отменять
   поручение; результаты каждого действия возвращаются модели честно;
@@ -88,7 +89,7 @@ flowchart LR
     YouTube[YouTube + ByeDPI] --> Play
     Play --> Speaker[Динамик]
     Play -. референс .-> VQE
-    LLM --> Tools[Таймеры, будильники, эмоции, громкость, Spotify, YouTube, погода, сахар, Tavily]
+    LLM --> Tools[Таймеры, будильники, эмоции, громкость, Spotify, YouTube, погода, сахар, Tavily, умный дом]
     Daemon[petrovichd] --> HW[LED, часы, кнопки, мут, датчик света]
 ```
 
@@ -119,7 +120,7 @@ LLM, TTS, Tavily, `web_fetch`, погоде, Nightscout, Spotify API и librespo
 # На ПК: собрать релиз под ARMv7
 cargo install cross --git https://github.com/cross-rs/cross
 scripts/build.sh
-# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.8-armv7.tar.gz
+# dist/petrovichd, dist/petrovichctl, dist/petrovich-assistant-0.2.9-armv7.tar.gz
 
 # Установка по SSH (ключ root уже настроен)
 python3 installer/petrovich_install.py --ssh-host station install \
@@ -163,6 +164,8 @@ tail -f /data/petrovich/log/petrovichd.log
 | `petrovichctl search-test "запрос"` | проверка веб-поиска |
 | `petrovichctl sugar-test 3` | сахар из Nightscout за 3 часа |
 | `petrovichctl computer-test` | связь с ограниченным endpoint ПК |
+| `petrovichctl smart-home login` | QR-вход в Tuya Smart/Smart Life и ключи |
+| `petrovichctl smart-home devices` | устройства, комнаты и локальная поддержка |
 | `installer ... rollback` | предыдущий релиз и проверка |
 | `installer ... restore` | снять помощника и вернуть init-скрипты Quasar |
 
@@ -181,6 +184,8 @@ tail -f /data/petrovich/log/petrovichd.log
 Погода — Open-Meteo; координаты по умолчанию и геокодинг задаются в `[tools]`.
 Сахар — Nightscout v1: `nightscout_url` и, при необходимости,
 `nightscout_token_env`.
+Умный дом Tuya: один раз `petrovichctl smart-home login`, затем локальное
+управление; настройки и ограничения — [docs/smart-home.md](docs/smart-home.md).
 
 ## Индикация
 
@@ -210,7 +215,7 @@ DNS/NTP задаются отдельно; см. [docs/security.md](docs/securit
 ## Разработка
 
 ```bash
-cargo test --workspace          # 199 тестов (4 сетевых игнорируются)
+cargo test --workspace          # 268 тестов (4 сетевых игнорируются)
 cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```

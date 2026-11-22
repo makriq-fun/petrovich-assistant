@@ -99,6 +99,10 @@ pub struct ModulesConfig {
     /// Встроенный обход блокировок YouTube (ByeDPI).
     #[serde(default = "default_true")]
     pub byedpi: bool,
+    /// Умный дом Tuya. Без сохранённой сессии модуль не запускает задач и
+    /// не добавляет инструмент smart_home.
+    #[serde(default = "default_true")]
+    pub smart_home: bool,
 }
 
 impl Default for ModulesConfig {
@@ -111,6 +115,7 @@ impl Default for ModulesConfig {
             display: true,
             spotify: true,
             byedpi: true,
+            smart_home: true,
         }
     }
 }
@@ -1103,6 +1108,89 @@ pub struct ToolsConfig {
     /// Управление домашним ПК; отсутствие секции выключает инструмент.
     #[serde(default)]
     pub computer: Option<ComputerConfig>,
+    /// Умный дом Tuya через локальную сеть. Токены и локальные ключи
+    /// хранятся в `<daemon.state_dir>/smart_home` с правами 0600.
+    #[serde(default)]
+    pub smart_home: SmartHomeConfig,
+}
+
+/// Настройки интеграции Tuya. Секретов здесь нет: сессия облака и локальные
+/// ключи лежат в state_dir после `petrovichctl smart-home login`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmartHomeConfig {
+    /// Подсеть для поиска устройств, например "192.168.3.0/24". Пусто —
+    /// локальная подсеть маршрута по умолчанию, ограниченная max_scan_hosts.
+    #[serde(default)]
+    pub scan_subnet: String,
+    /// Период фонового поиска пропавших устройств; 0 — только по требованию.
+    #[serde(default = "default_smart_home_scan_interval_s")]
+    pub scan_interval_s: u64,
+    /// Тайм-аут одного TCP/DNS-действия с устройством.
+    #[serde(default = "default_smart_home_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Тайм-аут облачных запросов при входе и обновлении ключей.
+    #[serde(default = "default_smart_home_cloud_timeout_ms")]
+    pub cloud_timeout_ms: u64,
+    /// Максимум адресов в подсети за один поиск. /24 — 254.
+    #[serde(default = "default_smart_home_max_scan_hosts")]
+    pub max_scan_hosts: usize,
+    /// Одновременных проверок адресов и устройств.
+    #[serde(default = "default_smart_home_max_parallel")]
+    pub max_parallel: usize,
+    /// Пробовать устаревший протокол 3.1. Он передаёт часть данных без
+    /// шифрования; выключайте, если таких устройств нет.
+    #[serde(default = "default_true")]
+    pub allow_v31: bool,
+    /// Сколько секунд ждать подтверждения QR-кода при входе.
+    #[serde(default = "default_smart_home_qr_timeout_s")]
+    pub qr_timeout_s: u64,
+    /// Прокси только для облачных запросов Tuya; пусто — общий [network].
+    #[serde(default)]
+    pub proxy: String,
+    /// Ручные псевдонимы комнат: "спальня" -> "Спальня".
+    #[serde(default)]
+    pub room_aliases: BTreeMap<String, String>,
+    /// Ручные псевдонимы устройств: "торшер" -> "Торшер у дивана".
+    #[serde(default)]
+    pub aliases: BTreeMap<String, String>,
+}
+
+impl Default for SmartHomeConfig {
+    fn default() -> Self {
+        Self {
+            scan_subnet: String::new(),
+            scan_interval_s: default_smart_home_scan_interval_s(),
+            timeout_ms: default_smart_home_timeout_ms(),
+            cloud_timeout_ms: default_smart_home_cloud_timeout_ms(),
+            max_scan_hosts: default_smart_home_max_scan_hosts(),
+            max_parallel: default_smart_home_max_parallel(),
+            allow_v31: true,
+            qr_timeout_s: default_smart_home_qr_timeout_s(),
+            proxy: String::new(),
+            room_aliases: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_smart_home_scan_interval_s() -> u64 {
+    300
+}
+fn default_smart_home_timeout_ms() -> u64 {
+    3_000
+}
+fn default_smart_home_cloud_timeout_ms() -> u64 {
+    20_000
+}
+fn default_smart_home_max_scan_hosts() -> usize {
+    254
+}
+fn default_smart_home_max_parallel() -> usize {
+    32
+}
+fn default_smart_home_qr_timeout_s() -> u64 {
+    180
 }
 
 /// Домашний ПК, которым управляет колонка. Включение и пробуждение — это
@@ -1167,6 +1255,7 @@ impl Default for ToolsConfig {
             music_command: Vec::new(),
             youtube_proxy: String::new(),
             computer: None,
+            smart_home: SmartHomeConfig::default(),
         }
     }
 }
@@ -1189,6 +1278,7 @@ fn default_tools_enabled() -> Vec<String> {
         "reset_dialog",
         "stop",
         "computer",
+        "smart_home",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -1642,6 +1732,67 @@ impl Config {
                 return invalid("tools.computer.timeout_ms должен быть 1000..60000".into());
             }
         }
+        if !self.tools.smart_home.scan_subnet.trim().is_empty()
+            && parse_ipv4_subnet(&self.tools.smart_home.scan_subnet).is_none()
+        {
+            return invalid(
+                "tools.smart_home.scan_subnet должен быть IPv4-подсетью, например 192.168.3.0/24"
+                    .into(),
+            );
+        }
+        if !(1_000..=60_000).contains(&self.tools.smart_home.timeout_ms) {
+            return invalid("tools.smart_home.timeout_ms должен быть 1000..60000".into());
+        }
+        if !(5_000..=120_000).contains(&self.tools.smart_home.cloud_timeout_ms) {
+            return invalid("tools.smart_home.cloud_timeout_ms должен быть 5000..120000".into());
+        }
+        if self.tools.smart_home.max_scan_hosts == 0 || self.tools.smart_home.max_scan_hosts > 1024
+        {
+            return invalid("tools.smart_home.max_scan_hosts должен быть 1..1024".into());
+        }
+        if !(1..=64).contains(&self.tools.smart_home.max_parallel) {
+            return invalid("tools.smart_home.max_parallel должен быть 1..64".into());
+        }
+        if !(30..=900).contains(&self.tools.smart_home.qr_timeout_s) {
+            return invalid("tools.smart_home.qr_timeout_s должен быть 30..900".into());
+        }
+        if self.tools.smart_home.scan_interval_s > 86_400 {
+            return invalid("tools.smart_home.scan_interval_s должен быть не больше 86400".into());
+        }
+        if !self.tools.smart_home.proxy.trim().is_empty() {
+            let p = self.tools.smart_home.proxy.trim();
+            if !(p.starts_with("socks5h://")
+                || p.starts_with("socks5://")
+                || p.starts_with("http://")
+                || p.starts_with("https://"))
+            {
+                return invalid(
+                    "tools.smart_home.proxy должен начинаться с socks5h://, socks5://, http:// или https://"
+                        .into(),
+                );
+            }
+        }
+        for (field, map) in [
+            ("tools.smart_home.aliases", &self.tools.smart_home.aliases),
+            (
+                "tools.smart_home.room_aliases",
+                &self.tools.smart_home.room_aliases,
+            ),
+        ] {
+            if map.len() > 200 {
+                return invalid(format!("{field}: не больше 200 записей"));
+            }
+            if map.iter().any(|(k, v)| {
+                k.trim().is_empty()
+                    || k.chars().count() > 80
+                    || v.trim().is_empty()
+                    || v.chars().count() > 80
+            }) {
+                return invalid(format!(
+                    "{field}: ключи и значения должны быть 1..80 символов"
+                ));
+            }
+        }
         if !(0.0..=1.0).contains(&self.hardware.led_brightness) {
             return invalid("hardware.led_brightness должен быть 0..1".into());
         }
@@ -1770,6 +1921,26 @@ pub fn parse_mac(value: &str) -> Option<[u8; 6]> {
         *slot = u8::from_str_radix(part, 16).ok()?;
     }
     Some(out)
+}
+
+/// Разбирает IPv4-подсеть `a.b.c.d/len`; без `/len` считается `/24`.
+/// Возвращает адрес сети и длину префикса. Нужна поиску Tuya-устройств.
+pub fn parse_ipv4_subnet(value: &str) -> Option<(std::net::Ipv4Addr, u8)> {
+    let value = value.trim();
+    let (addr, prefix) = match value.split_once('/') {
+        Some((addr, prefix)) => (addr, prefix.parse::<u8>().ok()?),
+        None => (value, 24),
+    };
+    if prefix > 32 {
+        return None;
+    }
+    let addr: std::net::Ipv4Addr = addr.parse().ok()?;
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Some((std::net::Ipv4Addr::from(u32::from(addr) & mask), prefix))
 }
 
 fn validate_http_url(field: &str, value: &str) -> std::result::Result<(), ConfigError> {

@@ -142,7 +142,7 @@ max_bytes = 16777216
 proxy = ""
 
 [tools]
-enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search", "emotion", "web_fetch", "weather", "sugar", "computer", "remember", "forget", "reset_dialog", "stop"]
+enabled = ["time", "timer", "alarm", "volume", "music", "youtube", "web_search", "emotion", "web_fetch", "weather", "sugar", "computer", "smart_home", "remember", "forget", "reset_dialog", "stop"]
 timeout_ms = 10000
 web_timeout_ms = 15000
 web_max_bytes = 1048576
@@ -187,6 +187,30 @@ youtube_proxy = ""
 # home = "/data/petrovich/pc"
 # timeout_ms = 12000
 
+# Умный дом Tuya. Секретов в конфиге нет: после `petrovichctl smart-home
+# login` сессия облака и локальные ключи лежат в state_dir с правами 0600.
+# Модуль работает только при сохранённой сессии; без неё smart_home
+# недоступен, а демон пишет в журнал одну строку.
+# [tools.smart_home]
+# Подсеть для поиска. Пусто — локальная подсеть маршрута по умолчанию.
+# scan_subnet = "192.168.3.0/24"
+# Период фонового поиска пропавших устройств; 0 — только по требованию.
+# scan_interval_s = 300
+# timeout_ms = 3000
+# cloud_timeout_ms = 20000
+# max_scan_hosts = 254
+# max_parallel = 32
+# allow_v31 = true
+# qr_timeout_s = 180
+# Прокси только для облачных запросов Tuya; пусто — общий [network],
+# "direct" — без прокси (если общий прокси не пропускает Tuya).
+# proxy = ""
+# Псевдонимы комнат и устройств для голосовых команд.
+# [tools.smart_home.room_aliases]
+# зал = "Гостиная"
+# [tools.smart_home.aliases]
+# торшер = "Торшер у дивана"
+
 [modules]
 # Отключённый модуль не инициализируется и не запускает фоновые задачи.
 youtube = true
@@ -198,6 +222,9 @@ display = true
 # или access token из secrets.env модуль остаётся выключенным.
 spotify = true
 byedpi = true
+# Tuya: QR-вход один раз, затем локальное управление. false полностью
+# отключает инструмент и фоновый поиск.
+smart_home = true
 
 [spotify]
 device_name = "Петрович"
