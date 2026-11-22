@@ -347,7 +347,7 @@ fn status(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
     {
-        Some(pid) if Path::new(&format!("/proc/{pid}")).exists() => {
+        Some(pid) if process_is_daemon(pid) => {
             println!("демон: работает, pid {pid}");
             if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
                 for line in s.lines().filter(|l| {
@@ -364,6 +364,9 @@ fn status(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
                     println!("  CPU: {:.1} с", ticks as f64 / 100.0);
                 }
             }
+        }
+        Some(pid) => {
+            println!("демон: pid {pid} из pid-файла не является petrovichd (устаревший файл?)")
         }
         _ => println!("демон: не запущен ({})", pidfile.display()),
     }
@@ -428,6 +431,10 @@ fn doctor(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
             _ => warn("amixer не читает PDM Gain"),
         }
     }
+    let daemon_up = std::fs::read_to_string(&cfg.daemon.pid_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .is_some_and(process_is_daemon);
     for (name, proxy) in [
         ("STT", cfg.proxy_for(&cfg.stt.proxy)),
         ("LLM", cfg.proxy_for(&cfg.llm.proxy)),
@@ -454,6 +461,12 @@ fn doctor(loaded: &petrovich_core::LoadedConfig) -> Result<()> {
                 let timeout = std::time::Duration::from_millis(700);
                 if std::net::TcpStream::connect_timeout(&addr, timeout).is_ok() {
                     ok(&format!("{name}: прокси {addr} доступен"));
+                } else if addr.ip().is_loopback() && !daemon_up {
+                    // Встроенный ByeDPI поднимает петлевой SOCKS5 только
+                    // вместе с petrovichd. Без демона это не ошибка.
+                    warn(&format!(
+                        "{name}: прокси {addr} не отвечает (petrovichd не запущен)"
+                    ));
                 } else {
                     fail(&format!("{name}: прокси {addr} не отвечает"));
                 }
@@ -853,17 +866,34 @@ fn computer_test(loaded: &petrovich_core::LoadedConfig, wake: bool) -> Result<()
     Ok(())
 }
 
+fn process_is_daemon(pid: u32) -> bool {
+    if !Path::new(&format!("/proc/{pid}")).exists() {
+        return false;
+    }
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|b| String::from_utf8_lossy(&b).contains("petrovichd"))
+        .unwrap_or(false)
+}
+
 fn fetch_test(loaded: &petrovich_core::LoadedConfig, url: &str, proxy: Option<&str>) -> Result<()> {
     let t = &loaded.config.tools;
-    let web = petrovich_tools::Web::with_fetch_proxy(
-        t.web_timeout_ms,
-        t.web_max_bytes,
-        false,
-        proxy.unwrap_or_else(|| loaded.config.network.proxy.trim()),
-    )?;
+    // Команда называется «проверить прямой доступ»: без --proxy идём
+    // напрямую, а не через network.proxy. Явный --proxy задаёт прокси.
+    let proxy = proxy.unwrap_or("").trim();
+    let web =
+        petrovich_tools::Web::with_fetch_proxy(t.web_timeout_ms, t.web_max_bytes, false, proxy)?;
     let rt = tokio::runtime::Runtime::new()?;
     let page = rt.block_on(web.fetch(url))?;
-    println!("HTTP OK: {} байт, {}", page.text.len(), page.url);
+    println!(
+        "HTTP OK{}: {} байт, {}",
+        if proxy.is_empty() {
+            " (напрямую)"
+        } else {
+            " (через прокси)"
+        },
+        page.text.len(),
+        page.url
+    );
     Ok(())
 }
 
@@ -941,61 +971,66 @@ fn llm_test(loaded: &petrovich_core::LoadedConfig, text: &str) -> Result<()> {
 fn audio_test(loaded: &petrovich_core::LoadedConfig, seconds: u32) -> Result<()> {
     let cfg = &loaded.config;
     let path = std::env::temp_dir().join(format!("petrovich-audio-{}.wav", std::process::id()));
-    let out = Command::new("arecord")
-        .args([
-            "-D",
-            &cfg.audio.capture_pcm,
-            "-f",
-            "S16_LE",
-            "-r",
-            &cfg.audio.capture_rate.to_string(),
-            "-c",
-            &cfg.audio.capture_channels.to_string(),
-            "-d",
-            &seconds.to_string(),
-            path.to_str().unwrap_or("/tmp/petrovich-audio.wav"),
-        ])
-        .output()
-        .context("arecord не запущен")?;
-    if !out.status.success() {
-        bail!("arecord: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    let wav = petrovich_core::wav::parse(&std::fs::read(&path)?)?;
-    let _ = std::fs::remove_file(&path);
-    println!(
-        "запись: {} Гц, {} каналов, {} мс",
-        wav.sample_rate,
-        wav.channels,
-        wav.duration_ms()
-    );
-    for ch in 0..wav.channels as usize {
-        let vals: Vec<i16> = wav
-            .samples
-            .iter()
-            .skip(ch)
-            .step_by(wav.channels as usize)
-            .copied()
-            .collect();
-        let rms = (vals.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>()
-            / vals.len().max(1) as f64)
-            .sqrt();
-        let db = if rms <= 1.0 {
-            -120.0
-        } else {
-            20.0 * (rms / 32768.0).log10()
-        };
-        let clip = vals.iter().filter(|v| v.unsigned_abs() >= 32700).count();
-        println!("  канал {ch}: RMS {db:.1} dBFS, клипов {clip}");
-    }
-    println!(
-        "VQE: {}",
-        if petrovich_audio::vqe::available().is_ok() {
-            "доступен"
-        } else {
-            "нет"
+    let result = (|| -> Result<()> {
+        let out = Command::new("arecord")
+            .args([
+                "-D",
+                &cfg.audio.capture_pcm,
+                "-f",
+                "S16_LE",
+                "-r",
+                &cfg.audio.capture_rate.to_string(),
+                "-c",
+                &cfg.audio.capture_channels.to_string(),
+                "-d",
+                &seconds.to_string(),
+                path.to_str().unwrap_or("/tmp/petrovich-audio.wav"),
+            ])
+            .output()
+            .context("arecord не запущен")?;
+        if !out.status.success() {
+            bail!("arecord: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
-    );
-    Ok(())
+        let wav = petrovich_core::wav::parse(&std::fs::read(&path)?)?;
+        println!(
+            "запись: {} Гц, {} каналов, {} мс",
+            wav.sample_rate,
+            wav.channels,
+            wav.duration_ms()
+        );
+        for ch in 0..wav.channels as usize {
+            let vals: Vec<i16> = wav
+                .samples
+                .iter()
+                .skip(ch)
+                .step_by(wav.channels as usize)
+                .copied()
+                .collect();
+            let rms = (vals.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>()
+                / vals.len().max(1) as f64)
+                .sqrt();
+            let db = if rms <= 1.0 {
+                -120.0
+            } else {
+                20.0 * (rms / 32768.0).log10()
+            };
+            let clip = vals.iter().filter(|v| v.unsigned_abs() >= 32700).count();
+            println!("  канал {ch}: RMS {db:.1} dBFS, клипов {clip}");
+        }
+        println!(
+            "VQE: {}",
+            if petrovich_audio::vqe::available().is_ok() {
+                "доступен"
+            } else {
+                "нет"
+            }
+        );
+        Ok(())
+    })();
+    // Запись содержит голос пользователя: удаляем её на любом исходе,
+    // включая ошибку разбора WAV.
+    let _ = std::fs::remove_file(&path);
+    result
 }
 
 fn pids(name: &str) -> Vec<u32> {

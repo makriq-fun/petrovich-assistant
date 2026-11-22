@@ -13,7 +13,10 @@ use reqwest::multipart::{Form, Part};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::http::{check_status, client_with_ca_proxy, endpoint, redact, retryable};
+use crate::http::{
+    backoff, check_status, client_with_ca_proxy, endpoint, read_limited, read_prefix, redact,
+    retry_after, retryable,
+};
 
 #[async_trait]
 pub trait Stt: Send + Sync {
@@ -39,12 +42,13 @@ pub struct FishStt {
     language: String,
     key: Option<String>,
     retries: u8,
+    timeout: Duration,
 }
 
 impl FishStt {
     pub fn new(cfg: &SttConfig, secrets: &Secrets) -> Result<Self> {
         Ok(Self {
-            http: client_with_ca_proxy(cfg.timeout_ms, cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
+            http: client_with_ca_proxy(cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/asr"),
             model: cfg.model.clone(),
             language: cfg.language.clone(),
@@ -53,6 +57,7 @@ impl FishStt {
                 .filter(|k| !k.is_empty())
                 .map(str::to_owned),
             retries: cfg.retries,
+            timeout: Duration::from_millis(cfg.timeout_ms),
         })
     }
 }
@@ -60,8 +65,10 @@ impl FishStt {
 #[async_trait]
 impl Stt for FishStt {
     async fn transcribe(&self, wav: Vec<u8>) -> Result<String> {
+        ensure_audio(&wav)?;
         let mut attempt = 0u8;
         loop {
+            let mut retry_hint = None;
             let part = Part::bytes(wav.clone())
                 .file_name("audio.wav")
                 .mime_str("audio/wav")
@@ -82,9 +89,14 @@ impl Stt for FishStt {
             if let Some(key) = &self.key {
                 req = req.bearer_auth(key);
             }
-            match req.send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    let text = resp.text().await.context("Fish STT: чтение")?;
+            match tokio::time::timeout(self.timeout, req.send()).await {
+                Ok(Ok(resp)) if resp.status().is_success() => {
+                    let bytes =
+                        tokio::time::timeout(self.timeout, read_limited(resp, 4 * 1024 * 1024))
+                            .await
+                            .context("Fish STT: тайм-аут чтения")?
+                            .context("Fish STT: чтение")?;
+                    let text = String::from_utf8_lossy(&bytes);
                     let v: serde_json::Value = serde_json::from_str(&text)
                         .with_context(|| format!("Fish STT: не JSON: {}", redact(&text)))?;
                     let raw = v
@@ -97,19 +109,43 @@ impl Stt for FishStt {
                     }
                     return Ok(cleaned);
                 }
-                Ok(resp) if retryable(resp.status()) && attempt < self.retries => {
-                    tracing::warn!("Fish STT: HTTP {}; повтор {}", resp.status(), attempt + 1);
+                Ok(Ok(resp)) if retryable(resp.status()) && attempt < self.retries => {
+                    let status = resp.status();
+                    retry_hint = retry_after(&resp);
+                    tracing::warn!(
+                        "Fish STT: HTTP {status}; повтор {}/{}",
+                        attempt + 1,
+                        self.retries
+                    );
                 }
-                Ok(resp) => return check_status(resp, "Fish STT").await.map(|_| String::new()),
-                Err(e) if attempt < self.retries => {
-                    tracing::warn!("Fish STT: {e:#}; повтор {}", attempt + 1);
+                Ok(Ok(resp)) => return check_status(resp, "Fish STT").await.map(|_| String::new()),
+                Ok(Err(e)) if attempt < self.retries => {
+                    tracing::warn!("Fish STT: {e:#}; повтор {}/{}", attempt + 1, self.retries);
                 }
-                Err(e) => return Err(e).context("Fish STT: попытки исчерпаны"),
+                Ok(Err(e)) => return Err(e).context("Fish STT: попытки исчерпаны"),
+                Err(_) if attempt < self.retries => {
+                    tracing::warn!(
+                        "Fish STT: тайм-аут {} мс; повтор {}/{}",
+                        self.timeout.as_millis(),
+                        attempt + 1,
+                        self.retries
+                    );
+                }
+                Err(_) => bail!("Fish STT: тайм-аут {} мс", self.timeout.as_millis()),
             }
             attempt += 1;
-            tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(u32::from(attempt)))).await;
+            tokio::time::sleep(retry_hint.take().unwrap_or_else(|| backoff(attempt))).await;
         }
     }
+}
+
+/// Минимальный WAV: заголовок и хотя бы один 16-битный сэмпл. Пустое аудио
+/// незачем отправлять в сеть или во внешнюю команду.
+fn ensure_audio(wav: &[u8]) -> Result<()> {
+    if wav.len() < 46 {
+        bail!("STT: пустое аудио");
+    }
+    Ok(())
 }
 
 fn strip_speaker_markers(text: &str) -> String {
@@ -134,12 +170,13 @@ pub struct OpenAiStt {
     language: String,
     key: Option<String>,
     retries: u8,
+    timeout: Duration,
 }
 
 impl OpenAiStt {
     pub fn new(cfg: &SttConfig, secrets: &Secrets) -> Result<Self> {
         Ok(Self {
-            http: client_with_ca_proxy(cfg.timeout_ms, cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
+            http: client_with_ca_proxy(cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/audio/transcriptions"),
             model: cfg.model.clone(),
             language: cfg.language.clone(),
@@ -148,6 +185,7 @@ impl OpenAiStt {
                 .filter(|k| !k.is_empty())
                 .map(str::to_owned),
             retries: cfg.retries,
+            timeout: Duration::from_millis(cfg.timeout_ms),
         })
     }
 }
@@ -155,8 +193,10 @@ impl OpenAiStt {
 #[async_trait]
 impl Stt for OpenAiStt {
     async fn transcribe(&self, wav: Vec<u8>) -> Result<String> {
+        ensure_audio(&wav)?;
         let mut attempt = 0u8;
         loop {
+            let mut retry_hint = None;
             let part = Part::bytes(wav.clone())
                 .file_name("audio.wav")
                 .mime_str("audio/wav")
@@ -173,12 +213,16 @@ impl Stt for OpenAiStt {
             if let Some(key) = &self.key {
                 req = req.bearer_auth(key);
             }
-            let result = req.send().await;
+            let result = tokio::time::timeout(self.timeout, req.send()).await;
             match result {
-                Ok(resp) if resp.status().is_success() => {
+                Ok(Ok(resp)) if resp.status().is_success() => {
                     let status = resp.status();
-                    let resp = check_status(resp, "STT").await?;
-                    let text = resp.text().await.context("STT: чтение ответа")?;
+                    let bytes =
+                        tokio::time::timeout(self.timeout, read_limited(resp, 4 * 1024 * 1024))
+                            .await
+                            .context("STT: тайм-аут чтения")?
+                            .context("STT: чтение ответа")?;
+                    let text = String::from_utf8_lossy(&bytes);
                     let value: serde_json::Value =
                         serde_json::from_str(&text).with_context(|| {
                             format!("STT HTTP {status}: не JSON: {}", redact(&text))
@@ -194,18 +238,32 @@ impl Stt for OpenAiStt {
                     }
                     return Ok(text);
                 }
-                Ok(resp) if retryable(resp.status()) && attempt < self.retries => {
+                Ok(Ok(resp)) if retryable(resp.status()) && attempt < self.retries => {
                     let status = resp.status();
-                    tracing::warn!("STT: HTTP {status}; повтор {}/{attempt}", attempt + 1);
+                    retry_hint = retry_after(&resp);
+                    tracing::warn!(
+                        "STT: HTTP {status}; повтор {}/{}",
+                        attempt + 1,
+                        self.retries
+                    );
                 }
-                Ok(resp) => return check_status(resp, "STT").await.map(|_| String::new()),
-                Err(e) if attempt < self.retries => {
-                    tracing::warn!("STT: {e:#}; повтор {}", attempt + 1);
+                Ok(Ok(resp)) => return check_status(resp, "STT").await.map(|_| String::new()),
+                Ok(Err(e)) if attempt < self.retries => {
+                    tracing::warn!("STT: {e:#}; повтор {}/{}", attempt + 1, self.retries);
                 }
-                Err(e) => return Err(e).context("STT: попытки исчерпаны"),
+                Ok(Err(e)) => return Err(e).context("STT: попытки исчерпаны"),
+                Err(_) if attempt < self.retries => {
+                    tracing::warn!(
+                        "STT: тайм-аут {} мс; повтор {}/{}",
+                        self.timeout.as_millis(),
+                        attempt + 1,
+                        self.retries
+                    );
+                }
+                Err(_) => bail!("STT: тайм-аут {} мс", self.timeout.as_millis()),
             }
             attempt += 1;
-            tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(u32::from(attempt)))).await;
+            tokio::time::sleep(retry_hint.take().unwrap_or_else(|| backoff(attempt))).await;
         }
     }
 }
@@ -219,12 +277,13 @@ pub struct ChatAudioStt {
     language: String,
     key: Option<String>,
     retries: u8,
+    timeout: Duration,
 }
 
 impl ChatAudioStt {
     pub fn new(cfg: &SttConfig, secrets: &Secrets) -> Result<Self> {
         Ok(Self {
-            http: client_with_ca_proxy(cfg.timeout_ms, cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
+            http: client_with_ca_proxy(cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/chat/completions"),
             model: cfg.model.clone(),
             language: cfg.language.clone(),
@@ -233,6 +292,7 @@ impl ChatAudioStt {
                 .filter(|k| !k.is_empty())
                 .map(str::to_owned),
             retries: cfg.retries,
+            timeout: Duration::from_millis(cfg.timeout_ms),
         })
     }
 }
@@ -250,12 +310,13 @@ fn transcript_prompt(language: &str) -> String {
 #[async_trait]
 impl Stt for ChatAudioStt {
     async fn transcribe(&self, wav: Vec<u8>) -> Result<String> {
+        ensure_audio(&wav)?;
         use base64::Engine as _;
         let audio = base64::engine::general_purpose::STANDARD.encode(&wav);
         let body = serde_json::json!({
             "model": self.model,
             "temperature": 0,
-            "max_tokens": 256,
+            "max_tokens": 512,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -266,15 +327,20 @@ impl Stt for ChatAudioStt {
         });
         let mut attempt = 0u8;
         loop {
+            let mut retry_hint = None;
             let mut req = self.http.post(&self.url).json(&body);
             if let Some(key) = &self.key {
                 req = req.bearer_auth(key);
             }
-            match req.send().await {
-                Ok(resp) if resp.status().is_success() => {
+            match tokio::time::timeout(self.timeout, req.send()).await {
+                Ok(Ok(resp)) if resp.status().is_success() => {
                     let status = resp.status();
-                    let resp = check_status(resp, "STT").await?;
-                    let text = resp.text().await.context("STT: чтение ответа")?;
+                    let bytes =
+                        tokio::time::timeout(self.timeout, read_limited(resp, 4 * 1024 * 1024))
+                            .await
+                            .context("STT: тайм-аут чтения")?
+                            .context("STT: чтение ответа")?;
+                    let text = String::from_utf8_lossy(&bytes);
                     let value: serde_json::Value =
                         serde_json::from_str(&text).with_context(|| {
                             format!("STT HTTP {status}: не JSON: {}", redact(&text))
@@ -293,24 +359,36 @@ impl Stt for ChatAudioStt {
                     }
                     return Ok(text);
                 }
-                Ok(resp) if retryable(resp.status()) && attempt < self.retries => {
-                    tracing::warn!("STT: HTTP {}; повтор {}", resp.status(), attempt + 1);
-                }
-                Ok(resp) => {
+                Ok(Ok(resp)) if retryable(resp.status()) && attempt < self.retries => {
                     let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    bail!(
-                        "STT: HTTP {status}: {}",
-                        redact(&text.chars().take(300).collect::<String>())
+                    retry_hint = retry_after(&resp);
+                    tracing::warn!(
+                        "STT: HTTP {status}; повтор {}/{}",
+                        attempt + 1,
+                        self.retries
                     );
                 }
-                Err(e) if attempt < self.retries => {
-                    tracing::warn!("STT: {e:#}; повтор {}", attempt + 1);
+                Ok(Ok(resp)) => {
+                    let status = resp.status();
+                    let text = read_prefix(resp, 4 * 1024).await;
+                    bail!("STT: HTTP {status}: {text}");
                 }
-                Err(e) => return Err(e).context("STT: попытки исчерпаны"),
+                Ok(Err(e)) if attempt < self.retries => {
+                    tracing::warn!("STT: {e:#}; повтор {}/{}", attempt + 1, self.retries);
+                }
+                Ok(Err(e)) => return Err(e).context("STT: попытки исчерпаны"),
+                Err(_) if attempt < self.retries => {
+                    tracing::warn!(
+                        "STT: тайм-аут {} мс; повтор {}/{}",
+                        self.timeout.as_millis(),
+                        attempt + 1,
+                        self.retries
+                    );
+                }
+                Err(_) => bail!("STT: тайм-аут {} мс", self.timeout.as_millis()),
             }
             attempt += 1;
-            tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(u32::from(attempt)))).await;
+            tokio::time::sleep(retry_hint.take().unwrap_or_else(|| backoff(attempt))).await;
         }
     }
 }
@@ -332,6 +410,7 @@ impl CommandStt {
 #[async_trait]
 impl Stt for CommandStt {
     async fn transcribe(&self, wav: Vec<u8>) -> Result<String> {
+        ensure_audio(&wav)?;
         let needs_file = self.argv.iter().any(|a| a.contains("{file}"));
         let mut temp: Option<PathBuf> = None;
         let mut argv = self.argv.clone();
@@ -350,7 +429,7 @@ impl Stt for CommandStt {
             }
             temp = Some(path);
         }
-        let mut child = Command::new(&argv[0])
+        let mut child = match Command::new(&argv[0])
             .args(&argv[1..])
             .stdin(if needs_file {
                 Stdio::null()
@@ -361,7 +440,15 @@ impl Stt for CommandStt {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("запуск {}", argv[0]))?;
+        {
+            Ok(child) => child,
+            Err(e) => {
+                if let Some(p) = &temp {
+                    let _ = tokio::fs::remove_file(p).await;
+                }
+                return Err(e).with_context(|| format!("запуск {}", argv[0]));
+            }
+        };
         if !needs_file {
             let mut stdin = child.stdin.take().context("STT: нет stdin")?;
             let wav2 = wav.clone();
@@ -370,18 +457,16 @@ impl Stt for CommandStt {
             });
         }
         let fut = child.wait_with_output();
-        let out = match tokio::time::timeout(Duration::from_millis(self.timeout_ms), fut).await {
-            Ok(r) => r.context("STT: ожидание процесса")?,
-            Err(_) => {
-                if let Some(p) = temp {
-                    let _ = tokio::fs::remove_file(p).await;
-                }
-                bail!("STT: тайм-аут {} мс", self.timeout_ms);
-            }
+        let result = match tokio::time::timeout(Duration::from_millis(self.timeout_ms), fut).await {
+            Ok(r) => r.context("STT: ожидание процесса"),
+            Err(_) => Err(anyhow::anyhow!("STT: тайм-аут {} мс", self.timeout_ms)),
         };
+        // Временный WAV содержит речь пользователя: удаляем его на любом
+        // исходе, включая ошибку запуска и тайм-аут.
         if let Some(p) = temp {
             let _ = tokio::fs::remove_file(p).await;
         }
+        let out = result?;
         if !out.status.success() {
             bail!(
                 "STT: команда завершилась с {}: {}",
@@ -451,7 +536,7 @@ mod tests {
             ..SttConfig::default()
         };
         let s = FishStt::new(&cfg, &Secrets::default()).unwrap();
-        assert_eq!(s.transcribe(vec![0; 10]).await.unwrap(), "Петрович?");
+        assert_eq!(s.transcribe(vec![0; 64]).await.unwrap(), "Петрович?");
         handle.await.unwrap();
     }
 
@@ -465,7 +550,7 @@ mod tests {
             ..SttConfig::default()
         };
         let s = OpenAiStt::new(&cfg, &Secrets::default()).unwrap();
-        assert_eq!(s.transcribe(vec![0; 10]).await.unwrap(), "включи свет");
+        assert_eq!(s.transcribe(vec![0; 64]).await.unwrap(), "включи свет");
         handle.await.unwrap();
     }
 }

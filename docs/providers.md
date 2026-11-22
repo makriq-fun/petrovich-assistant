@@ -52,6 +52,7 @@ timeout_ms = 120000
 Запрос: `POST /asr`, multipart `audio`, `language`, `diarize=false`,
 `tag_audio_events=false`. Ответ — JSON с `text`. Модель `transcribe-1-pro`
 требует кредита Fish; тариф может отличаться.
+`timeout_ms` ограничивает весь запрос STT: отправку и чтение ответа.
 
 Локальный вариант:
 
@@ -82,6 +83,8 @@ stream = true
 tools = true
 timeout_ms = 60000
 retries = 2
+# self-hosted HTTPS с собственным CA:
+# tls_ca_file = "/data/petrovich/certs/local-ca.crt"
 system_prompt = "..."
 ```
 
@@ -100,7 +103,10 @@ system_prompt = "..."
 повторяет запрос до `dialog.max_tool_rounds`.
 
 Повторы: 429, 5xx и сетевые ошибки; экспоненциальная пауза. Если поток уже
-начался, повтор не делается, чтобы не произнести ответ дважды.
+начался, повтор не делается, чтобы не произнести ответ дважды. В потоковом
+режиме `timeout_ms` — предел молчания между фрагментами, а не всего ответа:
+длинная, но живая речь не обрывается. `Retry-After` учитывается, если сервер
+его прислал.
 
 ## TTS
 
@@ -115,6 +121,8 @@ format = "pcm"
 sample_rate = 24000
 timeout_ms = 30000
 max_bytes = 16777216
+# self-hosted HTTPS с собственным CA:
+# tls_ca_file = "/data/petrovich/certs/local-ca.crt"
 ```
 
 `POST {base_url}/audio/speech` с `response_format` `pcm` или `wav`.

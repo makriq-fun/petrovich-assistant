@@ -1870,7 +1870,6 @@ name = "petrovich-core"
 version = "0.2.9"
 dependencies = [
  "async-trait",
- "chrono",
  "serde",
  "serde_json",
  "tempfile",
@@ -1906,11 +1905,8 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "tokio",
- "tokio-util",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -1936,7 +1932,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
  "url",
@@ -1952,8 +1947,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
- "tracing",
 ]
 
 [[package]]

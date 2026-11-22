@@ -289,6 +289,16 @@ pub struct AudioFrontend {
 
 impl AudioFrontend {
     pub fn new(cfg: &AudioConfig) -> Result<Self> {
+        // Индексы каналов проверяются ещё в конфигурации, но AudioFrontend
+        // можно создать и напрямую (диагностика, тесты): выход за границы
+        // здесь означал бы панику в потоке обработки звука.
+        for ch in cfg.mic_channels.iter().chain(cfg.reference_channels.iter()) {
+            anyhow::ensure!(
+                *ch < cfg.capture_channels,
+                "канал {ch} вне диапазона capture_channels={}",
+                cfg.capture_channels
+            );
+        }
         if cfg.downmix_before_vqe {
             tracing::warn!("downmix_before_vqe игнорируется: VQE требует отдельные каналы");
         }

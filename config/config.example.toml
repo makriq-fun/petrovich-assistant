@@ -104,6 +104,8 @@ api_key_env = "PETROVICH_STT_API_KEY"
 language = "ru"
 timeout_ms = 30000
 retries = 2
+# Дополнительный корневой сертификат для self-hosted HTTPS (PEM).
+# tls_ca_file = "/data/petrovich/certs/ca.pem"
 
 [llm]
 base_url = "https://api.openai.com/v1"
@@ -117,10 +119,14 @@ api_key_env = "PETROVICH_LLM_API_KEY"
 api_key_envs = []
 temperature = 0.4
 max_tokens = 800
+# Для потокового ответа это тайм-аут ожидания очередного фрагмента, а не
+# всего ответа: длинная, но живая речь не обрывается.
 timeout_ms = 60000
 retries = 2
 stream = true
 tools = true
+# Дополнительный корневой сертификат для self-hosted HTTPS (PEM).
+# tls_ca_file = "/data/petrovich/certs/ca.pem"
 # system_prompt по умолчанию — встроенный характер Петровича (дерзкий друг,
 # без служебных фраз). Задавайте ключ только чтобы переопределить его целиком;
 # без ключа обновления промпта приходят вместе с бинарником.
@@ -138,6 +144,8 @@ sample_rate = 24000
 timeout_ms = 30000
 retries = 2
 max_bytes = 16777216
+# Дополнительный корневой сертификат для self-hosted HTTPS (PEM).
+# tls_ca_file = "/data/petrovich/certs/ca.pem"
 # Пусто — общий [network] proxy.
 proxy = ""
 

@@ -1,33 +1,24 @@
 //! Общие HTTP-утилиты провайдеров: TLS с проверкой сертификатов, тайм-ауты,
 //! разбор SSE и повторные попытки.
 
-use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use bytes::Bytes;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Response, StatusCode};
-use tokio::sync::mpsc;
 
-pub fn client(timeout_ms: u64) -> Result<Client> {
-    client_with_ca(timeout_ms, None)
-}
-
-/// Клиент с дополнительным корневым сертификатом для self-hosted HTTPS.
-pub fn client_with_ca(timeout_ms: u64, ca_file: Option<&std::path::Path>) -> Result<Client> {
-    client_with_ca_proxy(timeout_ms, ca_file, "")
-}
+/// Сколько байт тела ошибки показывать в журнале.
+const ERROR_BODY_LIMIT: usize = 64 * 1024;
 
 /// Клиент с корневым сертификатом и SOCKS5/HTTP-прокси.
-pub fn client_with_ca_proxy(
-    timeout_ms: u64,
-    ca_file: Option<&std::path::Path>,
-    proxy: &str,
-) -> Result<Client> {
+///
+/// Общий `timeout` клиента здесь намеренно не задаётся: в reqwest он
+/// ограничивает весь запрос вместе с телом, то есть обрывает потоковые
+/// ответы LLM и TTS посреди фразы. Каждый провайдер ограничивает `send()`
+/// своим тайм-аутом, а чтение потока — тайм-аутом простоя.
+pub fn client_with_ca_proxy(ca_file: Option<&std::path::Path>, proxy: &str) -> Result<Client> {
     let mut builder = Client::builder()
-        .timeout(Duration::from_millis(timeout_ms))
         .connect_timeout(Duration::from_secs(10))
         .user_agent(concat!("petrovich-assistant/", env!("CARGO_PKG_VERSION")));
     if let Some(path) = ca_file {
@@ -70,31 +61,122 @@ pub async fn check_status(resp: Response, what: &str) -> Result<Response> {
     if status.is_success() {
         return Ok(resp);
     }
-    let body = resp.text().await.unwrap_or_default();
-    let body = redact(&body);
+    // Тело ошибки может не прийти вовсе: не держим ход из-за него.
+    let body =
+        match tokio::time::timeout(Duration::from_secs(10), read_prefix(resp, ERROR_BODY_LIMIT))
+            .await
+        {
+            Ok(body) => body,
+            Err(_) => "[тело ошибки не прочитано за 10 с]".to_owned(),
+        };
     bail!("{what}: HTTP {status}: {body}");
 }
 
-/// Убирает похожие на ключи строки из тела ошибки.
+/// Читает начало тела ответа, не больше `limit` байт, и вычищает секреты.
+/// Тело ошибки не должно ни раздувать память, ни попадать в журнал целиком.
+pub async fn read_prefix(resp: Response, limit: usize) -> String {
+    let mut out = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while out.len() < limit {
+        let Some(item) = stream.next().await else {
+            break;
+        };
+        let Ok(chunk) = item else {
+            break;
+        };
+        let take = (limit - out.len()).min(chunk.len());
+        out.extend_from_slice(&chunk[..take]);
+        if take < chunk.len() {
+            break;
+        }
+    }
+    redact(&String::from_utf8_lossy(&out))
+}
+
+/// Убирает похожие на ключи фрагменты из тела ошибки.
+///
+/// Ключи ищутся как непрерывные ASCII-последовательности, поэтому строка
+/// вида `{"key":"sk-…"}` тоже очищается, а не только токен через пробел.
 pub fn redact(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for token in s.split_whitespace() {
-        if token.len() >= 24
-            && (token.starts_with("sk-")
-                || token.starts_with("Bearer")
-                || token.chars().filter(|c| c.is_ascii_alphanumeric()).count() == token.len())
-        {
-            out.push_str("[скрыто]");
-        } else {
-            out.push_str(token);
+    let mut run_start: Option<usize> = None;
+    let mut after_bearer = false;
+    for (idx, ch) in s.char_indices() {
+        let secret_char = ch.is_ascii_alphanumeric() || ch == '-' || ch == '_';
+        match (secret_char, run_start) {
+            (true, None) => run_start = Some(idx),
+            (false, Some(start)) => {
+                let run = &s[start..idx];
+                push_masked(run, &mut out, after_bearer);
+                after_bearer = run.eq_ignore_ascii_case("bearer");
+                run_start = None;
+                out.push(ch);
+            }
+            (false, None) => out.push(ch),
+            (true, Some(_)) => {}
         }
-        out.push(' ');
     }
-    out.trim_end().to_owned()
+    if let Some(start) = run_start {
+        push_masked(&s[start..], &mut out, after_bearer);
+    }
+    out
+}
+
+fn push_masked(run: &str, out: &mut String, after_bearer: bool) {
+    if is_secret_like(run) || (after_bearer && run.len() >= 24) {
+        out.push_str("[скрыто]");
+    } else {
+        out.push_str(run);
+    }
+}
+
+fn is_secret_like(run: &str) -> bool {
+    if run.len() < 24 {
+        return false;
+    }
+    if run.starts_with("sk-") || run.starts_with("pk-") {
+        return true;
+    }
+    let mut letters = false;
+    let mut digits = false;
+    for ch in run.chars() {
+        if !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+            return false;
+        }
+        letters |= ch.is_ascii_alphabetic();
+        digits |= ch.is_ascii_digit();
+    }
+    letters && digits
 }
 
 pub fn retryable(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// Задержка перед повтором: экспонента с потолком и разбросом, чтобы
+/// несколько колонок не били в провайдер синхронно после сбоя.
+pub fn backoff(attempt: u8) -> Duration {
+    let base_ms = 300u64.saturating_mul(1u64 << u32::from(attempt).min(5));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as u64;
+    let jitter = base_ms * (nanos % 100) / 400;
+    Duration::from_millis(base_ms + jitter)
+}
+
+/// `Retry-After` в секундах, разумно ограниченный сверху.
+pub fn retry_after(resp: &Response) -> Option<Duration> {
+    let value = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    value
+        .parse::<u64>()
+        .ok()
+        .map(|s| Duration::from_secs(s.min(30)))
 }
 
 /// Потоковый разбор SSE: отдаёт содержимое каждого `data:`.
@@ -116,21 +198,31 @@ impl SseDecoder {
     pub fn push(&mut self, chunk: &[u8]) -> Vec<String> {
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some(pos) = find_separator(&self.buf) {
-            let event: Vec<u8> = self.buf.drain(..pos.0 + pos.1).collect();
-            let text = String::from_utf8_lossy(&event[..pos.0]);
+        let mut start = 0;
+        // `start` только растёт, поэтому буфер не пересканируется целиком
+        // для каждого события: на длинном ответе это O(n), а не O(n²).
+        while let Some((pos, sep)) = find_separator(&self.buf[start..]) {
+            let end = start + pos;
+            let text = String::from_utf8_lossy(&self.buf[start..end]);
             let mut data = String::new();
             for line in text.lines() {
                 if let Some(rest) = line.strip_prefix("data:") {
+                    // По спецификации после `data:` допускается ровно один
+                    // пробел; остальные пробелы — часть данных.
+                    let rest = rest.strip_prefix(' ').unwrap_or(rest);
                     if !data.is_empty() {
                         data.push('\n');
                     }
-                    data.push_str(rest.trim_start());
+                    data.push_str(rest);
                 }
             }
             if !data.is_empty() {
                 out.push(data);
             }
+            start = end + sep;
+        }
+        if start > 0 {
+            self.buf.drain(..start);
         }
         out
     }
@@ -146,54 +238,6 @@ fn find_separator(buf: &[u8]) -> Option<(usize, usize)> {
         }
     }
     None
-}
-
-/// Собирает поток байтов в канал; ошибки чтения передаются вызывающему.
-pub async fn pump_response(resp: Response, tx: mpsc::Sender<Result<Bytes>>) -> Result<()> {
-    let mut stream = resp.bytes_stream();
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(b) => {
-                if tx.send(Ok(b)).await.is_err() {
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(Err(anyhow::anyhow!("чтение ответа: {e}"))).await;
-                return Err(e).context("чтение ответа");
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Выполняет запрос с повторами на 429/5xx и сетевые ошибки.
-pub async fn with_retries<F, Fut>(what: &str, retries: u8, mut f: F) -> Result<Response>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<Response>>,
-{
-    let mut attempt = 0u8;
-    loop {
-        match f().await {
-            Ok(resp) if resp.status().is_success() => return Ok(resp),
-            Ok(resp) if retryable(resp.status()) && attempt < retries => {
-                let status = resp.status();
-                let body = redact(&resp.text().await.unwrap_or_default());
-                tracing::warn!(
-                    "{what}: HTTP {status} ({body}); повтор {}/{retries}",
-                    attempt + 1
-                );
-            }
-            Ok(resp) => return check_status(resp, what).await,
-            Err(e) if attempt < retries => {
-                tracing::warn!("{what}: {e:#}; повтор {}/{retries}", attempt + 1);
-            }
-            Err(e) => return Err(e).with_context(|| format!("{what}: попытки исчерпаны")),
-        }
-        attempt += 1;
-        tokio::time::sleep(Duration::from_millis(300 * 2u64.pow(u32::from(attempt)))).await;
-    }
 }
 
 /// Читает поток целиком с ограничением размера.
@@ -235,11 +279,50 @@ mod tests {
     }
 
     #[test]
+    fn sse_keeps_second_space() {
+        let mut d = SseDecoder::new();
+        assert_eq!(d.push(b"data:  x\n\n"), [" x"]);
+    }
+
+    #[test]
+    fn sse_many_events_in_one_chunk() {
+        let mut d = SseDecoder::new();
+        let mut chunk = Vec::new();
+        for i in 0..500 {
+            chunk.extend_from_slice(format!("data: {i}\n\n").as_bytes());
+        }
+        let out = d.push(&chunk);
+        assert_eq!(out.len(), 500);
+        assert_eq!(out[0], "0");
+        assert_eq!(out[499], "499");
+        assert!(d.buf.is_empty());
+    }
+
+    #[test]
     fn redacts_long_tokens() {
         let s =
             redact("bad key sk-abcdefghijklmnopqrstuvwxyz and Bearer abcdefghijklmnopqrstuvwxyz");
         assert!(!s.contains("abcdefghijklmnopqrstuvwxyz"));
         assert!(s.contains("[скрыто]"));
+    }
+
+    #[test]
+    fn redacts_quoted_secret() {
+        let s = redact(r#"{"api_key":"a1b2c3d4e5f6g7h8i9j0k1l2m3n4"}"#);
+        assert!(!s.contains("a1b2c3d4e5f6g7h8i9j0k1l2m3n4"), "{s}");
+        assert!(s.contains("[скрыто]"));
+    }
+
+    #[test]
+    fn keeps_short_words_and_urls() {
+        let s = redact("см. https://example.com/path?q=1 и слово");
+        assert_eq!(s, "см. https://example.com/path?q=1 и слово");
+    }
+
+    #[test]
+    fn backoff_is_bounded() {
+        assert!(backoff(0) >= Duration::from_millis(300));
+        assert!(backoff(10) <= Duration::from_millis(300 * 32 + 300 * 32 / 4));
     }
 
     #[test]

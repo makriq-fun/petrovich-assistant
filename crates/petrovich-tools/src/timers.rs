@@ -101,7 +101,7 @@ impl TimerManager {
             });
         }
         let data = StoredTimers { version: 1, timers };
-        if let Err(e) = write_state(path, &data) {
+        if let Err(e) = write_state_async(path, data).await {
             tracing::warn!("таймеры: сохранить {}: {e:#}", path.display());
         }
     }
@@ -204,7 +204,12 @@ impl TimerManager {
                             .as_secs(),
                     });
                 }
-                let _ = write_state(&path, &StoredTimers { version: 1, timers });
+                // Ошибку сохранения видно в журнале: иначе потеря состояния
+                // после срабатывания таймера остаётся незамеченной.
+                if let Err(e) = write_state_async(&path, StoredTimers { version: 1, timers }).await
+                {
+                    tracing::warn!("таймеры: сохранить {}: {e:#}", path.display());
+                }
             }
         });
     }
@@ -366,7 +371,7 @@ impl AlarmManager {
             .collect();
         drop(map);
         let data = StoredAlarms { version: 1, alarms };
-        if let Err(e) = write_state(path, &data) {
+        if let Err(e) = write_state_async(path, data).await {
             tracing::warn!("будильники: сохранить {}: {e:#}", path.display());
         }
     }
@@ -501,13 +506,13 @@ impl AlarmManager {
                         label: label.clone(),
                     }));
                     let _ = announce
-                        .try_send(AlarmFired {
+                        .send(AlarmFired {
                             id,
                             hour,
                             minute,
                             label,
                         })
-                        .ok();
+                        .await;
                     if cfg.max_ring_s > 0
                         && ring_start.elapsed().unwrap_or_default()
                             >= Duration::from_secs(cfg.max_ring_s)
@@ -645,7 +650,7 @@ async fn persist_alarms(inner: &Arc<Mutex<HashMap<u64, AlarmEntry>>>, path: &Pat
         })
         .collect();
     drop(map);
-    write_state(path, &StoredAlarms { version: 1, alarms })
+    write_state_async(path, StoredAlarms { version: 1, alarms }).await
 }
 
 fn normalize_weekdays(mut days: Vec<u32>) -> Vec<u32> {
@@ -676,6 +681,19 @@ fn next_weekday_deadline(hour: u32, minute: u32, repeat: &[u32]) -> SystemTime {
     }
     // Запасной вариант: через сутки.
     SystemTime::now() + Duration::from_secs(86_400)
+}
+
+/// Сохраняет состояние, не блокируя async-рантайм: `sync_all` на слабой
+/// флеш-памяти занимает десятки миллисекунд и иначе останавливает обработку
+/// звука и таймеров.
+async fn write_state_async<T>(path: &Path, value: T) -> Result<()>
+where
+    T: Serialize + Send + 'static,
+{
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_state(&path, &value))
+        .await
+        .context("сохранение состояния: задача")?
 }
 
 fn write_state<T: Serialize>(path: &Path, value: &T) -> Result<()> {

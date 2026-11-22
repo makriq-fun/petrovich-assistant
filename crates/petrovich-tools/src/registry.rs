@@ -26,6 +26,8 @@ use crate::web::Web;
 pub enum ControlAction {
     StopSpeaking,
     ResetDialog,
+    /// Повторить последний ответ без обращения к LLM.
+    RepeatLast,
 }
 
 #[derive(Debug)]
@@ -405,6 +407,9 @@ impl ToolContext {
         } else {
             serde_json::from_str(args).with_context(|| format!("{name}: аргументы не JSON"))?
         };
+        if !args.is_object() {
+            bail!("{name}: аргументы должны быть JSON-объектом");
+        }
         let timeout = match name {
             "web_fetch" | "web_search" | "weather" | "sugar" => {
                 Duration::from_millis(self.cfg.web_timeout_ms)
@@ -430,10 +435,21 @@ impl ToolContext {
             _ => Duration::from_millis(self.cfg.timeout_ms),
         };
         let fut = self.dispatch(name, &args);
-        match tokio::time::timeout(timeout, fut).await {
+        let result = match tokio::time::timeout(timeout, fut).await {
             Ok(r) => r,
             Err(_) => bail!("{name}: тайм-аут {} мс", timeout.as_millis()),
-        }
+        };
+        result.map(|mut r| {
+            // Один ответ не должен раздувать контекст модели и RAM колонки:
+            // субтитры и поиск иногда приходят на сотни килобайт.
+            const MAX_CHARS: usize = 8_000;
+            if r.content.chars().count() > MAX_CHARS {
+                let mut cut: String = r.content.chars().take(MAX_CHARS).collect();
+                cut.push_str("\n… (ответ инструмента обрезан)");
+                r.content = cut;
+            }
+            r
+        })
     }
 
     async fn dispatch(&self, name: &str, args: &Value) -> Result<ToolResult> {
@@ -482,7 +498,7 @@ impl ToolContext {
                             .and_then(Value::as_u64)
                             .ok_or_else(|| anyhow::anyhow!("timer: нет seconds"))?;
                         if !(1..=86_400).contains(&seconds) {
-                            bail!("timer: seconds вне 1..86400");
+                            bail!("timer: seconds={seconds} вне 1..86400");
                         }
                         let label = args
                             .get("label")
@@ -501,12 +517,16 @@ impl ToolContext {
                         if all.is_empty() {
                             return Ok(ToolResult::text("Таймеров нет."));
                         }
+                        let total = all.len();
                         let mut out = String::new();
-                        for t in all {
+                        for t in all.into_iter().take(20) {
                             out.push_str(&format!(
                                 "{}: «{}», осталось {} с (id {})\n",
                                 t.id, t.label, t.remaining_s, t.id
                             ));
+                        }
+                        if total > 20 {
+                            out.push_str(&format!("… и ещё {} таймеров\n", total - 20));
                         }
                         Ok(ToolResult::text(out.trim_end().to_owned()))
                     }
@@ -544,7 +564,8 @@ impl ToolContext {
                                 let minutes = args
                                     .get("minutes")
                                     .and_then(Value::as_u64)
-                                    .unwrap_or_else(|| self.alarms.snooze_minutes());
+                                    .unwrap_or_else(|| self.alarms.snooze_minutes())
+                                    .clamp(1, 1440);
                                 if self.alarms.snooze(id, minutes).await {
                                     Ok(ToolResult::text(format!(
                                         "Будильник {id} отложен на {minutes} мин."
@@ -567,8 +588,9 @@ impl ToolContext {
                         if all.is_empty() {
                             return Ok(ToolResult::text("Будильников нет."));
                         }
+                        let total = all.len();
                         let mut out = String::new();
-                        for a in all {
+                        for a in all.into_iter().take(20) {
                             out.push_str(&format!(
                                 "{:02}:{:02} «{}» (id {}, {}, {})\n",
                                 a.hour,
@@ -582,6 +604,9 @@ impl ToolContext {
                                     "ожидает"
                                 }
                             ));
+                        }
+                        if total > 20 {
+                            out.push_str(&format!("… и ещё {} будильников\n", total - 20));
                         }
                         Ok(ToolResult::text(out.trim_end().to_owned()))
                     }
@@ -598,7 +623,7 @@ impl ToolContext {
                             .chars()
                             .take(80)
                             .collect::<String>();
-                        let repeat: Vec<String> = args
+                        let repeat_raw: Vec<String> = args
                             .get("repeat")
                             .and_then(Value::as_array)
                             .map(|a| {
@@ -608,7 +633,12 @@ impl ToolContext {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        let repeat = crate::timers::parse_weekdays(&repeat);
+                        let repeat = crate::timers::parse_weekdays(&repeat_raw);
+                        if !repeat_raw.is_empty() && repeat.is_empty() {
+                            bail!(
+                                "alarm: repeat должен содержать дни недели (пн, вт, ср, чт, пт, сб, вс)"
+                            );
+                        }
                         let now = Local::now();
                         let mut target = now
                             .date_naive()
@@ -634,7 +664,11 @@ impl ToolContext {
                 let name = args
                     .get("name")
                     .and_then(Value::as_str)
-                    .unwrap_or("neutral");
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "emotion: нужен name (happy, sad, surprised, angry, calm, greeting, neutral)"
+                        )
+                    })?;
                 let emotion = Emotion::parse(name)
                     .ok_or_else(|| anyhow::anyhow!("emotion: неизвестная эмоция {name}"))?;
                 self.chime.play(ChimeSound::Emotion(emotion))?;
@@ -646,13 +680,18 @@ impl ToolContext {
             }
             "volume" => {
                 let action = args.get("action").and_then(Value::as_str).unwrap_or("get");
+                let mut clamp_note = String::new();
                 let status = match action {
                     "set" => {
                         let v = args
                             .get("value")
                             .and_then(Value::as_i64)
                             .ok_or_else(|| anyhow::anyhow!("volume: нет value"))?;
-                        self.volume.set_percent(v.clamp(0, 100) as i32)?
+                        let wanted = v.clamp(0, 100);
+                        if wanted != v {
+                            clamp_note = format!(" Запрошено {v}%, поставил {wanted}%.");
+                        }
+                        self.volume.set_percent(wanted as i32)?
                     }
                     "up" => self.volume.step(self.volume_step)?,
                     "down" => self.volume.step(-self.volume_step)?,
@@ -663,7 +702,7 @@ impl ToolContext {
                     let _ = self.ui.send(UiEvent::Volume(status.percent));
                 }
                 Ok(ToolResult::text(format!(
-                    "Громкость {}%{}.",
+                    "Громкость {}%{}.{clamp_note}",
                     status.percent,
                     if status.muted {
                         ", звук выключен"
@@ -1026,7 +1065,10 @@ impl ToolContext {
                     .nightscout
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Nightscout не настроен"))?;
-                let hours = args.get("hours").and_then(Value::as_u64);
+                let hours = args
+                    .get("hours")
+                    .and_then(Value::as_u64)
+                    .map(|h| h.clamp(1, 24));
                 let now = ns.sugar_data(hours).await?;
                 let _ = self.ui.send(UiEvent::Glucose {
                     mmol: now.mmol,
@@ -1555,6 +1597,22 @@ mod tests {
             .iter()
             .all(|d| d.function.name != "remember"));
         assert!(c.execute("remember", r#"{"text":"факт"}"#).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_non_object_arguments() {
+        let c = ctx(&["time"]);
+        for args in ["[]", "\"строка\"", "42", "true"] {
+            let err = c.execute("time", args).await.unwrap_err().to_string();
+            assert!(err.contains("JSON-объектом"), "{args}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn emotion_requires_name() {
+        let c = ctx(&["emotion"]);
+        let err = c.execute("emotion", "{}").await.unwrap_err().to_string();
+        assert!(err.contains("нужен name"), "{err}");
     }
 
     #[tokio::test]

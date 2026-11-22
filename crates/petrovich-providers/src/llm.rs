@@ -16,7 +16,7 @@ use reqwest::Response;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::http::{endpoint, redact, SseDecoder};
+use crate::http::{backoff, endpoint, read_limited, read_prefix, redact, retry_after, SseDecoder};
 
 #[derive(Clone)]
 pub struct OpenAiLlm {
@@ -59,7 +59,7 @@ impl OpenAiLlm {
             }
         }
         Ok(Self {
-            http: crate::http::client_with_ca_proxy(cfg.timeout_ms, None, &cfg.proxy)?,
+            http: crate::http::client_with_ca_proxy(cfg.tls_ca_file.as_deref(), &cfg.proxy)?,
             url: endpoint(&cfg.base_url, "/chat/completions"),
             models,
             keys,
@@ -93,6 +93,7 @@ impl OpenAiLlm {
             let has_next = model_idx + 1 < self.models.len();
             let retries = self.retries.max(self.keys.len().saturating_sub(1) as u8);
             for attempt in 0..=retries {
+                let mut retry_hint = None;
                 let body = self.body(model, messages, tools);
                 let mut req = self.http.post(&self.url).json(&body);
                 if !self.keys.is_empty() {
@@ -109,8 +110,10 @@ impl OpenAiLlm {
                         return Ok(resp);
                     }
                     Ok(Ok(resp)) => {
+                        let wait = retry_after(&resp);
                         let status = resp.status();
-                        let text = redact(&resp.text().await.unwrap_or_default());
+                        let text = read_prefix(resp, 64 * 1024).await;
+                        retry_hint = wait;
                         let transient = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                             || status.is_server_error();
                         // Смена модели полезна не только при лимите: облачные
@@ -161,7 +164,7 @@ impl OpenAiLlm {
                     Err(_) => last = Some(anyhow::anyhow!("LLM: {model}: тайм-аут")),
                 }
                 tracing::warn!("LLM: {model}: повтор {}/{}", attempt + 1, retries);
-                tokio::time::sleep(Duration::from_millis(400 * 2u64.pow(attempt as u32))).await;
+                tokio::time::sleep(retry_hint.unwrap_or_else(|| backoff(attempt))).await;
             }
         }
         Err(last.unwrap_or_else(|| anyhow::anyhow!("LLM: нет ответа")))
@@ -177,12 +180,13 @@ impl OpenAiLlm {
     ) -> Result<mpsc::Receiver<LlmEvent>> {
         let resp = self.send(&messages, &tools).await?;
         let stream_mode = self.stream;
+        let idle = self.timeout;
         let (tx, rx) = mpsc::channel(16);
         tokio::spawn(async move {
             if stream_mode {
-                parse_sse(resp, tx).await;
+                parse_sse(resp, tx, idle).await;
             } else {
-                parse_full(resp, tx).await;
+                parse_full(resp, tx, idle).await;
             }
         });
         Ok(rx)
@@ -223,14 +227,30 @@ struct PartialCall {
     arguments: String,
 }
 
-async fn parse_sse(resp: Response, tx: mpsc::Sender<LlmEvent>) {
+async fn parse_sse(resp: Response, tx: mpsc::Sender<LlmEvent>, idle: Duration) {
     let mut sse = SseDecoder::new();
     let mut calls: BTreeMap<i64, PartialCall> = BTreeMap::new();
     let mut finish = None;
     let mut usage = None;
     let mut done = false;
+    let mut bad_frames = 0u8;
     let mut stream = resp.bytes_stream();
-    while let Some(item) = stream.next().await {
+    loop {
+        // Тайм-аут на каждое чтение, а не на весь поток: длинный, но живой
+        // ответ не обрывается, а зависший сервер не держит ход минутами.
+        let item = match tokio::time::timeout(idle, stream.next()).await {
+            Ok(Some(item)) => item,
+            Ok(None) => break,
+            Err(_) => {
+                let _ = tx
+                    .send(LlmEvent::Error(format!(
+                        "LLM: поток молчит дольше {} мс",
+                        idle.as_millis()
+                    )))
+                    .await;
+                return;
+            }
+        };
         let chunk: Bytes = match item {
             Ok(b) => b,
             Err(e) => {
@@ -248,12 +268,23 @@ async fn parse_sse(resp: Response, tx: mpsc::Sender<LlmEvent>) {
             let v: Value = match serde_json::from_str(&data) {
                 Ok(v) => v,
                 Err(e) => {
-                    let _ = tx
-                        .send(LlmEvent::Error(format!("LLM: неверный JSON: {e}")))
-                        .await;
-                    return;
+                    // Шлюзы иногда вставляют служебные кадры, которые не
+                    // являются JSON. Один такой кадр не должен убивать уже
+                    // почти готовый ответ, но поток из мусора — должен.
+                    bad_frames = bad_frames.saturating_add(1);
+                    tracing::warn!("LLM: пропускаю кадр SSE: {e}");
+                    if bad_frames >= 3 {
+                        let _ = tx
+                            .send(LlmEvent::Error(
+                                "LLM: поток не соответствует формату SSE".into(),
+                            ))
+                            .await;
+                        return;
+                    }
+                    continue;
                 }
             };
+            bad_frames = 0;
             if let Some(err) = v.get("error") {
                 let _ = tx
                     .send(LlmEvent::Error(format!(
@@ -336,11 +367,20 @@ async fn parse_sse(resp: Response, tx: mpsc::Sender<LlmEvent>) {
         .await;
 }
 
-async fn parse_full(resp: Response, tx: mpsc::Sender<LlmEvent>) {
-    let text = match resp.text().await {
-        Ok(t) => t,
-        Err(e) => {
+async fn parse_full(resp: Response, tx: mpsc::Sender<LlmEvent>, idle: Duration) {
+    let text = match tokio::time::timeout(idle, read_limited(resp, 4 * 1024 * 1024)).await {
+        Ok(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+        Ok(Err(e)) => {
             let _ = tx.send(LlmEvent::Error(format!("LLM: чтение: {e}"))).await;
+            return;
+        }
+        Err(_) => {
+            let _ = tx
+                .send(LlmEvent::Error(format!(
+                    "LLM: ответ не получен за {} мс",
+                    idle.as_millis()
+                )))
+                .await;
             return;
         }
     };

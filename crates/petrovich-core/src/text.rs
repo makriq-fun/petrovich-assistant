@@ -65,22 +65,23 @@ impl SentenceChunker {
     }
 
     fn find_boundary(&self) -> Option<usize> {
-        let chars: Vec<(usize, char)> = self.buf.char_indices().collect();
-        for (i, (byte, ch)) in chars.iter().enumerate() {
+        // Без промежуточного Vec<(usize, char)>: буфер бывает длинным, а
+        // вызывается это на каждой дельте потока.
+        for (byte, ch) in self.buf.char_indices() {
             if !matches!(ch, '.' | '!' | '?' | '…' | '\n') {
                 continue;
             }
-            let next = chars.get(i + 1).map(|(_, c)| *c);
+            let end = byte + ch.len_utf8();
+            let next = self.buf[end..].chars().next();
             if !matches!(
                 next,
                 None | Some(' ') | Some('\n') | Some('\t') | Some('"') | Some('»')
             ) {
                 continue;
             }
-            if *ch == '.' && is_abbreviation(&self.buf[..*byte]) {
+            if ch == '.' && is_abbreviation(&self.buf[..byte]) {
                 continue;
             }
-            let end = byte + ch.len_utf8();
             if self.buf[..end].chars().count() < self.min_chars {
                 continue;
             }

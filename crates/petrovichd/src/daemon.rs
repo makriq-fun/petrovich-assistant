@@ -106,9 +106,15 @@ struct App {
     /// Файл в /run, который обновляется на каждом тике. Супервизор по его
     /// возрасту отличает занятый демон от зависшего.
     heartbeat: PathBuf,
+    /// Звучит объявление (таймер, будильник, «не понял»). Оно не является
+    /// ходом диалога, но должно останавливаться кнопкой и словом «стоп»,
+    /// иначе помощник невозможно заткнуть во время звонка.
+    announcement: Option<JoinHandle<()>>,
     volume_step: i32,
     /// Будильник, который сейчас звонит: «стоп» его выключает.
     ringing_alarm: Option<u64>,
+    /// Последний озвученный ответ: локальная команда «повтори».
+    last_answer: String,
 }
 
 pub async fn run(loaded: LoadedConfig) -> Result<()> {
@@ -528,8 +534,10 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         task_tx,
         started: Instant::now(),
         heartbeat: heartbeat.clone(),
+        announcement: None,
         volume_step: cfg.hardware.volume_step,
         ringing_alarm: None,
+        last_answer: String::new(),
     };
     app.enter_idle();
 
@@ -590,61 +598,27 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
             }
             fired = announce_rx.recv() => {
                 if let Some(f) = fired {
+                    app.interrupt_for_announcement();
                     let _ = app.chime.play(ChimeSound::Timer);
-                    let ctx = app.turn.clone();
-                    let yt = app.youtube.clone();
-                    let music = app.music.clone();
-                    let text = format!("Таймер {} сработал.", f.label);
-                    tokio::spawn(async move {
-                        if let Some(m) = &music {
-                            m.duck();
-                        }
-                        if let Some(yt) = &yt {
-                            yt.duck();
-                        }
-                        tokio::time::sleep(Duration::from_millis(1100)).await;
-                        if let Err(e) = speak_text(&ctx, &text).await {
-                            tracing::warn!("таймер: озвучка: {e:#}");
-                        }
-                        if let Some(yt) = &yt {
-                            yt.unduck();
-                        }
-                        if let Some(m) = &music {
-                            m.unduck();
-                        }
-                    });
+                    let text = if f.label.is_empty() || f.label == "таймер" {
+                        "Таймер сработал.".to_owned()
+                    } else {
+                        format!("Таймер «{}» сработал.", f.label)
+                    };
+                    app.announce_speech(text);
                 }
             }
             alarm = alarm_rx.recv() => {
                 if let Some(a) = alarm {
+                    app.interrupt_for_announcement();
                     let _ = app.chime.play(ChimeSound::Alarm);
                     app.ringing_alarm = Some(a.id);
-                    let ctx = app.turn.clone();
-                    let yt = app.youtube.clone();
-                    let music = app.music.clone();
                     let text = if a.label.is_empty() || a.label == "будильник" {
                         format!("Будильник на {:02}:{:02}.", a.hour, a.minute)
                     } else {
                         format!("Будильник «{}» сработал.", a.label)
                     };
-                    tokio::spawn(async move {
-                        if let Some(m) = &music {
-                            m.duck();
-                        }
-                        if let Some(yt) = &yt {
-                            yt.duck();
-                        }
-                        tokio::time::sleep(Duration::from_millis(1100)).await;
-                        if let Err(e) = speak_text(&ctx, &text).await {
-                            tracing::warn!("будильник: озвучка: {e:#}");
-                        }
-                        if let Some(yt) = &yt {
-                            yt.unduck();
-                        }
-                        if let Some(m) = &music {
-                            m.unduck();
-                        }
-                    });
+                    app.announce_speech(text);
                 }
             }
             ev = task_rx.recv() => {
@@ -680,8 +654,15 @@ impl App {
     ///
     /// Приоритет у того, что реально звучит. Когда не играет ничего, события
     /// не шлём: индикатор сам вернётся к часам по `indication.hold_s`.
-    fn tick(&self) {
+    fn tick(&mut self) {
         write_heartbeat(&self.heartbeat);
+        if self
+            .announcement
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            self.announcement = None;
+        }
         if self.playback.is_playing() {
             return;
         }
@@ -883,6 +864,12 @@ impl App {
                 }
                 self.on_command(command);
             }
+            // Пока звучит объявление (таймер, будильник), VAD и активация
+            // молчат: иначе собственный голос принимается за запрос, а
+            // «стоп» уже обработан выше.
+            if self.announcement.as_ref().is_some_and(|t| !t.is_finished()) {
+                continue;
+            }
             match self.mode {
                 Mode::Idle => {
                     self.remember_pre_roll(&frame.samples);
@@ -930,7 +917,10 @@ impl App {
                     // Голос поверх ответа: останавливаем озвучку сразу, не
                     // дожидаясь конца фразы. Дальше VAD в Listening завершит
                     // запись, и локальная команда «стоп» уйдёт без LLM.
-                    if self.dialog.barge_in_voice && self.playback.is_playing() {
+                    if self.dialog.barge_in_voice
+                        && self.playback.is_playing()
+                        && self.frontend.echo_cancelled()
+                    {
                         let _ = self.vad.push(&frame.samples);
                         if self.vad.in_speech() {
                             tracing::info!("бардж-ин по голосу");
@@ -959,6 +949,12 @@ impl App {
                         .as_mut()
                         .is_some_and(|w| !w.push(&frame.samples, now).is_empty());
                     if hit {
+                        // Без рабочего AEC собственный голос принимается за
+                        // активацию и ассистент обрывает сам себя.
+                        if self.playback.is_playing() && !self.frontend.echo_cancelled() {
+                            tracing::debug!("бардж-ин: нет AEC, пропускаю собственную озвучку");
+                            continue;
+                        }
                         tracing::info!("бардж-ин");
                         self.abort_turn();
                         self.playback.stop();
@@ -1012,6 +1008,11 @@ impl App {
         self.task = None;
         match ev.result {
             Ok(outcome) => {
+                if outcome.not_heard {
+                    tracing::debug!("ход: речь не распознана, слушаю дальше");
+                    self.enter_listening(true);
+                    return;
+                }
                 tracing::info!(
                     "ответ: {}",
                     if outcome.spoken.is_empty() {
@@ -1023,8 +1024,11 @@ impl App {
                 for m in outcome.messages {
                     self.history.push(m);
                 }
+                if !outcome.spoken.is_empty() && outcome.control.is_none() {
+                    self.last_answer = outcome.spoken.clone();
+                }
                 if outcome.spoken.is_empty() && outcome.control.is_none() {
-                    self.announce("Не понял. Повторите, пожалуйста.");
+                    self.announce_now("Не понял. Повторите, пожалуйста.");
                     self.enter_listening(true);
                     return;
                 }
@@ -1032,11 +1036,38 @@ impl App {
                     Some(ControlAction::ResetDialog) => {
                         self.feedback(ChimeSound::Cleared, UiNotice::Cleared);
                         self.history.reset();
+                        self.last_answer.clear();
                         self.enter_idle();
+                    }
+                    Some(ControlAction::RepeatLast) => {
+                        let text = if self.last_answer.is_empty() {
+                            "Пока нечего повторять.".to_owned()
+                        } else {
+                            self.last_answer.clone()
+                        };
+                        // Оценка длительности: даём договорить и только
+                        // потом считаем follow-up. VAD во время объявления
+                        // всё равно молчит.
+                        let ms = (text.chars().count() as u64)
+                            .saturating_mul(80)
+                            .min(60_000)
+                            .saturating_add(self.dialog.follow_up_ms);
+                        self.announce_now(text);
+                        self.enter_listening(true);
+                        let now = tokio::time::Instant::now();
+                        self.follow_deadline = Some(now + Duration::from_millis(ms));
+                        self.hard_deadline = Some(
+                            now + Duration::from_millis(
+                                ms.saturating_add(self.max_utterance_ms)
+                                    .saturating_add(1_000),
+                            ),
+                        );
                     }
                     Some(ControlAction::StopSpeaking) => {
                         self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
                         self.playback.stop();
+                        self.stop_announcement();
+                        self.dismiss_ringing_alarm();
                         if let Some(yt) = &self.youtube {
                             yt.stop_playback();
                         }
@@ -1075,21 +1106,82 @@ impl App {
         }
     }
 
-    fn announce(&self, text: &str) {
+    /// Готовит тракт к объявлению: текущий ответ обрывается, пассивное
+    /// слушание выключается, чтобы VAD не принял объявление за запрос.
+    fn interrupt_for_announcement(&mut self) {
+        match self.mode {
+            Mode::Thinking => {
+                self.abort_turn();
+                self.playback.stop();
+                self.enter_idle();
+            }
+            Mode::Listening => self.enter_idle(),
+            Mode::Idle => {}
+        }
+    }
+
+    /// Озвучивает объявление вне хода диалога и запоминает задачу, чтобы
+    /// «стоп», кнопка и мут могли её прервать. Новое объявление вытесняет
+    /// предыдущее: два голоса одновременно недопустимы.
+    fn announce_speech(&mut self, text: impl Into<String>) {
+        // Сигнал таймера/будильника уже играет: даём ему доиграть.
+        self.announce_with_delay(text.into(), Duration::from_millis(1100));
+    }
+
+    /// Объявление без паузы: ответ на реплику, «не понял», повтор.
+    fn announce_now(&mut self, text: impl Into<String>) {
+        self.announce_with_delay(text.into(), Duration::ZERO);
+    }
+
+    fn announce_with_delay(&mut self, text: String, delay: Duration) {
+        self.stop_announcement();
         let ctx = self.turn.clone();
         let yt = self.youtube.clone();
-        let text = text.to_owned();
-        tokio::spawn(async move {
+        let music = self.music.clone();
+        let chime = self.chime.clone();
+        self.announcement = Some(tokio::spawn(async move {
+            if let Some(m) = &music {
+                m.duck();
+            }
             if let Some(yt) = &yt {
                 yt.duck();
             }
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             if let Err(e) = speak_text(&ctx, &text).await {
-                tracing::warn!("озвучка: {e:#}");
+                tracing::warn!("объявление: озвучка: {e:#}");
+                let _ = chime.play(ChimeSound::Error);
             }
             if let Some(yt) = &yt {
                 yt.unduck();
             }
-        });
+            if let Some(m) = &music {
+                m.unduck();
+            }
+        }));
+    }
+
+    /// Прерывает объявление. Возвращает true, если что-то звучало.
+    fn stop_announcement(&mut self) -> bool {
+        match self.announcement.take() {
+            Some(task) if !task.is_finished() => {
+                task.abort();
+                self.playback.stop();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Отключает звонящий будильник, не дожидаясь, пока он доиграет.
+    fn dismiss_ringing_alarm(&mut self) {
+        if let Some(id) = self.ringing_alarm.take() {
+            let alarms = self.alarms.clone();
+            tokio::spawn(async move {
+                alarms.dismiss(id).await;
+            });
+        }
     }
 
     fn abort_turn(&mut self) {
@@ -1154,11 +1246,17 @@ impl App {
     /// Глобальная «пауза»/«стоп»/«хватит»: останавливает только то, что
     /// сейчас на переднем плане, а не всё сразу.
     fn global_stop(&mut self) {
-        if let Some(id) = self.ringing_alarm.take() {
-            let alarms = self.alarms.clone();
-            tokio::spawn(async move {
-                alarms.dismiss(id).await;
-            });
+        self.dismiss_ringing_alarm();
+        // Объявление (таймер, будильник) не является ходом диалога, но
+        // звучит громче всего. Раньше «стоп» в этот момент не делал ничего.
+        if self.stop_announcement() {
+            tracing::info!("глобальная пауза: объявление");
+            if self.mode == Mode::Thinking {
+                self.abort_turn();
+            }
+            self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
+            self.enter_idle();
+            return;
         }
         let youtube_playing = self.youtube.as_ref().is_some_and(|y| y.is_playing());
         let music_playing = self
@@ -1166,6 +1264,14 @@ impl App {
             .as_ref()
             .map(|m| m.is_playing().unwrap_or(false))
             .unwrap_or(false);
+        // Остаточная озвучка после завершённого хода: гасим её, даже если
+        // автомат уже вернулся в Idle.
+        if self.mode == Mode::Idle && self.playback.is_playing() {
+            tracing::info!("глобальная пауза: остаточная озвучка");
+            self.playback.stop();
+            self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
+            return;
+        }
         match stop_target(self.mode, youtube_playing || music_playing) {
             StopTarget::Assistant => {
                 tracing::info!("глобальная пауза: ассистент");
@@ -1203,19 +1309,29 @@ impl App {
 
     async fn on_button(&mut self, ev: ButtonEvent) {
         match ev {
-            ButtonEvent::Action => match self.mode {
-                Mode::Idle => self.activate(),
-                Mode::Listening => {
+            ButtonEvent::Action => {
+                // Кнопка во время звонка будильника/таймера выключает звук,
+                // а не начинает новый диалог.
+                if self.stop_announcement() || self.ringing_alarm.is_some() {
+                    self.dismiss_ringing_alarm();
                     self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
                     self.enter_idle();
+                    return;
                 }
-                Mode::Thinking => {
-                    self.abort_turn();
-                    self.playback.stop();
-                    self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
-                    self.enter_idle();
+                match self.mode {
+                    Mode::Idle => self.activate(),
+                    Mode::Listening => {
+                        self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
+                        self.enter_idle();
+                    }
+                    Mode::Thinking => {
+                        self.abort_turn();
+                        self.playback.stop();
+                        self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
+                        self.enter_idle();
+                    }
                 }
-            },
+            }
             ButtonEvent::VolumeUp | ButtonEvent::VolumeDown => {
                 let delta = if matches!(ev, ButtonEvent::VolumeUp) {
                     self.volume_step
@@ -1227,6 +1343,7 @@ impl App {
             ButtonEvent::Mute(m) => {
                 self.muted = m;
                 let _ = self.ui.send(UiEvent::Muted(m));
+                self.stop_announcement();
                 self.abort_turn();
                 self.playback.stop();
                 if let Some(yt) = &self.youtube {

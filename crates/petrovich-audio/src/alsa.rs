@@ -8,6 +8,7 @@ use std::ffi::{c_char, c_int, c_long, c_uint, c_void, CStr, CString};
 use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use libloading::Library;
@@ -177,6 +178,7 @@ impl Pcm {
     /// Читает один период interleaved S16. Возвращает число кадров.
     pub fn read(&mut self, buf: &mut [i16]) -> Result<usize> {
         let want = self.frames.min(buf.len() / self.channels);
+        let mut failures = 0u32;
         loop {
             // SAFETY: буфер валиден и вмещает want*channels сэмплов.
             let rc =
@@ -184,17 +186,25 @@ impl Pcm {
             if rc >= 0 {
                 return Ok(rc as usize);
             }
+            // Устройство может «залипнуть» в ошибке: без ограничения цикл
+            // recovery крутится вечно и съедает единственное ядро.
+            failures += 1;
+            if failures > 10 {
+                bail!("snd_pcm_readi: {}", self.alsa.text(rc as c_int));
+            }
             // SAFETY: handle открыт; recover безопасен для этого кода ошибки.
             let rc2 = unsafe { (self.alsa.recover)(self.handle, rc as c_int, 1) };
             if rc2 < 0 {
                 bail!("snd_pcm_readi: {}", self.alsa.text(rc2));
             }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
     /// Пишет interleaved S16; при переполнении восстанавливает поток.
     pub fn write(&mut self, samples: &[i16]) -> Result<()> {
         let mut off = 0;
+        let mut failures = 0u32;
         while off < samples.len() {
             let left = (samples.len() - off) / self.channels;
             if left == 0 {
@@ -203,15 +213,26 @@ impl Pcm {
             let n = left.min(self.frames) as c_long;
             // SAFETY: указатель на валидный срез из n*channels сэмплов.
             let rc = unsafe { (self.alsa.writei)(self.handle, samples[off..].as_ptr().cast(), n) };
-            if rc >= 0 {
+            if rc > 0 {
                 off += rc as usize * self.channels;
+                failures = 0;
                 continue;
             }
-            // SAFETY: handle открыт.
-            let rc2 = unsafe { (self.alsa.recover)(self.handle, rc as c_int, 1) };
-            if rc2 < 0 {
-                bail!("snd_pcm_writei: {}", self.alsa.text(rc2));
+            failures += 1;
+            if failures > 10 {
+                if rc == 0 {
+                    bail!("snd_pcm_writei: устройство не принимает данные");
+                }
+                bail!("snd_pcm_writei: {}", self.alsa.text(rc as c_int));
             }
+            if rc < 0 {
+                // SAFETY: handle открыт.
+                let rc2 = unsafe { (self.alsa.recover)(self.handle, rc as c_int, 1) };
+                if rc2 < 0 {
+                    bail!("snd_pcm_writei: {}", self.alsa.text(rc2));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
         Ok(())
     }
@@ -224,7 +245,10 @@ impl Pcm {
             bail!("snd_pcm_drain: {}", self.alsa.text(rc));
         }
         // SAFETY: handle открыт.
-        unsafe { (self.alsa.prepare)(self.handle) };
+        let rc = unsafe { (self.alsa.prepare)(self.handle) };
+        if rc < 0 {
+            bail!("snd_pcm_prepare: {}", self.alsa.text(rc));
+        }
         Ok(())
     }
 
