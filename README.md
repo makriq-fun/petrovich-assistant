@@ -220,7 +220,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest discover -s installer/tests -v
 ```
 
-CI собирает ARMv7 glibc 2.23, тестирует на хосте и публикует выпуски по тегу.
+CI проверяет формат, clippy, тесты и установщик, собирает ARMv7 glibc 2.23 и
+host, а по тегу `vX.Y.Z` публикует выпуск. Порядок — [docs/release.md](docs/release.md).
 Что проверено и чего нельзя проверить без колонки:
 [docs/testing.md](docs/testing.md).
 

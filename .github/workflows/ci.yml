@@ -1,55 +1,155 @@
 name: ci
+
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   test:
+    name: проверки
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
       - name: Python-тесты установщика
         run: python3 -m unittest discover -s installer/tests -v
-  arm:
+      - name: Синтаксис скриптов
+        run: bash -n scripts/*.sh packaging/*.sh
+
+  package:
+    name: сборка ${{ matrix.arch }}
+    needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: armv7
+            target: armv7-unknown-linux-gnueabihf
+            cross: true
+          - arch: host
+            target: x86_64-unknown-linux-gnu
+            cross: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cross
-      - run: cross build --locked --release --target armv7-unknown-linux-gnueabihf -p petrovichd -p petrovichctl
-      - run: |
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: package-${{ matrix.arch }}
+          key: ${{ matrix.target }}
+      - if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Сборка и упаковка
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cross build --locked --release --target "${{ matrix.target }}" -p petrovichd -p petrovichctl
+            bin="target/${{ matrix.target }}/release"
+          else
+            cargo build --locked --release -p petrovichd -p petrovichctl
+            bin="target/release"
+          fi
           mkdir -p dist
-          install -m755 target/armv7-unknown-linux-gnueabihf/release/petrovichd dist/petrovichd
-          install -m755 target/armv7-unknown-linux-gnueabihf/release/petrovichctl dist/petrovichctl
-          ./scripts/package.sh
+          install -m755 "$bin/petrovichd" dist/petrovichd
+          install -m755 "$bin/petrovichctl" dist/petrovichctl
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          ./scripts/package.sh "$version" "${{ matrix.arch }}"
+      - name: Проверка запуска
+        if: matrix.cross == false
+        run: |
+          dist/petrovichctl --version
+          dist/petrovichd --version
+      - name: Проверка запуска под ARM
+        if: matrix.cross == true
+        run: |
+          cross run --locked --release --target "${{ matrix.target }}" -p petrovichctl -- --version
+          cross run --locked --release --target "${{ matrix.target }}" -p petrovichd -- --version
+      - name: Проверка пакета
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+          tar -tzf ./*.tar.gz > contents.txt
+          grep -q '^[^/]*/bin/petrovichd$' contents.txt
+          grep -q '^[^/]*/bin/petrovichctl$' contents.txt
+          grep -q '^[^/]*/installer/petrovich_install.py$' contents.txt
+          grep -q '^[^/]*/assets/wakeword/petrovich.tflite$' contents.txt
+          rm contents.txt
+          mv SHA256SUMS "SHA256SUMS.${{ matrix.arch }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: petrovich-assistant-armv7
-          path: dist/*.tar.gz
+          name: petrovich-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS.${{ matrix.arch }}
+          retention-days: 7
+
   release:
+    name: выпуск
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, arm]
+    needs: package
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cross
-      - run: cross build --locked --release --target armv7-unknown-linux-gnueabihf -p petrovichd -p petrovichctl
-      - run: |
-          mkdir -p dist
-          install -m755 target/armv7-unknown-linux-gnueabihf/release/petrovichd dist/petrovichd
-          install -m755 target/armv7-unknown-linux-gnueabihf/release/petrovichctl dist/petrovichctl
-          ./scripts/package.sh
+      - name: Сверка версии с тегом
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::тег $GITHUB_REF_NAME не совпадает с версией Cargo.toml ($version)"
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: petrovich-*
+          path: dist
+          merge-multiple: true
+      - name: Проверка архивов
+        run: |
+          set -euo pipefail
+          cd dist
+          cat SHA256SUMS.* > SHA256SUMS
+          rm SHA256SUMS.armv7 SHA256SUMS.host
+          sha256sum -c SHA256SUMS
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
+          for arch in armv7 host; do
+            test -f "petrovich-assistant-${version}-${arch}.tar.gz"
+          done
+          ls -lh
       - uses: softprops/action-gh-release@v2
         with:
+          name: Петрович ${{ github.ref_name }}
+          generate_release_notes: true
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
