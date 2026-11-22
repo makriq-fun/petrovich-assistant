@@ -79,6 +79,8 @@ struct App {
     /// Жёсткий предел текущего прослушивания: не даёт VAD и шуму
     /// продлевать сессию бесконечно.
     hard_deadline: Option<tokio::time::Instant>,
+    /// Текущее прослушивание открыто как follow-up после ответа.
+    follow_up: bool,
     ignore_until: tokio::time::Instant,
     command_ignore_until: tokio::time::Instant,
     max_utterance_ms: u64,
@@ -515,6 +517,7 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
         muted: false,
         follow_deadline: None,
         hard_deadline: None,
+        follow_up: false,
         ignore_until: tokio::time::Instant::now(),
         command_ignore_until: tokio::time::Instant::now(),
         max_utterance_ms: cfg.vad.max_utterance_ms.max(1_000),
@@ -761,12 +764,14 @@ impl App {
         }
         self.follow_deadline = None;
         self.hard_deadline = None;
+        self.follow_up = false;
         self.vad.reset_utterance();
         let _ = self.ui.send(UiEvent::State(VoiceState::Idle));
     }
 
     fn enter_listening(&mut self, follow_up: bool) {
         self.mode = Mode::Listening;
+        self.follow_up = follow_up;
         self.vad.reset_utterance();
         self.vad.arm_activation_boost();
         tracing::info!(
@@ -940,6 +945,26 @@ impl App {
                     }
                 }
                 Mode::Listening => {
+                    // Ответ ещё звучит из динамика: без AEC микрофон
+                    // принимает его за реплику пользователя. Не открываем
+                    // VAD, пока очередь озвучки не опустеет, и даём хвосту
+                    // 400 мс раствориться. Follow-up отсчитывается заново,
+                    // чтобы длинный ответ не съел окно ожидания.
+                    if self.playback.is_playing() {
+                        let now = tokio::time::Instant::now();
+                        self.ignore_until = now + Duration::from_millis(400);
+                        if self.follow_up {
+                            let ms = self.dialog.follow_up_ms;
+                            self.follow_deadline = Some(now + Duration::from_millis(ms));
+                            self.hard_deadline = Some(
+                                now + Duration::from_millis(
+                                    ms.saturating_add(self.max_utterance_ms)
+                                        .saturating_add(1_000),
+                                ),
+                            );
+                        }
+                        continue;
+                    }
                     let was_in_speech = self.vad.in_speech();
                     let utts = self.vad.push(&frame.samples);
                     if let Some(d) = listen_deadline(
