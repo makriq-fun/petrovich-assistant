@@ -73,7 +73,7 @@ absolute_db = -62.0
 # После активации порог временно ниже: человек стоит рядом и не должен
 # кричать. 0 dB выключает послабление.
 activation_boost_db = 6.0
-activation_boost_ms = 4000
+activation_boost_ms = 10000
 
 [dialog]
 follow_up_ms = 5000

@@ -317,6 +317,12 @@ async fn run_ui(
                     Some((hour, minute)) => c.show_time_level(hour, minute, 0),
                     None => clock_time(c, state, t),
                 }
+            } else if state == VoiceState::Listening {
+                // Пока идёт запись, экран должен однозначно показывать
+                // «слушаю», даже если на нём ещё висит таймер, погода или
+                // позиция. Таймер вернётся сразу после записи.
+                let masks = clock::listening_masks(t);
+                c.set_levels(&masks, 0, c.level())
             } else if let Some(dl) = timer_deadline {
                 if dl > now {
                     c.show_timer(dl.duration_since(now).as_secs())
@@ -324,11 +330,6 @@ async fn run_ui(
                     timer_deadline = None;
                     c.all_off()
                 }
-            } else if state == VoiceState::Listening {
-                // Пока идёт запись, экран должен однозначно показывать
-                // «слушаю», даже если на нём ещё висит погода или позиция.
-                let masks = clock::listening_masks(t);
-                c.set_levels(&masks, 0, c.level())
             } else if let Some((temp, _)) = weather {
                 c.show_temperature(temp)
             } else if let Some((mmol, _, _)) = &glucose {

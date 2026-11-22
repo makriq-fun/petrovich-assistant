@@ -86,7 +86,7 @@ impl Vad {
             noise_window: VecDeque::with_capacity((NOISE_WINDOW_MS / FRAME_MS) as usize),
             noise_window_frames: (NOISE_WINDOW_MS / FRAME_MS) as usize,
             activation_boost_db: 6.0,
-            activation_boost_ms: 4_000,
+            activation_boost_ms: 10_000,
             boost_db: 0.0,
             boost_frames: 0,
             above: 0,
@@ -119,8 +119,15 @@ impl Vad {
     /// абсолютного предела (он спасает от срабатывания на цифровой тишине).
     /// После активации порог временно снижается на `activation_boost_db`:
     /// человек уже стоит рядом с колонкой и не должен кричать.
+    ///
+    /// Послабление никогда не опускает порог до самой шумовой полки: иначе
+    /// случайные колебания фона становятся «речью», и ассистент зацикливается
+    /// на пустых распознаваниях. Три децибела над полкой — минимум, при
+    /// котором ещё слышна тихая речь, но фон уже не срабатывает.
     pub fn threshold_db(&self) -> f32 {
-        ((self.noise_db + self.margin_db).max(self.absolute_db) - self.boost_db).max(-90.0)
+        let base = (self.noise_db + self.margin_db).max(self.absolute_db);
+        let floor = self.noise_db + 3.0;
+        (base - self.boost_db).max(floor).max(-90.0)
     }
 
     /// Текущее снижение порога, дБ; 0 — обычный режим.
@@ -495,12 +502,26 @@ mod tests {
     }
 
     #[test]
-    fn activation_boost_expires() {
+    fn activation_boost_expires_after_listen_window() {
         let mut v = quiet_vad();
         v.arm_activation_boost();
         assert!(v.boost_db() > 0.0);
-        v.push(&vec![0; 16_000 * 4]);
+        v.push(&vec![0; 16_000 * 10]);
         assert_eq!(v.boost_db(), 0.0);
+    }
+
+    /// Даже максимальное послабление не опускает порог до уровня фона:
+    /// иначе шумовые колебания становятся «речью» и диалог зацикливается.
+    #[test]
+    fn boost_never_reaches_noise_floor() {
+        let mut v = quiet_vad();
+        v.arm_activation_boost();
+        assert!(
+            v.threshold_db() >= v.noise_db() + 2.9,
+            "порог {} ниже полки {} + 3",
+            v.threshold_db(),
+            v.noise_db()
+        );
     }
 
     #[test]

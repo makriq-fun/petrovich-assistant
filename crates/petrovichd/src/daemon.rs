@@ -1139,12 +1139,20 @@ impl App {
                         }
                         // Короткий сигнал завершения, но прослушивание
                         // включается сразу: сигнал не задерживает диалог.
-                        if self.dialog.state_chimes {
+                        let done_chime = self.dialog.state_chimes;
+                        if done_chime {
                             let _ = self.chime.play(ChimeSound::Done);
                             self.command_ignore_until =
                                 tokio::time::Instant::now() + Duration::from_millis(700);
                         }
                         self.enter_listening(true);
+                        if done_chime {
+                            // Follow-up включается сразу, но сам сигнал не
+                            // должен открывать фразу: иначе VAD ловит его
+                            // хвост и отправляет в STT тишину.
+                            self.ignore_until =
+                                tokio::time::Instant::now() + Duration::from_millis(350);
+                        }
                     }
                 }
             }

@@ -666,7 +666,9 @@ fn default_activation_boost_db() -> f32 {
     6.0
 }
 fn default_activation_boost_ms() -> u64 {
-    4_000
+    // Всё окно ожидания команды после активации: пауза «сейчас скажу»
+    // не должна снова делать ассистента глухим.
+    10_000
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
