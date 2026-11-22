@@ -33,6 +33,18 @@ use crate::music::DeferredMusic;
 /// старте. Она пишется один раз до создания плеера.
 static SPOTIFY_PCM: OnceLock<String> = OnceLock::new();
 
+/// Насколько тише играет музыка, пока ассистент слушает или говорит.
+/// Полный ноль раньше оставлял пользователя в тишине и навсегда сбивал
+/// громкость при вложенных приглушениях; 20% слышно, но не мешает STT.
+const DUCK_PERCENT: u32 = 20;
+
+fn ducked_volume(saved: u16) -> u16 {
+    if saved == 0 {
+        return 0;
+    }
+    ((u32::from(saved) * DUCK_PERCENT / 100) as u16).max(1)
+}
+
 struct PetrovichSink {
     pcm: Option<Pcm>,
 }
@@ -941,9 +953,9 @@ impl MusicControl for Spotify {
     fn duck(&self) {
         let mut depth = self.duck_depth.lock().unwrap_or_else(|e| e.into_inner());
         if *depth == 0 {
-            self.saved_volume
-                .store(self.mixer.volume(), Ordering::Relaxed);
-            self.mixer.set_volume(0);
+            let saved = self.mixer.volume();
+            self.saved_volume.store(saved, Ordering::Relaxed);
+            self.mixer.set_volume(ducked_volume(saved));
         }
         *depth += 1;
     }
@@ -1071,6 +1083,14 @@ fn core_err(e: anyhow::Error) -> petrovich_core::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duck_keeps_music_audible_instead_of_muting_it() {
+        assert_eq!(ducked_volume(0), 0);
+        assert_eq!(ducked_volume(10), 2);
+        assert_eq!(ducked_volume(50), 10);
+        assert_eq!(ducked_volume(u16::MAX), u16::MAX / 5);
+    }
 
     #[test]
     fn builds_liked_collection_uri() {

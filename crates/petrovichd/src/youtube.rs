@@ -179,27 +179,13 @@ impl YouTubePlayer {
     }
 
     /// Приглушить на время ответа или объявления. Не отменяет паузу,
-    /// поставленную пользователем.
+    /// поставленную пользователем: звук продолжает идти тише.
     pub fn duck(&self) {
         self.ducked.store(true, Ordering::Release);
-        if let Ok(guard) = self.session.lock() {
-            if let Some(s) = guard.as_ref() {
-                if !s.user_paused {
-                    s.paused.store(true, Ordering::Release);
-                }
-            }
-        }
     }
 
     pub fn unduck(&self) {
         self.ducked.store(false, Ordering::Release);
-        if let Ok(guard) = self.session.lock() {
-            if let Some(s) = guard.as_ref() {
-                if !s.user_paused {
-                    s.paused.store(false, Ordering::Release);
-                }
-            }
-        }
     }
 
     fn drop_session(&self) {
@@ -448,18 +434,31 @@ impl YouTubePlayer {
     }
 
     fn prepare_audio(&self, start_ms: u64) -> Result<AudioSession> {
-        let paused = Arc::new(AtomicBool::new(self.ducked.load(Ordering::Acquire)));
+        // Пауза — только пользовательская. Приглушение ассистента меняет
+        // амплитуду в audio_thread, не останавливая воспроизведение.
+        let paused = Arc::new(AtomicBool::new(false));
+        let ducked = Arc::clone(&self.ducked);
         let stop = Arc::new(AtomicBool::new(false));
         let ended = Arc::new(AtomicBool::new(false));
         let position = Arc::new(AtomicU64::new(start_ms));
         let (tx, rx) = mpsc::channel::<(u32, Vec<i16>)>(8);
         let pcm_name = self.playback_pcm.clone();
         let audio_paused = Arc::clone(&paused);
+        let audio_ducked = Arc::clone(&ducked);
         let audio_stop = Arc::clone(&stop);
         let audio_position = Arc::clone(&position);
         thread::Builder::new()
             .name("petrovich-youtube".into())
-            .spawn(move || audio_thread(rx, audio_paused, audio_stop, audio_position, &pcm_name))
+            .spawn(move || {
+                audio_thread(
+                    rx,
+                    audio_paused,
+                    audio_ducked,
+                    audio_stop,
+                    audio_position,
+                    &pcm_name,
+                )
+            })
             .context("поток вывода YouTube")?;
         Ok((tx, paused, stop, ended, position))
     }
@@ -668,9 +667,7 @@ impl YouTubePlayer {
             .map_err(|_| anyhow::anyhow!("youtube: lock"))?;
         if let Some(s) = guard.as_mut() {
             s.user_paused = false;
-            if !self.ducked.load(Ordering::Acquire) {
-                s.paused.store(false, Ordering::Release);
-            }
+            s.paused.store(false, Ordering::Release);
         }
         Ok(())
     }
@@ -1539,9 +1536,17 @@ async fn stream_hls(
     tracing::info!("youtube: воспроизведение завершено");
 }
 
+/// Громкость YouTube во время речи ассистента, проценты.
+const YOUTUBE_DUCK_PERCENT: i32 = 20;
+
+fn scaled_sample(sample: i16, percent: i32) -> i16 {
+    (i32::from(sample) * percent / 100) as i16
+}
+
 fn audio_thread(
     mut rx: mpsc::Receiver<(u32, Vec<i16>)>,
     paused: Arc<AtomicBool>,
+    ducked: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     position: Arc<AtomicU64>,
     pcm_name: &str,
@@ -1585,10 +1590,19 @@ fn audio_thread(
                 thread::sleep(Duration::from_millis(20));
             }
             flushed = false;
+            // Приглушение — это уменьшение амплитуды, а не пауза: звук
+            // продолжает идти, позиция не прыгает, после ответа громкость
+            // возвращается без перезапуска трека.
+            let gain = if ducked.load(Ordering::Acquire) {
+                YOUTUBE_DUCK_PERCENT
+            } else {
+                100
+            };
             let mut stereo = Vec::with_capacity(block.len() * 2);
             for &s in block {
-                stereo.push(s);
-                stereo.push(s);
+                let v = scaled_sample(s, gain);
+                stereo.push(v);
+                stereo.push(v);
             }
             if let Err(e) = pcm.write(&stereo) {
                 tracing::warn!("youtube: ALSA: {e:#}");
@@ -2218,6 +2232,14 @@ pub async fn check(cfg: &ToolsConfig, query: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duck_scales_without_silencing() {
+        assert_eq!(scaled_sample(10_000, 20), 2_000);
+        assert_eq!(scaled_sample(-10_000, 20), -2_000);
+        assert_eq!(scaled_sample(123, 100), 123);
+        assert_ne!(scaled_sample(10_000, YOUTUBE_DUCK_PERCENT), 0);
+    }
 
     #[test]
     fn extracts_video_ids() {

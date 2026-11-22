@@ -540,7 +540,7 @@ fn default_refractory_ms() -> u64 {
     2_000
 }
 fn default_wake_gain() -> u32 {
-    1
+    2
 }
 
 /// Быстрые команды без слова активации: штатная command-модель прошивки.

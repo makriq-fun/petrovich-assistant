@@ -47,7 +47,10 @@ impl WakeWord {
             let detector = Detector::new_tflite(
                 head,
                 assets,
-                threshold.unwrap_or(0.5),
+                // 0.4 при двух подряд кадрах: модель уверенно срабатывает
+                // на 0.8+, но у тихого пользователя пик часто остаётся
+                // между 0.4 и 0.5. Белый шум даёт < 0.001, запас есть.
+                threshold.unwrap_or(0.4),
                 sensitivity,
                 gain,
                 refractory_ms,

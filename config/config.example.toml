@@ -44,10 +44,13 @@ enabled = true
 # Для другой модели укажите свой файл и assets/oww.bin.
 model = "/data/petrovich/models/petrovich.tflite"
 assets = "/data/petrovich/assets/oww.bin"
+# 0.4 при двух подряд кадрах: тихая речь срабатывает, шум — нет.
+threshold = 0.4
 # Смещение к порогу модели: -0.1 делает срабатывание чаще.
 sensitivity = 0.0
 refractory_ms = 2000
-gain = 1
+# Микрофоны Станции Мини 2 тихие: +6 дБ до детектора.
+gain = 2
 
 [commands]
 # Штатный command spotter прошивки: быстрые команды без слова активации.

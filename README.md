@@ -75,7 +75,7 @@
 В релиз входит одна модель — openWakeWord-голова «Петрович»
 (`assets/wakeword/petrovich.tflite`). Вместе с `assets/oww.bin` она даёт
 локальную активацию по слову «Петрович» без облака. Порог задаётся в
-`[wakeword] threshold` (на колонке — 0.5). Других моделей в репозитории нет;
+`[wakeword] threshold` (на колонке — 0.4, `gain = 2`). Других моделей в репозитории нет;
 свою можно передать через `--wakeword-model` или `[wakeword] model`.
 Подробности — [docs/wakeword-model.md](docs/wakeword-model.md).
 

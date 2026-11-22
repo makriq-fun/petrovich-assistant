@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use futures_util::StreamExt;
-use petrovich_core::chat::{ChatMessage, LlmEvent, Role, ToolCall};
+use petrovich_core::chat::{ChatMessage, FunctionCall, LlmEvent, Role, ToolCall, ToolDefinition};
 use petrovich_core::config::TtsFormat;
 use petrovich_core::events::UiEvent;
 use petrovich_core::text::SentenceChunker;
@@ -17,6 +17,7 @@ use petrovich_providers::llm::OpenAiLlm;
 use petrovich_providers::stt::Stt;
 use petrovich_providers::tts::{AudioStream, Tts};
 use petrovich_tools::{ControlAction, ToolContext};
+use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
 use petrovich_audio::frontend::PlaybackHandle;
@@ -140,39 +141,64 @@ pub async fn run_turn(
                 snapshot
             }
         };
-        let mut rx = ctx
-            .llm
-            .chat_stream(round_messages, round_tools)
-            .await
-            .context("LLM")?;
         let mut chunker = SentenceChunker::default();
         let mut round_spoken = String::new();
         let mut calls: Option<Vec<ToolCall>> = None;
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                LlmEvent::TextDelta(t) => {
-                    let mut sentences = Vec::new();
-                    chunker.push(&t, &mut sentences);
-                    for s in sentences {
-                        if duck.is_none() {
-                            duck = Some(ctx.tools.duck_music());
+        match ctx
+            .llm
+            .chat_stream(round_messages, round_tools.clone())
+            .await
+        {
+            Ok(mut rx) => {
+                while let Some(ev) = rx.recv().await {
+                    match ev {
+                        LlmEvent::TextDelta(t) => {
+                            let mut sentences = Vec::new();
+                            chunker.push(&t, &mut sentences);
+                            for s in sentences {
+                                if duck.is_none() {
+                                    duck = Some(ctx.tools.duck_music());
+                                }
+                                let d = speak_sentence(ctx, &s).await?;
+                                audio_total += d;
+                                if !d.is_zero() {
+                                    audio_started.get_or_insert_with(tokio::time::Instant::now);
+                                }
+                                spoken.push_str(&s);
+                                spoken.push(' ');
+                                round_spoken.push_str(&s);
+                                round_spoken.push(' ');
+                            }
                         }
-                        let d = speak_sentence(ctx, &s).await?;
-                        audio_total += d;
-                        if !d.is_zero() {
-                            audio_started.get_or_insert_with(tokio::time::Instant::now);
+                        LlmEvent::ToolCalls(c) => {
+                            calls = Some(c);
                         }
-                        spoken.push_str(&s);
-                        spoken.push(' ');
-                        round_spoken.push_str(&s);
-                        round_spoken.push(' ');
+                        LlmEvent::Error(e) => {
+                            if let Some(call) = repair_failed_tool_call(&e, &round_tools) {
+                                tracing::warn!(
+                                    "LLM: исправляю вызов инструмента {} после ошибки схемы",
+                                    call.function.name
+                                );
+                                calls = Some(vec![call]);
+                                break;
+                            }
+                            bail!("{e}");
+                        }
+                        LlmEvent::Done { .. } => break,
                     }
                 }
-                LlmEvent::ToolCalls(c) => {
-                    calls = Some(c);
+            }
+            Err(e) => {
+                let text = format!("{e:#}");
+                if let Some(call) = repair_failed_tool_call(&text, &round_tools) {
+                    tracing::warn!(
+                        "LLM: исправляю вызов инструмента {} после HTTP-ошибки",
+                        call.function.name
+                    );
+                    calls = Some(vec![call]);
+                } else {
+                    return Err(e).context("LLM");
                 }
-                LlmEvent::Error(e) => bail!("{e}"),
-                LlmEvent::Done { .. } => break,
             }
         }
         if let Some(s) = chunker.flush() {
@@ -325,6 +351,81 @@ pub async fn run_turn(
         control,
         not_heard: false,
     })
+}
+
+/// Достаёт из ошибки Groq сгенерированный вызов инструмента и приводит его
+/// к схеме, которую реально принимает реестр. Модель иногда пишет
+/// `music.play`, `youtube.search` или `web_find`; это не повод терять ход
+/// диалога и показывать пользователю «что-то пошло не так».
+fn repair_failed_tool_call(error: &str, allowed: &[ToolDefinition]) -> Option<ToolCall> {
+    if allowed.is_empty()
+        || (!error.contains("tool_use_failed") && !error.contains("did not match schema"))
+    {
+        return None;
+    }
+    let start = error.find('{')?;
+    let body: Value = serde_json::from_str(error[start..].trim()).ok()?;
+    let generated = body
+        .pointer("/error/failed_generation")
+        .or_else(|| body.get("failed_generation"))?;
+    let generated: Value = match generated {
+        Value::String(s) => serde_json::from_str(s).ok()?,
+        v => v.clone(),
+    };
+    let raw_name = generated.get("name")?.as_str()?;
+    let raw_args = generated
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let (name, args) = normalize_tool_call(raw_name, raw_args)?;
+    if !allowed.iter().any(|t| t.function.name == name) {
+        return None;
+    }
+    Some(ToolCall {
+        id: format!("repair_{name}"),
+        kind: "function".into(),
+        function: FunctionCall {
+            name,
+            arguments: args.to_string(),
+        },
+    })
+}
+
+/// Приводит имя и аргументы к точной схеме инструмента. Поддерживаются
+/// только известные синонимы, чтобы ошибка модели не превратилась в
+/// неожиданное действие.
+fn normalize_tool_call(raw_name: &str, raw_args: Value) -> Option<(String, Value)> {
+    let args = match raw_args {
+        Value::String(s) => serde_json::from_str(&s).ok()?,
+        v => v,
+    };
+    let mut map = args.as_object()?.clone();
+    let (base, suffix) = raw_name.split_once('.').unwrap_or((raw_name, ""));
+    let name = match base {
+        "spotify" | "music" => "music",
+        "youtube" => "youtube",
+        "web_find" => "web_search",
+        _ => base,
+    };
+    if name == "web_search" && !map.contains_key("query") {
+        for key in ["pattern", "q", "text", "search"] {
+            if let Some(v) = map.remove(key) {
+                map.insert("query".into(), v);
+                break;
+            }
+        }
+    }
+    if (name == "music" || name == "youtube") && !map.contains_key("action") {
+        let action = if !suffix.is_empty() {
+            suffix
+        } else if name == "music" {
+            "play"
+        } else {
+            "search"
+        };
+        map.insert("action".into(), json!(action));
+    }
+    Some((name.to_owned(), Value::Object(map)))
 }
 
 /// Ограничивает суммарный размер результатов инструментов в контексте.
@@ -663,6 +764,46 @@ mod tests {
             assert!(!is_stop_phrase(s), "{s}");
         }
     }
+
+    fn tool_defs() -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition::new("music", "", json!({})),
+            ToolDefinition::new("youtube", "", json!({})),
+            ToolDefinition::new("web_search", "", json!({})),
+        ]
+    }
+
+    #[test]
+    fn repairs_music_and_youtube_tool_names() {
+        let error = r#"LLM: gpt: HTTP 400 Bad Request: {"error":{"code":"tool_use_failed","failed_generation":"{\"name\": \"music.play\", \"arguments\": {\"query\":\"Битые огурцы\"}}"}}"#;
+        let call = repair_failed_tool_call(error, &tool_defs()).expect("music.play");
+        assert_eq!(call.function.name, "music");
+        let args: Value = serde_json::from_str(&call.function.arguments).unwrap();
+        assert_eq!(args["action"], "play");
+        assert_eq!(args["query"], "Битые огурцы");
+
+        let error = r#"LLM: gpt: HTTP 400 Bad Request: {"error":{"code":"tool_use_failed","failed_generation":"{\"name\": \"youtube.search\", \"arguments\": {\"query\":\"подкаст\",\"limit\":5}}"}}"#;
+        let call = repair_failed_tool_call(error, &tool_defs()).expect("youtube.search");
+        assert_eq!(call.function.name, "youtube");
+        let args: Value = serde_json::from_str(&call.function.arguments).unwrap();
+        assert_eq!(args["action"], "search");
+        assert_eq!(args["limit"], 5);
+    }
+
+    #[test]
+    fn repairs_web_find_without_executing_unknown_tool() {
+        let error = r#"LLM: gpt: HTTP 400 Bad Request: {"error":{"code":"tool_use_failed","failed_generation":"{\"name\": \"web_find\", \"arguments\": {\"pattern\":\"Тихорецк\"}}"}}"#;
+        let call = repair_failed_tool_call(error, &tool_defs()).expect("web_find");
+        assert_eq!(call.function.name, "web_search");
+        let args: Value = serde_json::from_str(&call.function.arguments).unwrap();
+        assert_eq!(args["query"], "Тихорецк");
+
+        assert!(repair_failed_tool_call(
+            r#"{"error":{"code":"tool_use_failed","failed_generation":"{\"name\":\"run_code\",\"arguments\":{}}"}}"#,
+            &tool_defs()
+        )
+        .is_none());
+    }
 }
 
 #[cfg(test)]
@@ -820,6 +961,36 @@ mod integration_tests {
         String::from_utf8_lossy(&buf[header_end..(header_end + len).min(buf.len())]).into_owned()
     }
 
+    /// Первый запрос получает HTTP 400 `tool_use_failed`, второй — обычный
+    /// ответ. Проверяет, что ход не обрывается и исправленный вызов
+    /// инструмента действительно выполняется.
+    async fn serve_tool_error_then_answer() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut sock).await;
+            let body = r#"{"error":{"code":"tool_use_failed","failed_generation":"{\"name\":\"time\",\"arguments\":{}}"}}"#;
+            let resp = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut sock).await;
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Сейчас полдень.\"}}]}\n\ndata: [DONE]\n\n";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        });
+        format!("http://{addr}")
+    }
+
     /// Отвечает на запросы по порядку; если схемы инструментов нет, а в
     /// истории остались `tool_calls`/`role=tool`, возвращает ту же ошибку,
     /// что и Groq: HTTP 200 с `tool_use_failed` внутри SSE.
@@ -923,6 +1094,19 @@ mod integration_tests {
         assert!(out.spoken.contains("полдень"));
         assert_eq!(out.messages.len(), 2);
         assert_eq!(out.messages[1].content.as_deref(), Some("Сейчас полдень."));
+    }
+
+    #[tokio::test]
+    async fn repaired_tool_call_does_not_abort_the_turn() {
+        let url = serve_tool_error_then_answer().await;
+        let c = ctx(url);
+        let out = run_turn(&c, vec![ChatMessage::system("s")], vec![0; 1600])
+            .await
+            .unwrap();
+        assert!(out.spoken.contains("полдень"), "{}", out.spoken);
+        assert!(out.messages.iter().any(|m| {
+            m.role == petrovich_core::chat::Role::Tool && m.name.as_deref() == Some("time")
+        }));
     }
 
     #[tokio::test]

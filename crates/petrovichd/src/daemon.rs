@@ -649,6 +649,39 @@ pub async fn run(loaded: LoadedConfig) -> Result<()> {
     Ok(())
 }
 
+/// Короткая причина для озвучки. Технический текст остаётся в журнале, а
+/// пользователь слышит, что именно сломалось, а не только сигнал ошибки.
+fn error_reason(error: &str) -> Option<&'static str> {
+    let e = error.to_lowercase();
+    if e.contains("отмен") {
+        return None;
+    }
+    if e.contains("tool_use_failed") || e.contains("did not match schema") {
+        Some("Модель ошиблась в вызове инструмента. Повторите, пожалуйста.")
+    } else if e.contains("распознаван") {
+        Some("Не смог распознать речь. Повторите, пожалуйста.")
+    } else if e.contains("тайм-аут")
+        || e.contains("timeout")
+        || e.contains("время ответа")
+        || e.contains("молчит дольше")
+    {
+        Some("Сервис не ответил вовремя.")
+    } else if e.contains("tts") || e.contains("озвуч") {
+        Some("Не смог озвучить ответ.")
+    } else if e.contains("llm") || e.contains("модел") {
+        Some("Не смог получить ответ от модели.")
+    } else if e.contains("connect")
+        || e.contains("dns")
+        || e.contains("network")
+        || e.contains("сеть")
+        || e.contains("связ")
+    {
+        Some("Нет связи с сервисом.")
+    } else {
+        Some("Запрос не выполнен из-за внутренней ошибки.")
+    }
+}
+
 impl App {
     /// Раз в секунду обновляет экран позицией воспроизведения. Событие
     /// держится `indication.hold_s`, поэтому без обновления индикатор
@@ -778,13 +811,19 @@ impl App {
             return;
         }
         tracing::info!("активация: начинаю слушать");
+        // Приглушаем только то, что реально звучит. Иначе команда
+        // «включи музыку» запускала бы её уже на 20% громкости.
         if let Some(yt) = &self.youtube {
-            yt.duck();
+            if yt.is_playing() {
+                yt.duck();
+            }
         }
         // Музыка идёт мимо AEC-референса, поэтому без приглушения STT
         // слышит её вместо пользователя и превращает в мусорный запрос.
         if let Some(music) = &self.music {
-            music.duck();
+            if music.is_playing().unwrap_or(false) {
+                music.duck();
+            }
         }
         let _ = self.ui.send(UiEvent::Notice(UiNotice::Listening));
         if self.dialog.wake_chime {
@@ -1118,6 +1157,12 @@ impl App {
                     tokio::time::Instant::now() + Duration::from_millis(700);
                 if let Some(yt) = &self.youtube {
                     yt.unduck();
+                }
+                if let Some(music) = &self.music {
+                    music.unduck();
+                }
+                if let Some(reason) = error_reason(&e) {
+                    self.announce_now(reason);
                 }
                 self.enter_listening(true);
             }
@@ -1600,5 +1645,22 @@ mod deadline_tests {
         assert_eq!(stop_target(Mode::Listening, false), Assistant);
         assert_eq!(stop_target(Mode::Idle, true), Media);
         assert_eq!(stop_target(Mode::Idle, false), Nothing);
+    }
+
+    #[test]
+    fn speaks_the_reason_instead_of_a_bare_error_chime() {
+        assert_eq!(
+            error_reason("LLM: tool_use_failed"),
+            Some("Модель ошиблась в вызове инструмента. Повторите, пожалуйста.")
+        );
+        assert_eq!(
+            error_reason("распознавание: HTTP 503"),
+            Some("Не смог распознать речь. Повторите, пожалуйста.")
+        );
+        assert_eq!(
+            error_reason("превышено время ответа"),
+            Some("Сервис не ответил вовремя.")
+        );
+        assert_eq!(error_reason("поручение отменено"), None);
     }
 }
