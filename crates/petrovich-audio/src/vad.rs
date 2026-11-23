@@ -11,6 +11,11 @@ pub const FRAME_MS: u64 = 20;
 const NOISE_WINDOW_MS: u64 = 2_000;
 /// Гистограмма уровня с шагом 1 дБ: -90..=0 dBFS.
 const NOISE_BINS: usize = 91;
+/// Сколько «тихих» кадров гасит один кадр выше порога. Фон в комнате
+/// мигает отдельными щелчками; если сбрасывать тишину в ноль на каждом
+/// щелчке, фраза не закрывается минутами. Ослабление оставляет длинную
+/// человеческую паузу паузой, но не даёт шуму удерживать сессию.
+const SILENCE_DECAY: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Utterance {
@@ -120,13 +125,14 @@ impl Vad {
     /// После активации порог временно снижается на `activation_boost_db`:
     /// человек уже стоит рядом с колонкой и не должен кричать.
     ///
-    /// Послабление никогда не опускает порог до самой шумовой полки: иначе
-    /// случайные колебания фона становятся «речью», и ассистент зацикливается
-    /// на пустых распознаваниях. Три децибела над полкой — минимум, при
-    /// котором ещё слышна тихая речь, но фон уже не срабатывает.
+    /// Послабление никогда не опускает порог ниже шумовой полки с обычным
+    /// запасом `energy_margin_db`. Иначе щелчки фона проходят как речь:
+    /// начатая «фраза» не закрывается, VAD висит до `max_utterance_ms`,
+    /// а STT получает десятки секунд шума. Послабление помогает только в
+    /// тихой комнате, где порог держит абсолютный предел, а не фон.
     pub fn threshold_db(&self) -> f32 {
         let base = (self.noise_db + self.margin_db).max(self.absolute_db);
-        let floor = self.noise_db + 3.0;
+        let floor = self.noise_db + self.margin_db;
         (base - self.boost_db).max(floor).max(-90.0)
     }
 
@@ -231,7 +237,9 @@ impl Vad {
         self.speech.extend_from_slice(frame);
         self.speech_frames += 1;
         if loud {
-            self.below = 0;
+            // Не обнуляем счётчик: одиночный щелчок фона не должен
+            // отбрасывать уже накопленную паузу в начало.
+            self.below = self.below.saturating_sub(SILENCE_DECAY);
             self.voiced_frames += 1;
         } else {
             self.below += 1;
@@ -361,7 +369,7 @@ mod tests {
         (0..n)
             .map(|_| {
                 *seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-                let v = ((*seed >> 16) as f32 / 32768.0 - 0.5) * 2.0 * amp;
+                let v = ((*seed >> 16) as f32 / 65536.0 - 0.5) * 2.0 * amp;
                 (v * 32767.0) as i16
             })
             .collect()
@@ -482,7 +490,7 @@ mod tests {
     fn quiet_vad() -> Vad {
         let mut v = Vad::new(16_000, 100, 300, 150, 800, 300, 4_000, 6.0, 0, -62.0);
         let mut seed = 11;
-        v.observe_background(&noise(32_000, 0.0025, &mut seed));
+        v.observe_background(&noise(32_000, 0.0003, &mut seed));
         v
     }
 
@@ -493,15 +501,20 @@ mod tests {
         let mut v = quiet_vad();
         assert!(v.threshold_db() < -38.0, "{}", v.threshold_db());
         let mut out = Vec::new();
-        out.extend(v.push(&tone(12_800, 440.0, 0.008)));
+        out.extend(v.push(&tone(12_800, 440.0, 0.0009)));
         out.extend(v.push(&vec![0; 12_800]));
         assert!(out.is_empty(), "тихая речь не должна проходить без boost");
 
         let mut v = quiet_vad();
         v.arm_activation_boost();
-        assert!(v.threshold_db() < -44.0, "{}", v.threshold_db());
+        assert!(
+            v.threshold_db() < -66.0,
+            "{} (noise {})",
+            v.threshold_db(),
+            v.noise_db()
+        );
         let mut out = Vec::new();
-        out.extend(v.push(&tone(12_800, 440.0, 0.008)));
+        out.extend(v.push(&tone(12_800, 440.0, 0.0009)));
         out.extend(v.push(&vec![0; 12_800]));
         assert_eq!(out.len(), 1, "boost должен поймать тихую речь");
     }
@@ -515,15 +528,15 @@ mod tests {
         assert_eq!(v.boost_db(), 0.0);
     }
 
-    /// Даже максимальное послабление не опускает порог до уровня фона:
+    /// Послабление не опускает порог ниже шумовой полки с рабочим запасом:
     /// иначе шумовые колебания становятся «речью» и диалог зацикливается.
     #[test]
     fn boost_never_reaches_noise_floor() {
         let mut v = quiet_vad();
         v.arm_activation_boost();
         assert!(
-            v.threshold_db() >= v.noise_db() + 2.9,
-            "порог {} ниже полки {} + 3",
+            v.threshold_db() >= v.noise_db() + 5.9,
+            "порог {} ниже полки {} + 6",
             v.threshold_db(),
             v.noise_db()
         );
@@ -540,9 +553,41 @@ mod tests {
         assert!(v.in_speech());
         // Уровень чуть выше старого «порога удержания», но ниже порога
         // запуска: раньше он считался речью, теперь должен закрыть фразу.
-        out.extend(v.push(&tone(8_000, 440.0, 0.006)));
+        out.extend(v.push(&tone(8_000, 440.0, 0.00015)));
         assert!(!v.in_speech(), "фон удержал фразу");
         let _ = out;
+    }
+
+    /// Фон с отдельными щелчками выше порога не должен удерживать фразу:
+    /// иначе после ответа ассистент слушает комнату до max_utterance и
+    /// уходит в бесконечные пустые распознавания.
+    #[test]
+    fn intermittent_noise_does_not_hold_the_phrase() {
+        let mut v = Vad::new(
+            16_000, 100, 1_200, 800, 800, 600, 12_000, 6.0, 0, -62.0,
+        );
+        let mut seed = 19;
+        v.observe_background(&noise(32_000, 0.0025, &mut seed));
+        v.arm_activation_boost();
+        let mut out = Vec::new();
+        out.extend(v.push(&tone(16_000, 440.0, 0.3))); // 1 с речи
+        assert!(v.in_speech());
+        // 2 с фона: 300 мс тишины и короткий щелчок выше порога.
+        for _ in 0..6 {
+            out.extend(v.push(&vec![0; 4_800]));
+            out.extend(v.push(&tone(640, 440.0, 0.3)));
+        }
+        assert_eq!(out.len(), 1, "щелчки фона удержали фразу");
+        assert!(
+            out[0].speech_ms < 3_500,
+            "фраза растянулась: {} мс",
+            out[0].speech_ms
+        );
+        assert!(
+            out[0].voiced_ms >= 900,
+            "потеряна речь: {} мс",
+            out[0].voiced_ms
+        );
     }
 
     #[test]

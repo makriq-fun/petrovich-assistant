@@ -965,6 +965,29 @@ impl App {
                         }
                         continue;
                     }
+                    // В follow-up окно открыто без слова активации, но
+                    // человек всё равно может начать с «Петрович». Раньше
+                    // wakeword здесь не работал: имя уходило в STT, после
+                    // strip оставалась пустая фраза, и окно закрывалось.
+                    if self.follow_up {
+                        let hit = self
+                            .wake
+                            .as_mut()
+                            .is_some_and(|w| !w.push(&frame.samples, now).is_empty());
+                        if hit {
+                            tracing::info!("слово активации в follow-up: продлеваю окно");
+                            let now = tokio::time::Instant::now();
+                            let ms = self.dialog.follow_up_ms;
+                            self.follow_deadline = Some(now + Duration::from_millis(ms));
+                            self.hard_deadline = Some(
+                                now + Duration::from_millis(
+                                    ms.saturating_add(self.max_utterance_ms)
+                                        .saturating_add(1_000),
+                                ),
+                            );
+                            self.vad.arm_activation_boost();
+                        }
+                    }
                     let was_in_speech = self.vad.in_speech();
                     let utts = self.vad.push(&frame.samples);
                     if let Some(d) = listen_deadline(
@@ -1091,8 +1114,11 @@ impl App {
         match ev.result {
             Ok(outcome) => {
                 if outcome.not_heard {
-                    tracing::debug!("ход: речь не распознана, слушаю дальше");
-                    self.enter_listening(true);
+                    // Шум в комнате легко даёт «фразу» и пустой STT.
+                    // Повторное Listening здесь замыкало бесконечный цикл:
+                    // шум → пустое распознавание → снова Listening.
+                    tracing::info!("ход: речь не распознана, возвращаюсь в ожидание");
+                    self.enter_idle();
                     return;
                 }
                 tracing::info!(
@@ -1110,8 +1136,8 @@ impl App {
                     self.last_answer = outcome.spoken.clone();
                 }
                 if outcome.spoken.is_empty() && outcome.control.is_none() {
-                    self.announce_now("Не понял. Повторите, пожалуйста.");
-                    self.enter_listening(true);
+                    self.announce_now("Не понял. Скажите «Петрович» и повторите.");
+                    self.enter_idle();
                     return;
                 }
                 match outcome.control {
@@ -1197,7 +1223,9 @@ impl App {
                 if let Some(reason) = error_reason(&e) {
                     self.announce_now(reason);
                 }
-                self.enter_listening(true);
+                // Не возвращаемся в Listening после ошибки: без нового
+                // слова активации шум снова запускал пустой ход.
+                self.enter_idle();
             }
         }
     }
@@ -1291,12 +1319,40 @@ impl App {
     }
 
     fn change_volume(&mut self, delta: i32) {
+        let before = self.volume.get().ok().map(|s| s.percent);
         match self.volume.step(delta) {
             Ok(s) => {
                 let _ = self.ui.send(UiEvent::Volume(s.percent));
+                if before != Some(s.percent) {
+                    self.volume_tick(delta > 0);
+                }
             }
             Err(e) => tracing::warn!("громкость: {e}"),
         }
+    }
+
+    /// Короткое подтверждение изменения громкости. Звук не ставится поверх
+    /// ответа или объявления: иначе тик доиграл бы уже после речи и сбивал
+    /// с толку. Тик звучит на каждом реальном шаге, включая кнопки и
+    /// быстрые голосовые команды.
+    fn volume_tick(&mut self, up: bool) {
+        if !self.dialog.state_chimes {
+            return;
+        }
+        if self.announcement.as_ref().is_some_and(|t| !t.is_finished()) {
+            return;
+        }
+        if self.mode == Mode::Thinking && self.playback.is_playing() {
+            return;
+        }
+        let sound = if up {
+            ChimeSound::VolumeUp
+        } else {
+            ChimeSound::VolumeDown
+        };
+        let _ = self.chime.play(sound);
+        // Свой тик не должен распознаваться как быстрая команда.
+        self.command_ignore_until = tokio::time::Instant::now() + Duration::from_millis(350);
     }
 
     fn on_command(&mut self, command: Command) {
@@ -1396,6 +1452,10 @@ impl App {
                     }
                 }
                 if !failed {
+                    // Позиция трека больше не актуальна: без явного события
+                    // экран держал бы её до истечения indication.hold_s и
+                    // анимация паузы терялась бы на фоне «играет».
+                    let _ = self.ui.send(UiEvent::PlaybackStopped);
                     self.feedback(ChimeSound::Stopped, UiNotice::Stopped);
                 }
             }

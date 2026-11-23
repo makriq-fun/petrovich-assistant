@@ -4,7 +4,7 @@
 //! он получает 4 микрофона и 2 аппаратных референса и отдаёт 16 кГц «omni».
 //! Иначе микрофоны смешиваются, прореживаются и проходят собственный NLMS.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -48,13 +48,23 @@ pub enum PlaybackMsg {
     },
 }
 
+/// Запас после расчётного конца очереди: ALSA держит до 200 мс звука в
+/// буфере, и `is_playing` не должен сказать «тихо» раньше него. Без этого
+/// запаса VAD услышал бы хвост собственного сигнала.
+const PLAYBACK_TAIL_MS: u64 = 200;
+
 /// Разделяемый дескриптор вывода. Поколение отсекает старые буферы после
 /// прерывания: они не должны звучать после новой команды.
 #[derive(Clone)]
 pub struct PlaybackHandle {
     tx: mpsc::UnboundedSender<PlaybackMsg>,
     generation: Arc<AtomicU64>,
-    playing: Arc<AtomicBool>,
+    /// Конец поставленного в очередь звука в миллисекундах от `epoch`.
+    /// 0 — очередь пуста. Раньше признак `playing` снимался только в
+    /// `stop`/`wait_idle`, поэтому после сигнала активации он оставался
+    /// истинным навсегда, и VAD не получал ни одного кадра.
+    end_ms: Arc<AtomicU64>,
+    epoch: std::time::Instant,
 }
 
 impl PlaybackHandle {
@@ -64,8 +74,13 @@ impl PlaybackHandle {
         Self {
             tx,
             generation: Arc::new(AtomicU64::new(0)),
-            playing: Arc::new(AtomicBool::new(false)),
+            end_ms: Arc::new(AtomicU64::new(0)),
+            epoch: std::time::Instant::now(),
         }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.epoch.elapsed().as_millis() as u64
     }
 
     /// Ставит PCM в очередь; возвращает estimated длительность звучания.
@@ -75,7 +90,7 @@ impl PlaybackHandle {
         }
         let duration = std::time::Duration::from_secs_f64(samples.len() as f64 / f64::from(rate));
         let generation = self.generation.load(Ordering::Acquire);
-        self.playing.store(true, Ordering::Release);
+        schedule_end(&self.end_ms, self.now_ms(), duration.as_millis() as u64);
         let _ = self.tx.send(PlaybackMsg::Pcm {
             generation,
             samples,
@@ -92,12 +107,13 @@ impl PlaybackHandle {
     /// Немедленно прерывает звук; всё, что уже в очереди, будет отброшено.
     pub fn stop(&self) {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.playing.store(false, Ordering::Release);
+        self.end_ms.store(0, Ordering::Release);
         let _ = self.tx.send(PlaybackMsg::Stop { generation });
     }
 
     pub fn is_playing(&self) -> bool {
-        self.playing.load(Ordering::Acquire)
+        let end = self.end_ms.load(Ordering::Acquire);
+        end != 0 && self.now_ms() < end.saturating_add(PLAYBACK_TAIL_MS)
     }
 
     /// Ждёт, пока очередь и ALSA-буфер действительно доиграют.
@@ -116,6 +132,21 @@ impl PlaybackHandle {
 
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+}
+
+/// Продлевает расчётный конец очереди на длительность нового куска.
+/// Последовательные куски ставятся встык; если очередь уже отыграла,
+/// отсчёт начинается от текущего момента.
+fn schedule_end(end_ms: &AtomicU64, now_ms: u64, duration_ms: u64) {
+    let mut prev = end_ms.load(Ordering::Acquire);
+    loop {
+        let start = prev.max(now_ms);
+        let next = start.saturating_add(duration_ms.max(1));
+        match end_ms.compare_exchange(prev, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(actual) => prev = actual,
+        }
     }
 }
 
@@ -188,8 +219,8 @@ impl AudioEngine {
 
         let (playback_tx, mut playback_rx) = mpsc::unbounded_channel::<PlaybackMsg>();
         let generation = Arc::new(AtomicU64::new(0));
-        let playing = Arc::new(AtomicBool::new(false));
-        let playing_thread = Arc::clone(&playing);
+        let end_ms = Arc::new(AtomicU64::new(0));
+        let end_thread = Arc::clone(&end_ms);
         let gen_thread = Arc::clone(&generation);
         let playback_rate = cfg.playback_rate;
         let mut playback_pcm = playback;
@@ -201,7 +232,7 @@ impl AudioEngine {
                     match msg {
                         PlaybackMsg::Stop { .. } => {
                             playback_pcm.stop();
-                            playing_thread.store(false, Ordering::Release);
+                            end_thread.store(0, Ordering::Release);
                             resampler = None;
                         }
                         PlaybackMsg::Drain {
@@ -212,7 +243,7 @@ impl AudioEngine {
                                 if let Err(e) = playback_pcm.drain() {
                                     tracing::warn!("вывод ALSA: {e:#}");
                                 }
-                                playing_thread.store(false, Ordering::Release);
+                                end_thread.store(0, Ordering::Release);
                             }
                             let _ = done.send(());
                         }
@@ -248,7 +279,7 @@ impl AudioEngine {
                             }
                             if g != gen_thread.load(Ordering::Acquire) {
                                 playback_pcm.stop();
-                                playing_thread.store(false, Ordering::Release);
+                                end_thread.store(0, Ordering::Release);
                             }
                         }
                     }
@@ -266,7 +297,8 @@ impl AudioEngine {
             playback: PlaybackHandle {
                 tx: playback_tx,
                 generation,
-                playing,
+                end_ms,
+                epoch: std::time::Instant::now(),
             },
             volume,
         })
@@ -550,6 +582,37 @@ mod tests {
             (x.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / x.len() as f64).sqrt()
         };
         assert!(rms(clean) < rms(raw) * 0.5, "{} / {}", rms(clean), rms(raw));
+    }
+
+    #[test]
+    fn queued_audio_extends_the_deadline_and_gap_restarts_it() {
+        let end = AtomicU64::new(0);
+        schedule_end(&end, 100, 50);
+        assert_eq!(end.load(Ordering::Acquire), 150);
+        schedule_end(&end, 120, 30);
+        assert_eq!(end.load(Ordering::Acquire), 180);
+        schedule_end(&end, 500, 40);
+        assert_eq!(end.load(Ordering::Acquire), 540);
+    }
+
+    #[test]
+    fn playback_flag_clears_when_the_deadline_passes() {
+        let mut h = PlaybackHandle::detached();
+        assert!(!h.is_playing());
+        h.play_pcm(vec![0; 240], 24_000);
+        assert!(
+            h.is_playing(),
+            "сразу после постановки звук считается играющим"
+        );
+        // Очередь давно отыграла: признак не должен залипать.
+        h.epoch = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        h.end_ms.store(1, Ordering::Release);
+        assert!(!h.is_playing());
+        h.epoch = std::time::Instant::now();
+        h.play_pcm(vec![0; 240], 24_000);
+        assert!(h.is_playing());
+        h.stop();
+        assert!(!h.is_playing());
     }
 
     #[test]

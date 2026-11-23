@@ -319,7 +319,16 @@ pub fn notice_masks(notice: petrovich_core::events::UiNotice, t: f32) -> [u8; 4]
     use petrovich_core::events::UiNotice;
     match notice {
         UiNotice::Done => [DIGITS[8]; 4],
-        UiNotice::Stopped => [0x40; 4], // «----»
+        UiNotice::Stopped => {
+            // Пауза: две «чёрточки» бегут по экрану. Раньше здесь был
+            // статичный кадр, и остановку было не отличить от зависшего
+            // индикатора. Четыре фазы по 220 мс дают заметное движение.
+            let phase = ((t / 0.22) as usize) % 4;
+            let mut out = [0u8; 4];
+            out[phase] = 0x40;
+            out[(phase + 2) % 4] = 0x40;
+            out
+        }
         UiNotice::Cleared => [DIGITS[0]; 4],
         UiNotice::Error => [0x79; 4], // «EEEE»
         UiNotice::Alarm => {
@@ -504,9 +513,12 @@ mod tests {
     fn spinner_moves_over_time() {
         assert_eq!(spinner_masks(0.0)[0].count_ones(), 1);
         assert_eq!(spinner_masks(0.84)[1].count_ones(), 1);
-        assert_eq!(
-            notice_masks(petrovich_core::events::UiNotice::Stopped, 0.0),
-            [0x40; 4]
+        let stopped = notice_masks(petrovich_core::events::UiNotice::Stopped, 0.0);
+        assert_eq!(stopped, [0x40, 0, 0x40, 0]);
+        assert_ne!(
+            stopped,
+            notice_masks(petrovich_core::events::UiNotice::Stopped, 0.25),
+            "кадр паузы должен двигаться"
         );
     }
 

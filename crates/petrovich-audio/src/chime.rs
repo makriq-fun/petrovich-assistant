@@ -104,6 +104,11 @@ pub fn samples(sound: ChimeSound) -> Vec<i16> {
         ChimeSound::Done => &[(523.25, 120, 0.52, 2.2), (392.0, 180, 0.48, 2.4)],
         // Остановка: низкий двойной удар.
         ChimeSound::Stopped => &[(246.94, 150, 0.52, 2.5), (196.0, 260, 0.48, 2.7)],
+        // Громкость: один очень короткий тик, а не мелодия. Выше — вверх,
+        // ниже — вниз; так шаг слышно на любом уровне и не путается с
+        // сигналами активации/ответа.
+        ChimeSound::VolumeUp => &[(1_046.5, 38, 0.72, 1.6)],
+        ChimeSound::VolumeDown => &[(523.25, 38, 0.72, 1.6)],
         // Очистка: восходящее арпеджио E-G-C, без верхней октавы.
         ChimeSound::Cleared => &[
             (329.63, 110, 0.48, 2.4),
@@ -267,6 +272,8 @@ mod tests {
             ChimeSound::Heard,
             ChimeSound::Done,
             ChimeSound::Stopped,
+            ChimeSound::VolumeUp,
+            ChimeSound::VolumeDown,
             ChimeSound::Cleared,
             ChimeSound::Timer,
             ChimeSound::Alarm,

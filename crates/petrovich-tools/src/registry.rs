@@ -701,6 +701,11 @@ impl ToolContext {
             "volume" => {
                 let action = args.get("action").and_then(Value::as_str).unwrap_or("get");
                 let mut clamp_note = String::new();
+                let before = if action == "get" {
+                    None
+                } else {
+                    Some(self.volume.get()?.percent)
+                };
                 let status = match action {
                     "set" => {
                         let v = args
@@ -718,8 +723,16 @@ impl ToolContext {
                     "get" => self.volume.get()?,
                     _ => bail!("volume: неизвестное действие {action}"),
                 };
-                if action != "get" {
+                if let Some(before) = before {
                     let _ = self.ui.send(UiEvent::Volume(status.percent));
+                    if status.percent != before {
+                        let sound = if status.percent > before {
+                            ChimeSound::VolumeUp
+                        } else {
+                            ChimeSound::VolumeDown
+                        };
+                        let _ = self.chime.play(sound);
+                    }
                 }
                 Ok(ToolResult::text(format!(
                     "Громкость {}%{}.{clamp_note}",

@@ -310,6 +310,13 @@ async fn run_ui(
 
         if let Some(c) = clock.as_mut().filter(|c| c.enabled()) {
             c.set_brightness((clock_brightness * light_factor).clamp(0.0, 1.0));
+            // Подтверждение (пауза, ошибка, эмоция) важнее фоновых
+            // показателей: иначе при звучащей музыке «----» при паузе
+            // пряталось за позицией трека и экран выглядел зависшим.
+            let notice_masks = notice.and_then(|(n, at)| {
+                let masks = clock::notice_masks(n, now.duration_since(at).as_secs_f32());
+                (masks != [0; 4]).then_some(masks)
+            });
             let r = if now < volume_until {
                 c.show_volume(volume_percent)
             } else if now < alarm_until {
@@ -317,6 +324,9 @@ async fn run_ui(
                     Some((hour, minute)) => c.show_time_level(hour, minute, 0),
                     None => clock_time(c, state, t),
                 }
+            } else if let Some(masks) = notice_masks {
+                let level = (f32::from(c.level()) * 0.6).round() as u8;
+                c.set_levels(&masks, 0, level)
             } else if state == VoiceState::Listening {
                 // Пока идёт запись, экран должен однозначно показывать
                 // «слушаю», даже если на нём ещё висит таймер, погода или
@@ -339,15 +349,6 @@ async fn run_ui(
                     c.show_position(*pos)
                 } else {
                     c.show_time_level(0, 0, 0)
-                }
-            } else if let Some((n, at)) = notice {
-                let elapsed = now.duration_since(at).as_secs_f32();
-                let masks = clock::notice_masks(n, elapsed);
-                if masks != [0; 4] {
-                    let level = (f32::from(c.level()) * 0.6).round() as u8;
-                    c.set_levels(&masks, 0, level)
-                } else {
-                    clock_time(c, state, t)
                 }
             } else if state == VoiceState::Thinking {
                 let masks = clock::spinner_masks(t);
