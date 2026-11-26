@@ -168,6 +168,8 @@ pub struct OpenAiStt {
     url: String,
     model: String,
     language: String,
+    /// Словарь-подсказка: имена и команды, которые модель должна слышать.
+    prompt: String,
     key: Option<String>,
     retries: u8,
     timeout: Duration,
@@ -180,6 +182,7 @@ impl OpenAiStt {
             url: endpoint(&cfg.base_url, "/audio/transcriptions"),
             model: cfg.model.clone(),
             language: cfg.language.clone(),
+            prompt: cfg.prompt.clone(),
             key: secrets
                 .get(&cfg.api_key_env)
                 .filter(|k| !k.is_empty())
@@ -208,6 +211,9 @@ impl Stt for OpenAiStt {
                 .text("temperature", "0");
             if !self.language.is_empty() {
                 form = form.text("language", self.language.clone());
+            }
+            if !self.prompt.is_empty() {
+                form = form.text("prompt", self.prompt.clone());
             }
             let mut req = self.http.post(&self.url).multipart(form);
             if let Some(key) = &self.key {

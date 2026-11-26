@@ -109,6 +109,9 @@ base_url = "https://api.openai.com/v1"
 model = "whisper-1"
 api_key_env = "PETROVICH_STT_API_KEY"
 language = "ru"
+# Словарь-подсказка для Whisper: имена и команды, которые звучат каждый
+# день. Без неё модель пишет «Петмович» и «Рэки». Пусто — без подсказки.
+prompt = "Петрович, включи музыку, поставь таймер, будильник, какая погода, громкость, следующий трек, пауза, стоп, Spotify, YouTube."
 timeout_ms = 30000
 retries = 2
 # Дополнительный корневой сертификат для self-hosted HTTPS (PEM).

@@ -219,6 +219,11 @@ impl Vad {
                     self.speech.extend_from_slice(frame);
                     self.speech_frames = 2;
                     self.voiced_frames = 2;
+                } else {
+                    // Первый громкий кадр — уже речь. Раньше он терялся, и
+                    // срезался начальный согласный: «Треки» распознавалось
+                    // как «Рэки», «Петрович» — как «Етрович».
+                    self.push_pre_roll(frame);
                 }
             } else {
                 self.above = 0;
@@ -451,6 +456,26 @@ mod tests {
         assert!(u.speech_ms >= 200);
         assert!(u.samples.len() > 16_000 / 10);
         assert!(u.samples.len() <= 16_000 * 2);
+    }
+
+    /// Первый громкий кадр — уже речь. Без него срезается начальный
+    /// согласный: «Треки» распознавалось как «Рэки».
+    #[test]
+    fn keeps_the_first_loud_frame() {
+        let mut v = Vad::new(16_000, 100, 300, 150, 800, 300, 2_000, 9.0, 200, -18.0);
+        let mut out = Vec::new();
+        out.extend(v.push(&vec![0; 3_200])); // 200 мс тишины — весь пре-ролл
+        out.extend(v.push(&tone(8_000, 440.0, 0.5)));
+        out.extend(v.push(&vec![0; 8_000]));
+        assert_eq!(out.len(), 1);
+        let first_loud = out[0]
+            .samples
+            .iter()
+            .position(|s| s.unsigned_abs() > 1_000)
+            .expect("речь не найдена");
+        // Пре-ролл — 3200 сэмплов. С исправлением первый кадр речи попадает
+        // в пре-ролл, и звук начинается раньше его конца.
+        assert!(first_loud < 3_200, "первый кадр речи потерян: {first_loud}");
     }
 
     #[test]

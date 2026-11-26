@@ -781,13 +781,26 @@ fn tts_test(loaded: &petrovich_core::LoadedConfig, text: &str, out: &Path) -> Re
         }
         Ok::<(), anyhow::Error>(())
     })?;
-    std::fs::write(out, &bytes)?;
-    let samples = bytes.len() / 2;
+    // TTS отдаёт сырой PCM. Пишем WAV: файл можно подать в stt-test и
+    // прослушать, а не гадать по байтам.
+    let mut samples: Vec<i16> = bytes
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    let channels = audio.channels.max(1) as usize;
+    if channels > 1 {
+        samples = samples
+            .chunks_exact(channels)
+            .map(|f| (f.iter().map(|v| i32::from(*v)).sum::<i32>() / channels as i32) as i16)
+            .collect();
+    }
+    let wav = petrovich_core::wav::encode_mono(audio.sample_rate, &samples);
+    std::fs::write(out, &wav)?;
     println!(
-        "TTS: {} байт, {:.2} с при {} Гц; файл {}",
-        bytes.len(),
-        samples as f64 / f64::from(audio.sample_rate),
+        "TTS: {:.2} с при {} Гц, {} канал(ов); файл {}",
+        samples.len() as f64 / f64::from(audio.sample_rate),
         audio.sample_rate,
+        channels,
         out.display()
     );
     Ok(())

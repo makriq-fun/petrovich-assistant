@@ -816,6 +816,11 @@ pub struct SttConfig {
     pub api_key_env: String,
     #[serde(default = "default_language")]
     pub language: String,
+    /// Подсказка распознаванию: имена и команды, которые модель должна
+    /// слышать чаще. Whisper учитывает её как контекст и реже перевирает
+    /// «Петрович», «Spotify», «таймер».
+    #[serde(default = "default_stt_prompt")]
+    pub prompt: String,
     #[serde(default = "default_http_timeout_ms")]
     pub timeout_ms: u64,
     #[serde(default = "default_retries")]
@@ -839,6 +844,7 @@ impl Default for SttConfig {
             model: default_stt_model(),
             api_key_env: default_stt_key_env(),
             language: default_language(),
+            prompt: default_stt_prompt(),
             timeout_ms: default_http_timeout_ms(),
             retries: default_retries(),
             command: Vec::new(),
@@ -859,6 +865,13 @@ fn default_stt_model() -> String {
 }
 fn default_stt_key_env() -> String {
     "PETROVICH_STT_API_KEY".into()
+}
+/// Словарь-подсказка для Whisper. Короткий список имён и команд, которые
+/// звучат каждый день: без него модель пишет «Петмович» и «Рэки».
+fn default_stt_prompt() -> String {
+    "Петрович, включи музыку, поставь таймер, будильник, какая погода, \
+     громкость, следующий трек, пауза, стоп, Spotify, YouTube."
+        .into()
 }
 fn default_language() -> String {
     "ru".into()
