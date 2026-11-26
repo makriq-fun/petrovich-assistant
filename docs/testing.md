@@ -74,7 +74,7 @@ python3 -m unittest discover -s installer/tests -v
 
 Рост даёт librespot и второй Symphonia (Spotify декодирует Ogg/Vorbis,
 YouTube — AAC). В простое без учётных данных Spotify не запускает сессию,
-ByeDPI-прокси и декодеры не создаются. Кэш librespot ограничен 16 МБ, TTS —
+ByeDPI-прокси и декодеры не создаются. Кэш librespot ограничен 8 МБ, TTS —
 32 фразами, журнал супервизора ротируется при старте при размере >2 МБ.
 Пиковая RAM при воспроизведении Spotify/YouTube на устройстве не измерена:
 для этого нужны реальные сеть, ALSA и аккаунт.

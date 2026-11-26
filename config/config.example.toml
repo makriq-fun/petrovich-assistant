@@ -78,8 +78,8 @@ activation_boost_ms = 10000
 [dialog]
 follow_up_ms = 5000
 listen_timeout_ms = 10000
-history_turns = 8
-history_chars = 12000
+history_turns = 6
+history_chars = 6000
 history_ttl_s = 900
 barge_in = true
 # Перебивание голосом поверх ответа; без надёжного AEC выключено.
@@ -125,7 +125,7 @@ api_key_env = "PETROVICH_LLM_API_KEY"
 # до перехода на fallback_models.
 api_key_envs = []
 temperature = 0.4
-max_tokens = 800
+max_tokens = 2000
 # Для потокового ответа это тайм-аут ожидания очередного фрагмента, а не
 # всего ответа: длинная, но живая речь не обрывается.
 timeout_ms = 60000
@@ -252,7 +252,7 @@ access_token_env = "PETROVICH_SPOTIFY_TOKEN"
 client_id = ""
 client_secret_env = "PETROVICH_SPOTIFY_CLIENT_SECRET"
 market = "RU"
-# Пусто — <state_dir>/spotify. Кэш librespot ограничен 16 МБ.
+# Пусто — <state_dir>/spotify. Кэш librespot ограничен 8 МБ.
 # cache_dir = "/data/petrovich/state/spotify"
 bitrate = 160
 search_limit = 10

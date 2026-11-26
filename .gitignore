@@ -11,3 +11,4 @@
 __pycache__/
 .venv/
 /.local/
+/target-armv7/

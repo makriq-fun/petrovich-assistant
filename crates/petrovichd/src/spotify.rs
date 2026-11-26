@@ -7,7 +7,7 @@
 //! только access token, есть резервный поиск Tavily по ссылкам open.spotify.com.
 //! librespot умеет проигрывать контекст, но не искать.
 
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -513,6 +513,14 @@ pub struct Spotify {
     duck_depth: Arc<Mutex<u32>>,
     saved: Arc<Mutex<Option<SavedSession>>>,
     saved_path: Option<std::path::PathBuf>,
+    /// Задача Connect завершилась: канал команд закрыт, сессия мертва.
+    /// Сторож перезапускает модуль, иначе Spotify молчит до перезапуска
+    /// демона.
+    dead: AtomicBool,
+    /// Сессия librespot: `is_invalid()` становится true, когда соединение
+    /// с сервером закрылось или пропал keep-alive. Это ранний признак того,
+    /// что Connect сейчас отвалится.
+    session: Session,
 }
 
 impl Spotify {
@@ -531,14 +539,14 @@ impl Spotify {
             let _ = SPOTIFY_PCM.set(playback_pcm);
         }
         let cache_dir = cfg.cache_dir.clone().unwrap_or_default();
-        // /data на колонке — около 90 МБ. 64 МБ кэша вместе с двумя
-        // релизами и резервными копиями занимали весь раздел; 16 МБ
+        // /data на колонке — около 90 МБ. Два релиза и резервные копии
+        // занимают больше половины, поэтому кэш ограничен 8 МБ: этого
         // хватает на несколько минут вперёд, остальное evict-ится.
         let cache = Cache::new(
             Some(cache_dir.as_path()),
             Some(cache_dir.as_path()),
             Some(cache_dir.join("files").as_path()),
-            Some(16 * 1024 * 1024),
+            Some(8 * 1024 * 1024),
         )
         .context("Spotify: кэш")?;
         let cached = cache.credentials();
@@ -611,6 +619,7 @@ impl Spotify {
         let spirc = Arc::new(spirc);
         let state = Arc::new(Mutex::new(PlaybackState::default()));
         let username = api_session.username();
+        let session_health = api_session.clone();
         let api = Api::new(
             api_session,
             cfg,
@@ -635,6 +644,8 @@ impl Spotify {
             duck_depth: Arc::new(Mutex::new(0)),
             saved: Arc::new(Mutex::new(saved)),
             saved_path,
+            dead: AtomicBool::new(false),
+            session: session_health,
         });
         // События плеера: название, позиция, длительность.
         let mut events = player.get_player_event_channel();
@@ -707,9 +718,9 @@ impl Spotify {
         // Активация идёт в той же очереди команд, поэтому Load выполнится
         // уже на активном устройстве.
         self.clear_duck();
-        self.spirc.activate()?;
-        self.spirc.load(req)?;
-        self.spirc.play()?;
+        self.spirc.activate().map_err(|e| self.spirc_err(e))?;
+        self.spirc.load(req).map_err(|e| self.spirc_err(e))?;
+        self.spirc.play().map_err(|e| self.spirc_err(e))?;
         Ok(())
     }
 
@@ -747,6 +758,21 @@ impl Spotify {
         let v = self.saved_volume.load(Ordering::Relaxed);
         self.mixer.set_volume(v);
     }
+
+    /// Ошибка команды Spirc. «channel closed» означает, что задача Connect
+    /// завершилась (обрыв сети, `unexpected shutdown`), и сессия уже мертва:
+    /// помечаем модуль, чтобы сторож перезапустил его.
+    fn spirc_err(&self, e: librespot::core::Error) -> petrovich_core::Error {
+        if format!("{e}").contains("channel closed") {
+            self.dead.store(true, Ordering::Relaxed);
+        }
+        core_err(e.into())
+    }
+
+    /// Сессия Connect умерла и требует перезапуска.
+    pub fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Relaxed) || self.session.is_invalid()
+    }
 }
 
 #[async_trait::async_trait]
@@ -759,8 +785,8 @@ impl MusicControl for Spotify {
             )));
         }
         self.clear_duck();
-        self.spirc.activate().map_err(|e| core_err(e.into()))?;
-        self.spirc.play().map_err(|e| core_err(e.into()))
+        self.spirc.activate().map_err(|e| self.spirc_err(e))?;
+        self.spirc.play().map_err(|e| self.spirc_err(e))
     }
 
     async fn resume_checked(&self) -> petrovich_core::Result<()> {
@@ -774,8 +800,8 @@ impl MusicControl for Spotify {
             return Ok(());
         }
         self.clear_duck();
-        self.spirc.activate().map_err(|e| core_err(e.into()))?;
-        self.spirc.play().map_err(|e| core_err(e.into()))?;
+        self.spirc.activate().map_err(|e| self.spirc_err(e))?;
+        self.spirc.play().map_err(|e| self.spirc_err(e))?;
         self.wait_started(&before).await.map_err(core_err)
     }
 
@@ -808,7 +834,7 @@ impl MusicControl for Spotify {
     }
 
     fn pause(&self) -> petrovich_core::Result<()> {
-        self.spirc.pause().map_err(|e| core_err(e.into()))?;
+        self.spirc.pause().map_err(|e| self.spirc_err(e))?;
         self.save_session();
         Ok(())
     }
@@ -832,13 +858,13 @@ impl MusicControl for Spotify {
             }
             self.load_uri(&item, 0).map_err(core_err)?;
         } else {
-            self.spirc.next().map_err(|e| core_err(e.into()))?;
+            self.spirc.next().map_err(|e| self.spirc_err(e))?;
         }
         Ok(())
     }
 
     fn previous(&self) -> petrovich_core::Result<()> {
-        self.spirc.prev().map_err(|e| core_err(e.into()))
+        self.spirc.prev().map_err(|e| self.spirc_err(e))
     }
 
     fn status(&self) -> petrovich_core::Result<String> {
@@ -869,7 +895,7 @@ impl MusicControl for Spotify {
         let target = (cur + delta_ms).max(0) as u32;
         self.spirc
             .set_position_ms(target)
-            .map_err(|e| core_err(e.into()))?;
+            .map_err(|e| self.spirc_err(e))?;
         if let Ok(mut st) = self.state.lock() {
             st.position_ms = u64::from(target);
         }
@@ -881,7 +907,7 @@ impl MusicControl for Spotify {
         let target = position_ms.min(u64::from(u32::MAX)) as u32;
         self.spirc
             .set_position_ms(target)
-            .map_err(|e| core_err(e.into()))?;
+            .map_err(|e| self.spirc_err(e))?;
         if let Ok(mut st) = self.state.lock() {
             st.position_ms = u64::from(target);
         }
@@ -981,11 +1007,14 @@ impl MusicControl for Spotify {
     }
 }
 
-/// Запускает Spotify и, если первая попытка не удалась, повторяет её в фоне.
+/// Запускает Spotify и держит сессию живой.
 ///
 /// На холодном старте демон может опередить hysteria2: SOCKS5 на 1080 ещё не
 /// слушает, librespot получает `unexpected EOF while tunnel reading`, и без
 /// повтора Spotify остаётся выключенным до следующего перезапуска демона.
+/// После успешного старта сессию сторожит [`spawn_supervisor`]: обрыв сети
+/// завершает задачу Connect, и без перезапуска все команды возвращают
+/// `channel closed` до перезапуска демона.
 pub async fn start_resilient(
     cfg: SpotifyConfig,
     secrets: Secrets,
@@ -993,6 +1022,9 @@ pub async fn start_resilient(
     saved_path: Option<std::path::PathBuf>,
     tavily_key: String,
 ) -> Option<Arc<dyn MusicControl>> {
+    let slot = DeferredMusic::new(
+        "Spotify: подключение ещё не готово, прокси не отвечает. Повторите через полминуты.",
+    );
     match Spotify::start(
         &cfg,
         &secrets,
@@ -1004,14 +1036,21 @@ pub async fn start_resilient(
     {
         Ok(Some(spotify)) => {
             tracing::info!("Spotify Connect: «{}»", cfg.device_name);
-            return Some(spotify);
+            slot.install(spotify.clone());
+            spawn_supervisor(
+                slot.clone(),
+                spotify,
+                cfg,
+                secrets,
+                playback_pcm,
+                saved_path,
+                tavily_key,
+            );
+            return Some(slot);
         }
         Ok(None) => return None,
         Err(e) => tracing::warn!("Spotify недоступен: {e:#}; повторяю в фоне"),
     }
-    let slot = DeferredMusic::new(
-        "Spotify: подключение ещё не готово, прокси не отвечает. Повторите через полминуты.",
-    );
     let retry = slot.clone();
     let name = cfg.device_name.clone();
     tokio::spawn(async move {
@@ -1028,8 +1067,17 @@ pub async fn start_resilient(
             .await
             {
                 Ok(Some(spotify)) => {
-                    retry.install(spotify);
+                    retry.install(spotify.clone());
                     tracing::info!("Spotify Connect: «{name}» подключён после повтора");
+                    spawn_supervisor(
+                        retry.clone(),
+                        spotify,
+                        cfg.clone(),
+                        secrets.clone(),
+                        playback_pcm.clone(),
+                        saved_path.clone(),
+                        tavily_key.clone(),
+                    );
                     return;
                 }
                 Ok(None) => {
@@ -1047,6 +1095,68 @@ pub async fn start_resilient(
         }
     });
     Some(slot)
+}
+
+/// Как часто проверять, жива ли сессия Connect.
+const SUPERVISE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Сторож сессии Connect.
+///
+/// librespot завершает задачу Spirc при обрыве сети (`unexpected shutdown`),
+/// после чего канал команд закрыт и любая команда возвращает `channel closed`.
+/// Раньше Spotify в этом состоянии молчал до перезапуска демона — так он и
+/// простоял 17 часов. Сторож замечает мёртвую сессию и поднимает модуль
+/// заново; последний трек и позиция восстанавливаются из `spotify.json`.
+fn spawn_supervisor(
+    slot: Arc<DeferredMusic>,
+    first: Arc<Spotify>,
+    cfg: SpotifyConfig,
+    secrets: Secrets,
+    playback_pcm: String,
+    saved_path: Option<std::path::PathBuf>,
+    tavily_key: String,
+) {
+    tokio::spawn(async move {
+        let mut current = first;
+        loop {
+            tokio::time::sleep(SUPERVISE_INTERVAL).await;
+            if !current.is_dead() {
+                continue;
+            }
+            tracing::warn!("Spotify: сессия Connect умерла, переподключаюсь");
+            let mut delay = Duration::from_secs(5);
+            loop {
+                match Spotify::start(
+                    &cfg,
+                    &secrets,
+                    playback_pcm.clone(),
+                    saved_path.clone(),
+                    tavily_key.clone(),
+                )
+                .await
+                {
+                    Ok(Some(spotify)) => {
+                        slot.install(spotify.clone());
+                        tracing::info!("Spotify Connect: «{}» переподключён", cfg.device_name);
+                        current = spotify;
+                        break;
+                    }
+                    Ok(None) => {
+                        tracing::warn!("Spotify: учётные данные пропали, сторож остановлен");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Spotify: переподключение не удалось: {e:#}; следующий через {} с",
+                            delay.as_secs()
+                        );
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(60));
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn save_snapshot(

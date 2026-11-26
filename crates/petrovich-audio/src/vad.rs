@@ -563,9 +563,7 @@ mod tests {
     /// уходит в бесконечные пустые распознавания.
     #[test]
     fn intermittent_noise_does_not_hold_the_phrase() {
-        let mut v = Vad::new(
-            16_000, 100, 1_200, 800, 800, 600, 12_000, 6.0, 0, -62.0,
-        );
+        let mut v = Vad::new(16_000, 100, 1_200, 800, 800, 600, 12_000, 6.0, 0, -62.0);
         let mut seed = 19;
         v.observe_background(&noise(32_000, 0.0025, &mut seed));
         v.arm_activation_boost();

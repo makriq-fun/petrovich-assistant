@@ -134,8 +134,8 @@ personal/non-commercial использования; не добавляйте и
 |---|---|---|
 | `follow_up_ms` | `5000` | ожидание уточнения после ответа |
 | `listen_timeout_ms` | `10000` | ожидание речи после активации |
-| `history_turns` | `8` | ходов в истории |
-| `history_chars` | `12000` | символов в истории |
+| `history_turns` | `6` | ходов в истории |
+| `history_chars` | `6000` | символов в истории |
 | `history_ttl_s` | `900` | простой до очистки |
 | `barge_in` | `true` | слово активации или кнопка прерывает ответ |
 | `barge_in_voice` | `false` | перебивание голосом; включать только с рабочим AEC |
@@ -289,7 +289,7 @@ Nightscout; для публичного чтения токен не нужен.
 | `client_id` | `""` | резервный client id, если нет токена Connect-сессии |
 | `client_secret_env` | `PETROVICH_SPOTIFY_CLIENT_SECRET` | секрет резервного client id |
 | `market` | `RU` | рынок поиска |
-| `cache_dir` | `<state_dir>/spotify` | кэш librespot, предел 16 МБ |
+| `cache_dir` | `<state_dir>/spotify` | кэш librespot, предел 8 МБ |
 | `bitrate` | `160` | 96, 160 или 320 кбит/с |
 | `search_limit` | `10` | результатов на тип поиска |
 

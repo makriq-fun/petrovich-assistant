@@ -112,6 +112,9 @@ pub async fn run_turn(
     // Одинаковые вызовы в одном ходе не выполняем повторно: модель этим
     // забивает лимит раундов и обрывает ответ.
     let mut seen_calls = std::collections::HashSet::new();
+    // Дословно повторённую фразу не озвучиваем второй раз: модель любит
+    // пересказать уже сказанное, и пользователь слышит ответ дважды.
+    let mut spoken_keys = std::collections::HashSet::new();
     // Музыка приглушается только когда ассистент действительно начинает
     // говорить, и возвращается после ответа, ошибки или отмены.
     let mut duck: Option<petrovich_tools::MusicDuck> = None;
@@ -156,6 +159,10 @@ pub async fn run_turn(
                             let mut sentences = Vec::new();
                             chunker.push(&t, &mut sentences);
                             for s in sentences {
+                                if is_filler_tail(&s) || !spoken_keys.insert(dedup_key(&s)) {
+                                    tracing::debug!("фраза пропущена: {s}");
+                                    continue;
+                                }
                                 if duck.is_none() {
                                     duck = Some(ctx.tools.duck_music());
                                 }
@@ -202,33 +209,37 @@ pub async fn run_turn(
             }
         }
         if let Some(s) = chunker.flush() {
-            if duck.is_none() {
-                duck = Some(ctx.tools.duck_music());
+            if !is_filler_tail(&s) && spoken_keys.insert(dedup_key(&s)) {
+                if duck.is_none() {
+                    duck = Some(ctx.tools.duck_music());
+                }
+                let d = speak_sentence(ctx, &s).await?;
+                audio_total += d;
+                if !d.is_zero() {
+                    audio_started.get_or_insert_with(tokio::time::Instant::now);
+                }
+                spoken.push_str(&s);
+                spoken.push(' ');
+                round_spoken.push_str(&s);
+                round_spoken.push(' ');
             }
-            let d = speak_sentence(ctx, &s).await?;
-            audio_total += d;
-            if !d.is_zero() {
-                audio_started.get_or_insert_with(tokio::time::Instant::now);
-            }
-            spoken.push_str(&s);
-            spoken.push(' ');
-            round_spoken.push_str(&s);
-            round_spoken.push(' ');
         }
         if chunker.code_seen() && !round_spoken.contains("Код не пишу.") {
             let refusal = "Код не пишу.";
-            if duck.is_none() {
-                duck = Some(ctx.tools.duck_music());
+            if spoken_keys.insert(dedup_key(refusal)) {
+                if duck.is_none() {
+                    duck = Some(ctx.tools.duck_music());
+                }
+                let d = speak_sentence(ctx, refusal).await?;
+                audio_total += d;
+                if !d.is_zero() {
+                    audio_started.get_or_insert_with(tokio::time::Instant::now);
+                }
+                spoken.push_str(refusal);
+                spoken.push(' ');
+                round_spoken.push_str(refusal);
+                round_spoken.push(' ');
             }
-            let d = speak_sentence(ctx, refusal).await?;
-            audio_total += d;
-            if !d.is_zero() {
-                audio_started.get_or_insert_with(tokio::time::Instant::now);
-            }
-            spoken.push_str(refusal);
-            spoken.push(' ');
-            round_spoken.push_str(refusal);
-            round_spoken.push(' ');
         }
         match calls {
             Some(calls) if !calls.is_empty() => {
@@ -433,7 +444,10 @@ fn normalize_tool_call(raw_name: &str, raw_args: Value) -> Option<(String, Value
 /// модели и память колонки; старые результаты заменяются заглушкой, свежие
 /// остаются целиком.
 fn trim_tool_history(messages: &mut [ChatMessage]) {
-    const MAX_TOOL_CHARS: usize = 24_000;
+    // Русский текст — примерно два символа на токен, а у Groq лимит 8 000
+    // токенов в минуту на весь запрос. 24 000 символов результатов одни
+    // занимали всю квоту, и следующий раунд падал с 429.
+    const MAX_TOOL_CHARS: usize = 8_000;
     let mut total: usize = messages
         .iter()
         .filter(|m| m.role == Role::Tool)
@@ -624,6 +638,67 @@ async fn stream_audio_capture(
     Ok((format, total, captured, rate, ch as u16))
 }
 
+/// Ключ для отсева дословных повторов: без регистра, пунктуации и лишних
+/// пробелов. Модель повторяет уже сказанную фразу слово в слово, и второй
+/// раз это только раздражает.
+fn dedup_key(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            // «ещё» и «еще» — одно и то же слово.
+            'ё' => 'е',
+            c if c.is_alphanumeric() => c,
+            _ => ' ',
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Расстояние Левенштейна для коротких слов: нужно только сравнить
+/// распознанное имя с «петрович».
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Хвост-приглашение в конце ответа: «Что дальше, Макс?», «Чем помочь?».
+/// Модель приклеивает его почти к каждому ответу, и это раздражает сильнее
+/// любой ошибки. Фраза не несёт смысла, поэтому выкидываем её целиком.
+fn is_filler_tail(text: &str) -> bool {
+    let key = dedup_key(text);
+    let words: Vec<&str> = key.split_whitespace().collect();
+    if words.is_empty() || words.len() > 4 {
+        return false;
+    }
+    const TAILS: &[&str] = &[
+        "что дальше",
+        "чем помочь",
+        "чем еще помочь",
+        "что еще",
+        "куда дальше",
+        "продолжим",
+        "есть еще вопросы",
+        "обращайтесь",
+    ];
+    TAILS.iter().any(|tail| {
+        let tw: Vec<&str> = tail.split_whitespace().collect();
+        words.len() >= tw.len() && words[..tw.len()] == tw[..] && words.len() - tw.len() <= 1
+    })
+}
+
 /// Убирает обращение «Петрович» в начале распознанной фразы. STT часто
 /// добавляет перед именем «эй» или «слушай» — их тоже убираем, но только
 /// если следом действительно идёт имя.
@@ -637,7 +712,20 @@ pub fn strip_wake_word(text: &str) -> String {
         w.trim_matches(|c: char| !c.is_alphanumeric())
             .to_lowercase()
     };
-    let is_wake = |w: &str| matches!(clean(w).as_str(), "петрович" | "petrovich");
+    let is_wake = |w: &str| {
+        let c = clean(w);
+        if matches!(c.as_str(), "петрович" | "petrovich") {
+            return true;
+        }
+        // STT перевирает имя: «Петмович», «Петровитч». Без этого оно уходило
+        // в модель как запрос, и ассистент отвечал на собственное имя.
+        // Две правки — ещё имя; «петровна» отсекается по окончанию.
+        let n = c.chars().count();
+        (6..=10).contains(&n)
+            && c.starts_with("пет")
+            && (c.ends_with("ич") || c.ends_with("тч"))
+            && edit_distance(&c, "петрович") <= 2
+    };
     let mut found = None;
     for (i, w) in words.iter().take(3).enumerate() {
         if is_wake(w) {
@@ -734,8 +822,42 @@ mod tests {
         );
         assert_eq!(strip_wake_word("Слушай, Петрович: громче"), "громче");
         assert_eq!(strip_wake_word("слушай музыку"), "слушай музыку");
+        // STT перевирает имя: без среза оно уходило в модель как запрос.
+        assert_eq!(strip_wake_word("Петмович"), "");
+        assert_eq!(strip_wake_word("Петровитч, который час?"), "который час?");
+        assert_eq!(strip_wake_word("петровна"), "петровна");
         assert!(is_stt_artifact("Продолжение следует..."));
         assert!(!is_stt_artifact("Какая сегодня погода?"));
+    }
+
+    #[test]
+    fn dedup_key_ignores_case_and_punctuation() {
+        assert_eq!(
+            dedup_key("Ошибка: внутренний сбой Spotify!"),
+            dedup_key("ошибка внутренний сбой spotify")
+        );
+        assert_ne!(dedup_key("Уже играет."), dedup_key("Уже поставил."));
+    }
+
+    #[test]
+    fn drops_invitation_tails() {
+        for s in [
+            "Что дальше?",
+            "Что дальше, Макс?",
+            "Чем помочь?",
+            "Что ещё?",
+            "Куда дальше?",
+            "Продолжим?",
+        ] {
+            assert!(is_filler_tail(s), "{s}");
+        }
+        for s in [
+            "Уже играет.",
+            "Что дальше делать с этим списком?",
+            "Включил любимые треки.",
+        ] {
+            assert!(!is_filler_tail(s), "{s}");
+        }
     }
 
     #[test]

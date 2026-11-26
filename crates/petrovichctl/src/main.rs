@@ -139,8 +139,7 @@ enum SmartHomeCmd {
     Logout,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     let loaded = Config::load(&cli.config).map_err(|e| anyhow::anyhow!("{e}"))?;
     if matches!(
@@ -169,11 +168,15 @@ async fn main() -> Result<()> {
         Cmd::WeatherTest => weather_test(&loaded),
         Cmd::SugarTest { hours } => sugar_test(&loaded, hours),
         Cmd::ComputerTest { wake } => computer_test(&loaded, wake),
-        Cmd::BluetoothTest { action } => bluetooth_test(&action).await,
+        Cmd::BluetoothTest { action } => {
+            tokio::runtime::Runtime::new()?.block_on(bluetooth_test(&action))
+        }
         Cmd::SearchTest { query } => search_test(&loaded, &query),
         Cmd::FetchTest { url, proxy } => fetch_test(&loaded, &url, proxy.as_deref()),
         Cmd::LightTest => light_test(&loaded),
-        Cmd::SmartHome { cmd } => smart_home(&loaded, cmd).await,
+        Cmd::SmartHome { cmd } => {
+            tokio::runtime::Runtime::new()?.block_on(smart_home(&loaded, cmd))
+        }
     }
 }
 
