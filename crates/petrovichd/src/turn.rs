@@ -115,6 +115,9 @@ pub async fn run_turn(
     // Дословно повторённую фразу не озвучиваем второй раз: модель любит
     // пересказать уже сказанное, и пользователь слышит ответ дважды.
     let mut spoken_keys = std::collections::HashSet::new();
+    // Последний отброшенный хвост-приглашение. Если весь ответ — только он,
+    // лучше озвучить его, чем сказать «не понял».
+    let mut dropped_tail: Option<String> = None;
     // Музыка приглушается только когда ассистент действительно начинает
     // говорить, и возвращается после ответа, ошибки или отмены.
     let mut duck: Option<petrovich_tools::MusicDuck> = None;
@@ -159,8 +162,13 @@ pub async fn run_turn(
                             let mut sentences = Vec::new();
                             chunker.push(&t, &mut sentences);
                             for s in sentences {
-                                if is_filler_tail(&s) || !spoken_keys.insert(dedup_key(&s)) {
-                                    tracing::debug!("фраза пропущена: {s}");
+                                if is_filler_tail(&s) {
+                                    tracing::debug!("хвост отброшен: {s}");
+                                    dropped_tail = Some(s);
+                                    continue;
+                                }
+                                if !spoken_keys.insert(dedup_key(&s)) {
+                                    tracing::debug!("повтор фразы пропущен: {s}");
                                     continue;
                                 }
                                 if duck.is_none() {
@@ -209,7 +217,9 @@ pub async fn run_turn(
             }
         }
         if let Some(s) = chunker.flush() {
-            if !is_filler_tail(&s) && spoken_keys.insert(dedup_key(&s)) {
+            if is_filler_tail(&s) {
+                dropped_tail = Some(s);
+            } else if spoken_keys.insert(dedup_key(&s)) {
                 if duck.is_none() {
                     duck = Some(ctx.tools.duck_music());
                 }
@@ -343,6 +353,21 @@ pub async fn run_turn(
                 }
                 break;
             }
+        }
+    }
+    // Модель ответила только хвостом-приглашением. Молчать и говорить
+    // «не понял» тут хуже, чем озвучить то, что она сказала.
+    if spoken.trim().is_empty() {
+        if let Some(tail) = dropped_tail.take() {
+            let _duck = ctx.tools.duck_music();
+            let d = speak_sentence(ctx, &tail).await?;
+            audio_total += d;
+            if !d.is_zero() {
+                audio_started.get_or_insert_with(tokio::time::Instant::now);
+            }
+            spoken.push_str(&tail);
+            spoken.push(' ');
+            final_text = Some(tail);
         }
     }
     if let Some(text) = final_text {
